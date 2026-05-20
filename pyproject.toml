@@ -1,13 +1,23 @@
 [project]
-name = "sovereign-sdk"
+name = "sovereign-sdk-workspace"
 version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
-requires-python = ">=3.11"
-dependencies = []
+description = "Monorepo workspace for Sovereign System components"
+requires-python = ">=3.12"
+authors = [
+    { name = "kenwalger", email = "kenalger@comcast.net" }
+]
+
 
 [tool.uv.workspace]
-members = [
-    "packages/sovereign-core",
-    "packages/sovereign-runtime",
+members = ["packages/*"]
+
+[tool.uv]
+dev-dependencies = [
+    "sovereign-core",
+    "sovereign-runtime",
 ]
+
+# This block tells uv to resolve these dev-dependencies locally
+[tool.uv.sources]
+sovereign-core = { workspace = true }
+sovereign-runtime = { workspace = true }
