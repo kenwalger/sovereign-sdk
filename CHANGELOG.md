@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-05-21
+
+### Fixed
+
+- **Greenfield Key Generation — Descriptor-Level `os.fchmod` Permission
+  Tracking** (`crypto.py` — `load_or_generate_keypair`): Eliminated path-based
+  TOCTOU race windows during greenfield key generation by upgrading file
+  permission tracking to descriptor-level `os.fchmod` actions.  The previous
+  `os.chmod(tmp_path, 0o600)` call resolved the temp file through the filesystem
+  namespace, leaving a window between path resolution and permission application
+  where a symlink substitution or concurrent rename could redirect the chmod to
+  an unintended target.  On POSIX hosts the block now calls
+  `os.fchmod(tmp_file.fileno(), 0o600)`, operating directly on the open file
+  descriptor and bypassing the filesystem namespace entirely.  On Windows, where
+  `os.fchmod` is unavailable, `os.chmod(tmp_path, 0o600)` is retained as a
+  portable fallback via `hasattr(os, "fchmod")`.
+
+- **Greenfield Key Generation — Native Buffered Stream Write** (`crypto.py` —
+  `load_or_generate_keypair`): Streamlined filesystem I/O operations by
+  substituting low-level raw `os.write` tracking with native
+  `NamedTemporaryFile` buffered streaming blocks.  The previous manual
+  `while remaining_bytes` loop called `os.write` directly on the file
+  descriptor, mixing raw syscall-level I/O with a high-level `NamedTemporaryFile`
+  object and creating a layered buffering mismatch where Python's internal stream
+  buffer and the raw write path could diverge.  The block now calls
+  `tmp_file.write(pem_bytes)` directly on the `NamedTemporaryFile` instance;
+  Python's buffered I/O layer handles short-write recovery internally, and the
+  subsequent `tmp_file.flush()` drains the stream buffer to the kernel before
+  `os.fsync` commits it to physical storage.
+
 ## [0.5.6] - 2026-05-21
 
 ### Fixed

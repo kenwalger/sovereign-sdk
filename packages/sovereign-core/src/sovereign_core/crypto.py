@@ -217,15 +217,11 @@ class SovereignKeyManager:
                     delete=False,
                 ) as tmp_file:
                     tmp_path = tmp_file.name
-                    os.chmod(tmp_path, 0o600)
-                    remaining_bytes = pem_bytes
-                    while remaining_bytes:
-                        written = os.write(tmp_file.fileno(), remaining_bytes)
-                        if written == 0:
-                            raise RuntimeError(
-                                "Disk full or broken pipe encountered during private key serialization."
-                            )
-                        remaining_bytes = remaining_bytes[written:]
+                    if hasattr(os, "fchmod"):
+                        os.fchmod(tmp_file.fileno(), 0o600)
+                    else:
+                        os.chmod(tmp_path, 0o600)
+                    tmp_file.write(pem_bytes)
                     tmp_file.flush()
                     os.fsync(tmp_file.fileno())
                 os.replace(tmp_path, self.private_key_path)
