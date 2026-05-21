@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-05-21
+
+### Fixed
+
+- **Pipeline Happy-Path Audit Gap** (`__main__.py` — `execute_runtime_node`):
+  `_audit_receipt` was only reachable through the retry branch, meaning the
+  first successful `"download"` dispatch advanced to Step 2 without any
+  cryptographic seal or `execution_success` check.  The call has been moved
+  outside the retry `if` block so it executes unconditionally on whichever
+  receipt — original or recovery — is carried forward.  The documentation
+  invariant ("every receipt is audited before the pipeline advances") now
+  holds on every code path.
+
+### Security
+
+- **Phantom Field Closure — `payload_hash` Explicit Equality Assertion**
+  (`crypto.py` — `verify_receipt`): `verify_receipt` reconstructed the
+  canonical signing manifest using a locally re-derived `payload_hash` rather
+  than the value stored in `receipt["payload_hash"]`.  This allowed an
+  adversary to replace the stored hash with any arbitrary string; the
+  signature check would still pass because the manifest was built from the
+  correct re-derived value.  The method now derives `expected_payload_hash`
+  and immediately returns `False` when it does not match
+  `receipt["payload_hash"]` byte-for-byte, before any Ed25519 operation is
+  attempted.  The canonical manifest in Step 2 is then built from
+  `receipt["payload_hash"]`, which has been confirmed to be consistent with
+  the original payload.
+
 ## [0.5.0] - 2026-05-21
 
 ### Added

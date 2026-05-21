@@ -21,7 +21,11 @@ class ForensicReceipt(TypedDict):
     Attributes:
         timestamp: ISO 8601 UTC timestamp captured at receipt-minting time.
         payload_hash: Hex-encoded SHA-256 digest of the deterministically
-            serialised execution payload.
+            serialised execution payload.  During verification this value is
+            explicitly cross-checked against a fresh digest re-derived from the
+            original payload; a mismatch causes
+            :meth:`SovereignKeyManager.verify_receipt` to return ``False``
+            before the signature check is even attempted.
         public_key: Base64-encoded raw Ed25519 public key bytes used to
             produce and verify ``signature``.
         signature: Base64-encoded raw Ed25519 signature over the canonical
@@ -262,39 +266,57 @@ class SovereignKeyManager:
     def verify_receipt(receipt: ForensicReceipt, original_payload: dict[str, Any]) -> bool:
         """Verifies the cryptographic integrity of a ForensicReceipt against the original payload.
 
-        Reconstructs the exact canonical manifest that was assembled at minting
-        time — using the receipt's ``timestamp`` and ``metadata`` fields together
-        with a freshly re-derived ``payload_hash`` — then verifies the receipt's
-        Ed25519 ``signature`` against that manifest.
+        Verification proceeds in two sequential, independent steps:
 
-        Any post-issuance mutation of any envelope field (``metadata``,
-        ``timestamp``, or ``payload_hash``) causes signature verification to raise
-        ``InvalidSignature`` internally, and this method returns ``False``.
+        1. **Explicit payload-hash assertion**: The SHA-256 digest of
+           ``original_payload`` is re-derived and compared byte-for-byte against
+           ``receipt["payload_hash"]``.  A mismatch returns ``False`` immediately,
+           before any signature operation is attempted.  This step closes the
+           *phantom field* attack vector where an adversary mutates the stored
+           ``payload_hash`` string without affecting the signature (which the
+           previous implementation would miss).
+
+        2. **Signature verification**: The canonical manifest
+           ``{"metadata": …, "payload_hash": …, "timestamp": …}`` is
+           reconstructed using ``receipt["payload_hash"]`` (now confirmed
+           consistent with ``original_payload``) and verified against the
+           Ed25519 ``signature`` embedded in the envelope.  Any remaining
+           mutation of ``metadata`` or ``timestamp`` is caught here.
 
         Args:
             receipt: The :class:`ForensicReceipt` envelope to audit.
             original_payload: The exact payload dictionary passed to
                 :meth:`generate_receipt`.  Its SHA-256 digest is re-derived
-                internally; the caller must not pre-hash it.
+                internally and compared against ``receipt["payload_hash"]``;
+                the caller must not pre-hash it.
 
         Returns:
-            ``True`` if the receipt's signature is cryptographically valid for the
-            given payload and the envelope is unmodified; ``False`` for any
-            verification or decoding failure.
+            ``True`` if and only if the re-derived payload hash matches
+            ``receipt["payload_hash"]`` exactly **and** the Ed25519 signature
+            is valid for the reconstructed manifest.  ``False`` for any hash
+            mismatch, signature failure, or decoding error.
         """
         try:
             public_bytes = base64.b64decode(receipt["public_key"])
             signature_bytes = base64.b64decode(receipt["signature"])
             public_key = ed25519.Ed25519PublicKey.from_public_bytes(public_bytes)
 
-            # Re-derive payload_hash from the original payload using the same algorithm
+            # Step 1 — explicit payload-hash assertion (phantom field guard).
+            # Re-derive the expected hash and reject immediately if it does not
+            # match the value stored in the envelope.  Without this check a
+            # mutated receipt["payload_hash"] would pass undetected because the
+            # signature verification below uses the re-derived value, not the
+            # stored one.
             serialized_payload = json.dumps(original_payload, sort_keys=True, default=str)
-            payload_hash = hashlib.sha256(serialized_payload.encode("utf-8")).hexdigest()
+            expected_payload_hash = hashlib.sha256(serialized_payload.encode("utf-8")).hexdigest()
+            if expected_payload_hash != receipt["payload_hash"]:
+                return False
 
-            # Reconstruct the exact canonical manifest that was signed
+            # Step 2 — reconstruct the canonical manifest and verify the signature.
+            # receipt["payload_hash"] is now confirmed to match original_payload.
             manifest = {
                 "metadata": receipt["metadata"],
-                "payload_hash": payload_hash,
+                "payload_hash": receipt["payload_hash"],
                 "timestamp": receipt["timestamp"],
             }
             canonical = json.dumps(manifest, sort_keys=True, default=str)

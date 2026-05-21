@@ -141,7 +141,7 @@ async def execute_runtime_node(tool: str, resource_id: str, session_id: str) -> 
     if tool == "pipeline":
         click.echo(f"🔄 Executing stateful pipeline under session: {session_id}...")
 
-        # Step 1: First Attempt
+        # Step 1: Download (with one automatic recovery retry on transient failure)
         receipt_1, payload_1 = await router.dispatch("download", {"resource_id": resource_id}, session)
         click.echo(
             f"\n🔒 Attempt 1 [download] Completed (Index: {receipt_1['payload_hash'][:8]}... Depth: {session.execution_depth - 1})")
@@ -152,7 +152,8 @@ async def execute_runtime_node(tool: str, resource_id: str, session_id: str) -> 
             receipt_1, payload_1 = await router.dispatch("download", {"resource_id": resource_id}, session)
             click.echo(f"🔒 Attempt 2 [download Recovery] Completed (Depth: {session.execution_depth - 1})")
             click.echo(json.dumps(receipt_1, indent=2))
-            _audit_receipt(receipt_1, payload_1, "download recovery")
+
+        _audit_receipt(receipt_1, payload_1, "download")
 
         # Step 2: Analyze
         click.echo("\n🔄 Advancing to Step 2 [analyze]...")
