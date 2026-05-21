@@ -23,6 +23,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   silently.  If both attempts fail, a `RuntimeError` is raised with explicit
   rotation guidance rather than exposing the raw library exception.
 
+### Security
+
+- **Key Self-Attestation Forgery Elimination** (`crypto.py` —
+  `verify_receipt`; `router.py` — `dispatch`; `__main__.py` —
+  `_audit_receipt`): `verify_receipt` previously accepted any receipt whose
+  Ed25519 signature was internally valid, including receipts minted by a rogue
+  keypair that embedded its own public key.  The method now accepts an optional
+  `expected_public_key` parameter; when supplied, the receipt's embedded
+  `public_key` field is compared against it before any cryptographic operation
+  is attempted.  The router passes `self.key_manager.public_key` at every
+  post-mint defense check and `_audit_receipt` performs an additional explicit
+  string comparison, emitting a distinct fraud-alert message to `stderr` to
+  distinguish identity-forgery from general seal tampering.
+
+- **Atomic Legacy Key Migration** (`crypto.py` — `load_or_generate_keypair`):
+  The previous migration path opened `sovereign_identity.pem` directly with
+  `open(..., "wb")`, truncating the only copy of the unencrypted key before the
+  encrypted replacement was ready.  A crash between truncation and the final
+  write left the node with an empty PEM and no recovery path.  The rewrite now
+  stages the encrypted PEM to a temporary file in the same directory (guaranteeing
+  same-filesystem atomicity), applies `os.chmod(0o600)` before writing any bytes,
+  then promotes the temp file over the original via `os.replace()`.  A `finally`
+  block removes the temp file on any failure path so no partial material is left
+  on disk.
+
 ## [0.5.1] - 2026-05-21
 
 ### Fixed

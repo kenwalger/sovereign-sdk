@@ -75,32 +75,54 @@ async def analyze_stored_data(ctx: SessionContext, args: Dict[str, Any]) -> Dict
     return {"status": "ANALYZED", "bytes_processed": len(cached_data)}
 
 
-def _audit_receipt(receipt: ForensicReceipt, payload: Dict[str, Any], label: str) -> None:
+def _audit_receipt(
+    receipt: ForensicReceipt,
+    payload: Dict[str, Any],
+    label: str,
+    expected_public_key: str,
+) -> None:
     """Cryptographically audits a ForensicReceipt and aborts the process on any failure.
 
-    Performs two sequential checks:
+    Performs three sequential checks, failing fast at the earliest possible gate:
 
-    1. :meth:`~sovereign_core.crypto.SovereignKeyManager.verify_receipt` —
-       confirms the Ed25519 signature covers the current envelope contents; a
-       ``False`` result indicates post-issuance tampering.
-    2. ``metadata["execution_success"]`` — confirms the underlying tool
+    1. **Key-pin assertion**: The base64-encoded public key embedded in the
+       receipt is compared directly against ``expected_public_key``.  A
+       mismatch means a rogue keypair signed the receipt; a fraud alert is
+       printed to ``stderr`` and the process aborts immediately before any
+       cryptographic operation is attempted.
+    2. :meth:`~sovereign_core.crypto.SovereignKeyManager.verify_receipt` —
+       confirms the payload-hash pre-flight assertion and the Ed25519 signature
+       both hold.  Failure indicates post-issuance tampering.
+    3. ``metadata["execution_success"]`` — confirms the underlying tool
        invocation completed without an exception.
 
     Args:
         receipt: The :class:`~sovereign_core.crypto.ForensicReceipt` envelope
             returned by
             :meth:`~sovereign_runtime.router.LocalRuntimeRouter.dispatch`.
-        payload: The execution payload dict returned alongside the receipt by
-            :meth:`~sovereign_runtime.router.LocalRuntimeRouter.dispatch`, used
-            to reconstruct the signed manifest for verification.
+        payload: The execution payload dict returned alongside the receipt,
+            used to reconstruct the signed manifest for verification.
         label: Human-readable identifier for the pipeline step used in error
-            output, e.g. ``"download recovery"`` or ``"analyze"``.
+            output, e.g. ``"download"`` or ``"analyze"``.
+        expected_public_key: Base64-encoded Ed25519 public key string of the
+            trusted node identity.  Pass
+            ``router.key_manager.public_key`` at every call site.  Any receipt
+            whose embedded key differs from this value is treated as an
+            identity-forgery attempt and triggers an immediate abort.
 
     Raises:
-        click.Abort: If signature verification fails or ``execution_success``
-            is ``False``, forcing a non-zero process exit code.
+        click.Abort: On key-pin mismatch (fraud alert), signature or hash
+            verification failure, or ``execution_success`` being ``False``.
+            All cases force a non-zero process exit code.
     """
-    if not SovereignKeyManager.verify_receipt(receipt, payload):
+    if receipt["public_key"] != expected_public_key:
+        click.echo(
+            f"\n🚨 Cryptographic fraud alert for '{label}': the receipt public key does not "
+            "match the trusted node identity. Potential identity forgery detected.",
+            err=True,
+        )
+        raise click.Abort()
+    if not SovereignKeyManager.verify_receipt(receipt, payload, expected_public_key):
         click.echo(f"\n❌ Seal verification failed for '{label}': receipt has been tampered with.", err=True)
         raise click.Abort()
     if not receipt["metadata"].get("execution_success", False):
@@ -153,7 +175,7 @@ async def execute_runtime_node(tool: str, resource_id: str, session_id: str) -> 
             click.echo(f"🔒 Attempt 2 [download Recovery] Completed (Depth: {session.execution_depth - 1})")
             click.echo(json.dumps(receipt_1, indent=2))
 
-        _audit_receipt(receipt_1, payload_1, "download")
+        _audit_receipt(receipt_1, payload_1, "download", router.key_manager.public_key)
 
         # Step 2: Analyze
         click.echo("\n🔄 Advancing to Step 2 [analyze]...")
@@ -161,14 +183,14 @@ async def execute_runtime_node(tool: str, resource_id: str, session_id: str) -> 
         click.echo(
             f"\n🔒 Step 2 [analyze] Completed. Pipeline Forensic Receipt Proof (Depth: {session.execution_depth - 1}):")
         click.echo(json.dumps(receipt_2, indent=2))
-        _audit_receipt(receipt_2, payload_2, "analyze")
+        _audit_receipt(receipt_2, payload_2, "analyze", router.key_manager.public_key)
 
     else:
         click.echo(f"🔄 Dispatching single tool execution: '{tool}'...")
         receipt, payload = await router.dispatch(tool, {"resource_id": resource_id}, session)
         click.echo("\n🔒 Authenticated Forensic Receipt Proof:")
         click.echo(json.dumps(receipt, indent=2))
-        _audit_receipt(receipt, payload, tool)
+        _audit_receipt(receipt, payload, tool, router.key_manager.public_key)
 
 
 @click.command()

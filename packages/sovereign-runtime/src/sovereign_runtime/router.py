@@ -135,8 +135,12 @@ class LocalRuntimeRouter:
             }
         )
 
-        # 4. Defense-in-depth: confirm the seal is valid before returning
-        if not SovereignKeyManager.verify_receipt(receipt, execution_payload):
+        # 4. Defense-in-depth: confirm the seal is valid before returning.
+        # Pass the manager's pinned public key so a rogue receipt signed by a
+        # different keypair is rejected even if its signature is internally valid.
+        if not SovereignKeyManager.verify_receipt(
+            receipt, execution_payload, self.key_manager.public_key
+        ):
             raise RuntimeError(
                 f"Receipt seal verification failed immediately after minting "
                 f"(tool='{tool_name}', depth={assigned_receipt_index})."

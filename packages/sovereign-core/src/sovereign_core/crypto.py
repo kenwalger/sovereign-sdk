@@ -3,6 +3,7 @@ import json
 import hashlib
 import os
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypedDict
@@ -155,21 +156,35 @@ class SovereignKeyManager:
                         "and restarting the node to generate a new encrypted identity."
                     )
 
-                # Legacy unencrypted key loaded — warn and re-encrypt in place.
+                # Legacy unencrypted key loaded — warn and atomically re-encrypt in place.
                 print(
                     "⚠️  Legacy unencrypted keypair detected. Automatically upgrading "
                     "identity configuration to encrypted storage format...",
                     file=sys.stderr,
                 )
-                with open(self.private_key_path, "wb") as f:
-                    f.write(
-                        self._private_key.private_bytes(
-                            encoding=serialization.Encoding.PEM,
-                            format=serialization.PrivateFormat.PKCS8,
-                            encryption_algorithm=serialization.BestAvailableEncryption(passphrase),
-                        )
-                    )
-                os.chmod(self.private_key_path, 0o600)
+                encrypted_pem: bytes = self._private_key.private_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PrivateFormat.PKCS8,
+                    encryption_algorithm=serialization.BestAvailableEncryption(passphrase),
+                )
+                tmp_path: str = ""
+                try:
+                    with tempfile.NamedTemporaryFile(
+                        dir=os.path.dirname(self.private_key_path),
+                        delete=False,
+                    ) as tmp:
+                        tmp_path = tmp.name
+                        os.chmod(tmp_path, 0o600)
+                        tmp.write(encrypted_pem)
+                        tmp.flush()
+                    os.replace(tmp_path, self.private_key_path)
+                    tmp_path = ""  # Renamed successfully; nothing left to clean up.
+                finally:
+                    if tmp_path:
+                        try:
+                            os.remove(tmp_path)
+                        except FileNotFoundError:
+                            pass
 
             self._public_key = self._private_key.public_key()
         else:
@@ -235,6 +250,25 @@ class SovereignKeyManager:
             format=serialization.PublicFormat.Raw
         )
         return base64.b64encode(raw_bytes).decode("utf-8")
+
+    @property
+    def public_key(self) -> str:
+        """The node's pinned public key as a base64-encoded string.
+
+        Convenience accessor that returns the same value as
+        :meth:`get_base64_public_key`.  Intended to be passed directly as the
+        ``expected_public_key`` argument to
+        :meth:`verify_receipt` so that call sites can enforce key pinning
+        without holding a separate reference to the raw key string.
+
+        Returns:
+            Base64-encoded string of the 32-byte Ed25519 public key.
+
+        Raises:
+            RuntimeError: If the keypair has not been loaded via
+                :meth:`load_or_generate_keypair`.
+        """
+        return self.get_base64_public_key()
 
     def generate_receipt(
         self,
@@ -306,25 +340,37 @@ class SovereignKeyManager:
         )
 
     @staticmethod
-    def verify_receipt(receipt: ForensicReceipt, original_payload: dict[str, Any]) -> bool:
+    def verify_receipt(
+        receipt: ForensicReceipt,
+        original_payload: dict[str, Any],
+        expected_public_key: str | None = None,
+    ) -> bool:
         """Verifies the cryptographic integrity of a ForensicReceipt against the original payload.
 
-        Verification proceeds in two sequential, independent steps:
+        Verification proceeds in three sequential, independent steps:
 
-        1. **Explicit payload-hash assertion**: The SHA-256 digest of
-           ``original_payload`` is re-derived and compared byte-for-byte against
-           ``receipt["payload_hash"]``.  A mismatch returns ``False`` immediately,
-           before any signature operation is attempted.  This step closes the
-           *phantom field* attack vector where an adversary mutates the stored
-           ``payload_hash`` string without affecting the signature (which the
-           previous implementation would miss).
+        1. **Key-pin assertion** *(optional)*: When ``expected_public_key`` is
+           supplied, the base64-encoded public key string extracted from
+           ``receipt["public_key"]`` is compared directly against it.  A
+           mismatch returns ``False`` immediately, before any cryptographic
+           operation is attempted.  This prevents *identity self-attestation
+           forgery*: without this gate, an attacker could mint a receipt with
+           a rogue keypair that verifies correctly against its own public key
+           rather than the node's pinned identity.  Pass
+           :attr:`SovereignKeyManager.public_key` to enforce provenance.
 
-        2. **Signature verification**: The canonical manifest
+        2. **Explicit payload-hash assertion**: The SHA-256 digest of
+           ``original_payload`` is re-derived and compared byte-for-byte
+           against ``receipt["payload_hash"]``.  A mismatch returns ``False``
+           before any signature operation is attempted, closing the *phantom
+           field* attack vector.
+
+        3. **Signature verification**: The canonical manifest
            ``{"metadata": …, "payload_hash": …, "timestamp": …}`` is
-           reconstructed using ``receipt["payload_hash"]`` (now confirmed
+           reconstructed using ``receipt["payload_hash"]`` (confirmed
            consistent with ``original_payload``) and verified against the
-           Ed25519 ``signature`` embedded in the envelope.  Any remaining
-           mutation of ``metadata`` or ``timestamp`` is caught here.
+           Ed25519 ``signature`` embedded in the envelope.  Any mutation of
+           ``metadata`` or ``timestamp`` is caught here.
 
         Args:
             receipt: The :class:`ForensicReceipt` envelope to audit.
@@ -332,30 +378,37 @@ class SovereignKeyManager:
                 :meth:`generate_receipt`.  Its SHA-256 digest is re-derived
                 internally and compared against ``receipt["payload_hash"]``;
                 the caller must not pre-hash it.
+            expected_public_key: Optional base64-encoded Ed25519 public key
+                string that the receipt's embedded key must match exactly.
+                When provided, any receipt whose ``public_key`` field differs
+                from this value is rejected before crypto operations begin.
+                Pass :attr:`SovereignKeyManager.public_key` to pin receipts
+                to the local node identity.  Defaults to ``None`` (no pin).
 
         Returns:
-            ``True`` if and only if the re-derived payload hash matches
-            ``receipt["payload_hash"]`` exactly **and** the Ed25519 signature
-            is valid for the reconstructed manifest.  ``False`` for any hash
-            mismatch, signature failure, or decoding error.
+            ``True`` if and only if all active checks pass: the optional key
+            pin matches, the re-derived payload hash equals
+            ``receipt["payload_hash"]``, and the Ed25519 signature is valid
+            for the reconstructed manifest.  ``False`` for any pin mismatch,
+            hash mismatch, signature failure, or decoding error.
         """
         try:
+            # Step 1 — key-pin assertion (identity provenance guard).
+            # Fail fast on a string comparison before touching any crypto.
+            if expected_public_key is not None and receipt["public_key"] != expected_public_key:
+                return False
+
             public_bytes = base64.b64decode(receipt["public_key"])
             signature_bytes = base64.b64decode(receipt["signature"])
             public_key = ed25519.Ed25519PublicKey.from_public_bytes(public_bytes)
 
-            # Step 1 — explicit payload-hash assertion (phantom field guard).
-            # Re-derive the expected hash and reject immediately if it does not
-            # match the value stored in the envelope.  Without this check a
-            # mutated receipt["payload_hash"] would pass undetected because the
-            # signature verification below uses the re-derived value, not the
-            # stored one.
+            # Step 2 — explicit payload-hash assertion (phantom field guard).
             serialized_payload = json.dumps(original_payload, sort_keys=True, default=str)
             expected_payload_hash = hashlib.sha256(serialized_payload.encode("utf-8")).hexdigest()
             if expected_payload_hash != receipt["payload_hash"]:
                 return False
 
-            # Step 2 — reconstruct the canonical manifest and verify the signature.
+            # Step 3 — reconstruct the canonical manifest and verify the signature.
             # receipt["payload_hash"] is now confirmed to match original_payload.
             manifest = {
                 "metadata": receipt["metadata"],
