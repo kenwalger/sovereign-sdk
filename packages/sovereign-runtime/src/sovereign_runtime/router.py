@@ -29,8 +29,6 @@ class LocalRuntimeRouter:
         argument dictionaries, sorting keys to avoid dictionary order mismatching
         and handling nested objects safely via string coercion.
         """
-        # json.dumps with sort_keys and default=str handles nested dicts and complex types safely,
-        # eliminating serialization runtime exceptions.
         canonical_json = json.dumps(arguments, sort_keys=True, default=str)
         return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
 
@@ -50,7 +48,7 @@ class LocalRuntimeRouter:
         # 1. Await cooperative tool execution safely *before* committing depth mutations
         try:
             execution_result = await self.tool_registry[tool_name](context, arguments)
-            # FIXED: Session execution depth is now exclusively updated post-success
+            # Session execution depth is exclusively updated post-success
             context.increment_depth()
             execution_success = True
         except Exception as e:
@@ -60,7 +58,7 @@ class LocalRuntimeRouter:
         # 2. Package deterministic validation payload
         execution_payload = {
             "session_id": context.session_id,
-            "execution_depth": context.execution_depth,  # Reflects accurate transaction index
+            "execution_depth": context.execution_depth,  # Strictly tracks successful index
             "target_tool": tool_name,
             "arguments_hash": self._calculate_stable_arguments_hash(arguments),
             "result": execution_result

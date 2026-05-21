@@ -24,7 +24,10 @@ async def analyze_stored_data(ctx: SessionContext, args: dict) -> dict:
 
 
 async def execute_runtime_node(tool: str, resource_id: str, session_id: str):
-    """Internal loop orchestrator routing arguments dynamically with fail-fast validation."""
+    """
+    Internal loop orchestrator routing arguments dynamically with symmetric
+    fail-fast validation across both single-tool and composite pipeline executions.
+    """
     router = LocalRuntimeRouter()
     router.register_tool("download", download_secure_data)
     router.register_tool("analyze", analyze_stored_data)
@@ -39,10 +42,9 @@ async def execute_runtime_node(tool: str, resource_id: str, session_id: str):
         click.echo("\n🔒 Step 1 [download] Completed. Inspecting Forensic Receipt...")
         click.echo(json.dumps(receipt_1, indent=2))
 
-        # FIXED: Inspect execution success and fail-fast to prevent masked errors
         if not receipt_1["metadata"].get("execution_success", False):
             click.echo("\n❌ Pipeline Execution Terminated: Step 1 failed. Aborting downstream tools.", err=True)
-            return
+            raise click.Abort()
 
         # Step 2: Run downstream tools only if prerequisite succeeded
         click.echo("\n🔄 Step 1 Verified. Advancing to Step 2 [analyze]...")
@@ -50,11 +52,21 @@ async def execute_runtime_node(tool: str, resource_id: str, session_id: str):
         click.echo("\n🔒 Step 2 [analyze] Completed. Pipeline Forensic Receipt Proof:")
         click.echo(json.dumps(receipt_2, indent=2))
 
+        if not receipt_2["metadata"].get("execution_success", False):
+            click.echo("\n❌ Pipeline Execution Terminated: Step 2 failed.", err=True)
+            raise click.Abort()
+
     else:
+        # FIXED: Symmetric verification loop added to single tool execution pathways
         click.echo(f"🔄 Dispatching single tool execution: '{tool}'...")
         receipt = await router.dispatch(tool, {"resource_id": resource_id}, session)
+
         click.echo("\n🔒 Authenticated Forensic Receipt Proof:")
         click.echo(json.dumps(receipt, indent=2))
+
+        if not receipt["metadata"].get("execution_success", False):
+            click.echo(f"\n❌ Operation Failure: Targeted tool '{tool}' failed execution sequence.", err=True)
+            raise click.Abort()
 
 
 @click.command()
