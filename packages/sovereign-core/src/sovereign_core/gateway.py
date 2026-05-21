@@ -87,17 +87,35 @@ class OptimizationReceipt(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Filler patterns stripped during text minimization.  Each entry is a compiled
-# regex that matches a category of low-information tokens: conversational
-# greetings, hedging preambles, and redundant markdown decoration.
+# Filler patterns applied during text minimization.  Each entry is a
+# (compiled_pattern, replacement) pair.  Most patterns substitute the empty
+# string; the duplicate-heading pattern substitutes \1 to preserve exactly one
+# clean copy of the header rather than erasing both.
 # ---------------------------------------------------------------------------
-_FILLER_PATTERNS: List[re.Pattern[str]] = [
-    re.compile(r"\bhi\b|\bhello\b|\bhey\b|\bgreetings\b", re.IGNORECASE),
-    re.compile(r"\bplease\b|\bkindly\b|\bjust\b|\bsimply\b", re.IGNORECASE),
-    re.compile(r"\bof course\b|\bcertainly\b|\babsolutely\b|\bsure\b", re.IGNORECASE),
-    re.compile(r"\bI hope (this|that|you)\b.*", re.IGNORECASE),
-    re.compile(r"(\*{1,3})(\s*\1)+", re.IGNORECASE),   # collapsed redundant bold/italic runs
-    re.compile(r"(#{1,6} .*)\n\1", re.IGNORECASE),      # duplicate heading lines
+_FILLER_PATTERNS: List[tuple[re.Pattern[str], str]] = [
+    # Greeting tokens — safe to erase entirely.
+    (re.compile(r"\bhi\b|\bhello\b|\bhey\b|\bgreetings\b", re.IGNORECASE), ""),
+    # Hedging adverbs — stripped only when they stand as isolated colloquial
+    # filler.  Negative lookahead (?![-\w]) prevents matching when the word is
+    # the first component of a hyphenated compound (e.g. "just-in-time",
+    # "simply-typed").  The leading \b guards against embedded substrings
+    # (e.g. "adjust", "justified", "unkindly") from the other direction.
+    (
+        re.compile(
+            r"\bplease(?![-\w])|\bkindly(?![-\w])|\bjust(?![-\w])|\bsimply(?![-\w])",
+            re.IGNORECASE,
+        ),
+        "",
+    ),
+    # Affirmation filler — safe to erase entirely.
+    (re.compile(r"\bof course\b|\bcertainly\b|\babsolutely\b|\bsure\b", re.IGNORECASE), ""),
+    # Preamble phrases — erase to end of line.
+    (re.compile(r"\bI hope (this|that|you)\b.*", re.IGNORECASE), ""),
+    # Collapsed redundant bold/italic marker runs — erase extra markers.
+    (re.compile(r"(\*{1,3})(\s*\1)+", re.IGNORECASE), ""),
+    # Duplicate consecutive headings — replace the full match (first + newline +
+    # second) with \1 so exactly one clean copy of the heading is preserved.
+    (re.compile(r"(#{1,6} [^\n]+)\n\1", re.IGNORECASE), r"\1"),
 ]
 
 
@@ -171,8 +189,8 @@ async def process_prose_tax(
     if isinstance(payload, str):
         raw_text: str = payload
         minimized_text: str = raw_text
-        for pattern in _FILLER_PATTERNS:
-            minimized_text = pattern.sub("", minimized_text)
+        for pattern, repl in _FILLER_PATTERNS:
+            minimized_text = pattern.sub(repl, minimized_text)
         minimized_text = minimized_text.strip()
     else:
         raw_parts: List[str] = [
@@ -182,8 +200,8 @@ async def process_prose_tax(
         minimized_parts: List[str] = []
         for part in raw_parts:
             minimized = part
-            for pattern in _FILLER_PATTERNS:
-                minimized = pattern.sub("", minimized)
+            for pattern, repl in _FILLER_PATTERNS:
+                minimized = pattern.sub(repl, minimized)
             minimized_parts.append(minimized.strip())
         minimized_text = " ".join(minimized_parts)
 

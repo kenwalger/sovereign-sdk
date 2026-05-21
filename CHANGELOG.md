@@ -49,6 +49,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tmp_file.write(pem_bytes)` in v0.5.7.  The `Raises:` block now reflects only
   conditions that can actually be triggered by the current implementation.
 
+- **Prose Tax — Duplicate Heading Deduplication** (`gateway.py` —
+  `_FILLER_PATTERNS`): Corrected the duplicate-heading deduplication regex to
+  properly preserve a single instance of consecutive matching markdown headers.
+  The previous `pattern.sub("", ...)` call erased both the original and the
+  duplicate heading entirely.  `_FILLER_PATTERNS` is now a list of
+  ``(pattern, replacement)`` pairs; the heading entry uses ``r"\1"`` as its
+  replacement so the captured first heading is restored after the match is
+  consumed, leaving exactly one clean copy in the output.
+
+- **Prose Tax — Filler Word Boundary Hardening** (`gateway.py` —
+  `_FILLER_PATTERNS`): Hardened conversational filler word-stripping boundaries
+  to prevent collateral text corruption or mangling of technical prose.  The
+  previous ``\bword\b`` anchors were insufficient: ``\bsimply\b`` matched the
+  ``simply`` prefix in ``simply-typed``, and ``\bjust\b`` matched inside
+  ``just-in-time``, because ``\b`` only transitions on alphanumeric/non-alphanumeric
+  boundaries and the hyphen is non-alphanumeric.  Each hedging adverb pattern now
+  appends ``(?![-\w])`` — a negative lookahead that prevents a match when the
+  token is immediately followed by a hyphen or word character — so only
+  standalone colloquial uses are stripped.
+
 ## [0.5.8] - 2026-05-21
 
 ### Fixed
