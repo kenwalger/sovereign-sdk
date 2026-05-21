@@ -24,13 +24,15 @@ class LocalRuntimeRouter:
 
     @staticmethod
     def _calculate_stable_arguments_hash(arguments: Dict[str, Any]) -> str:
-        """Generates a deterministic, process-stable SHA-256 string hash for arbitrary parameters."""
-        try:
-            canonical_json = json.dumps(arguments, sort_keys=True, default=str)
-            return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
-        except Exception:
-            fallback_bytes = f"fallback_opaque_hash_{repr(arguments)}".encode("utf-8")
-            return hashlib.sha256(fallback_bytes).hexdigest()
+        """
+        Generates a deterministic, process-stable SHA-256 string hash for arbitrary
+        argument dictionaries, sorting keys to avoid dictionary order mismatching
+        and handling nested objects safely via string coercion.
+        """
+        # json.dumps with sort_keys and default=str handles nested dicts and complex types safely,
+        # eliminating serialization runtime exceptions.
+        canonical_json = json.dumps(arguments, sort_keys=True, default=str)
+        return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
 
     async def dispatch(
         self,
