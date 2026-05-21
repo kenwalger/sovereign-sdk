@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Automated `.env` Environment Hydration** (`__main__.py`): Added
+  `python-dotenv>=1.0.0` as a runtime dependency and wired `load_dotenv()` at
+  the absolute top of the node entrypoint.  `SOVEREIGN_NODE_SECRET` (and any
+  other environment overrides) can now be specified in an uncommitted `.env`
+  file at the repository root, eliminating the need to export variables
+  manually before running `uv run sovereign-node`.
+
+- **Prose Tax Optimization Layer — Phase 2 Scaffold** (`gateway.py`):
+  Initialized the core architectural scaffold for the Prose Tax Optimization
+  Layer inside `gateway.py`.  Added `OptimizationReceipt`, a Pydantic model
+  tracking `raw_token_count`, `optimized_token_count`, and
+  `tax_savings_percentage` for each compression pass.  Added the async gateway
+  entry point `process_prose_tax(payload, context)`, which executes three
+  sequential phases: Text Minimization (stripping conversational filler,
+  greeting tokens, hedging preambles, and redundant markdown decoration via a
+  compiled regex library), Local Token Approximation (UTF-8 byte-density
+  heuristic; no external tokenizer), and Ledger Accumulation (writing the
+  `OptimizationReceipt` and running savings total directly into
+  `context.variables` so every downstream `ForensicReceipt` envelope carries a
+  complete optimization audit trail).
+
+### Fixed
+
+- **Legacy Migration Path — Descriptor-Level `os.fchmod` Symmetry** (`crypto.py`
+  — `load_or_generate_keypair`): Upgraded the legacy migration block to match
+  the greenfield path's descriptor-level permission model.  The previous
+  `os.chmod(tmp_path, 0o600)` call resolved the temp file through the filesystem
+  namespace, leaving a TOCTOU race window.  On POSIX hosts the call is now
+  `os.fchmod(tmp.fileno(), 0o600)`, operating directly on the open file
+  descriptor.  A `hasattr(os, "fchmod")` guard retains `os.chmod` as a portable
+  fallback on Windows.  Both key write paths now enforce permissions through an
+  identical descriptor-first pattern.
+
+- **Stale `RuntimeError` Docstring Entry Pruned** (`crypto.py` —
+  `load_or_generate_keypair`): Removed the `Raises: RuntimeError` entry that
+  documented a zero-byte `os.write` return as a disk-full signal.  This guard
+  belonged to the manual raw write loop, which was fully replaced by
+  `tmp_file.write(pem_bytes)` in v0.5.7.  The `Raises:` block now reflects only
+  conditions that can actually be triggered by the current implementation.
+
+## [0.5.8] - 2026-05-21
+
+### Fixed
+
+- **Greenfield Key Generation — Descriptor-Level `os.fchmod` and Buffered
+  Stream Write** (`crypto.py` — `load_or_generate_keypair`): Eliminated
+  path-based TOCTOU race windows and resolved the I/O layer buffering mismatch
+  introduced in v0.5.6.  `os.chmod(tmp_path, 0o600)` was replaced with
+  `os.fchmod(tmp_file.fileno(), 0o600)` on POSIX hosts (portable fallback via
+  `hasattr(os, "fchmod")`) so permission enforcement operates on the open
+  descriptor rather than the filesystem path.  The manual `while remaining_bytes`
+  / `os.write` loop was replaced by `tmp_file.write(pem_bytes)`, aligning the
+  write path with the high-level `NamedTemporaryFile` stream object and
+  delegating short-write recovery to Python's buffered I/O layer.  The
+  `tmp_file.flush()` → `os.fsync` → `os.replace` durability pipeline is
+  retained unchanged.
+
 ## [0.5.7] - 2026-05-21
 
 ### Fixed
