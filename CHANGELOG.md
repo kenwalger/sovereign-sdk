@@ -32,6 +32,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Prose Tax — Duplicate Heading Deduplication Case-Sensitive** (`gateway.py`
+  — `_FILLER_PATTERNS`): Removed ``re.IGNORECASE`` from the duplicate-heading
+  compilation so that headings are only collapsed when their text and
+  capitalisation match exactly.  The previous case-insensitive form silently
+  mutated distinct headings that differed only in case (e.g.
+  ``## Setup`` followed by ``## setup`` would have been collapsed to one).
+
+- **Prose Tax — Whitespace Normalization Pass** (`gateway.py` —
+  ``process_prose_tax``): Added a post-substitution whitespace normalization
+  step in both the string and list-message processing branches.  After all
+  filler patterns are applied, consecutive spaces are collapsed to a single
+  space and orphaned spaces before punctuation characters are removed.  This
+  cleans up double-space and space-punctuation artifacts that filler-word
+  removal leaves behind.
+
+- **Crypto — Class Docstring Aligned with Descriptor-Level Architecture**
+  (`crypto.py` — ``SovereignKeyManager``): Updated the class-level docstring
+  to replace the stale reference to path-based ``os.chmod`` with an accurate
+  description of the current descriptor-level ``os.fchmod`` approach and its
+  ``os.chmod`` fallback for platforms that lack ``fchmod``.
+
+- **Runtime — E402 noqa Guards Applied** (`__main__.py`): Appended
+  ``# noqa: E402`` suppression comments to every import line that follows the
+  early ``load_dotenv()`` invocation, ensuring PEP 8 module-level import-order
+  rules do not flag the intentional environment-hydration-first pattern.
+
 - **Prose Tax — Preamble Pattern Greedy Wildcard Removed** (`gateway.py` —
   `_FILLER_PATTERNS`): Corrected the ``"I hope"`` preamble regex to remove
   the greedy trailing ``.*`` wildcard that consumed the entire remainder of

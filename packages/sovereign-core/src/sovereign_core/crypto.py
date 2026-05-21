@@ -71,9 +71,11 @@ class SovereignKeyManager:
     purposes.
 
     Both the legacy-migration and greenfield key-write paths enforce identical,
-    umask-independent ``0o600`` file permissions via explicit ``os.chmod`` calls
-    on the staging temp file before any bytes are written, and both promote the
-    fully synced temp file over the target path via ``os.replace()`` for atomicity.
+    umask-independent ``0o600`` file permissions via descriptor-level
+    ``os.fchmod`` (with a path-based ``os.chmod`` fallback on platforms that
+    lack ``fchmod``) applied to the open staging file descriptor before any
+    bytes are written, and both promote the fully synced temp file over the
+    target path via ``os.replace()`` for atomicity.
 
     Args:
         key_dir: Directory path for on-disk keypair persistence.  Defaults to

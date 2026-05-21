@@ -140,7 +140,9 @@ _FILLER_PATTERNS: List[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\*{4,}|_{4,}"), ""),
     # Duplicate consecutive headings — replace the full match (first + newline +
     # second) with \1 so exactly one clean copy of the heading is preserved.
-    (re.compile(r"(#{1,6} [^\n]+)\n\1", re.IGNORECASE), r"\1"),
+    # Case-sensitive (no re.IGNORECASE): headings that differ only in
+    # capitalisation are distinct and must not be silently collapsed.
+    (re.compile(r"(#{1,6} [^\n]+)\n\1"), r"\1"),
 ]
 
 
@@ -222,6 +224,8 @@ async def process_prose_tax(
         minimized_text: str = raw_text
         for pattern, repl in _FILLER_PATTERNS:
             minimized_text = pattern.sub(repl, minimized_text)
+        minimized_text = re.sub(r" {2,}", " ", minimized_text)
+        minimized_text = re.sub(r" ([,.:;!?])", r"\1", minimized_text)
         minimized_text = minimized_text.strip()
     else:
         raw_parts: List[str] = [
@@ -235,6 +239,8 @@ async def process_prose_tax(
                 minimized = msg["content"]
                 for pattern, repl in _FILLER_PATTERNS:
                     minimized = pattern.sub(repl, minimized)
+                minimized = re.sub(r" {2,}", " ", minimized)
+                minimized = re.sub(r" ([,.:;!?])", r"\1", minimized)
                 minimized = minimized.strip()
                 minimized_parts.append(minimized)
                 minimized_messages.append({**msg, "content": minimized})
