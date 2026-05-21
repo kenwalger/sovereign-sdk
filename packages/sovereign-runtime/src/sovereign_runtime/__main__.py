@@ -6,49 +6,37 @@ from sovereign_core.crypto import SovereignKeyManager
 from sovereign_core.gateway import SessionContext
 from sovereign_runtime.router import LocalRuntimeRouter
 
-
-# Async Tool A: Writes data to local session memory
 async def download_secure_data(ctx: SessionContext, args: dict) -> dict:
-    await asyncio.sleep(0.5)  # Simulate I/O bound disk network latency
+    await asyncio.sleep(0.1)
     resource_id = args["resource_id"]
     ctx.set("downloaded_resource", f"raw_data_stream_for_{resource_id}")
-    return {"status": "SUCCESS", "stored_key": "downloaded_resource"}
-
-
-# Async Tool B: Consumes data written by Tool A
-async def analyze_stored_data(ctx: SessionContext, args: dict) -> dict:
-    cached_data = ctx.get("downloaded_resource")
-    if not cached_data:
-        return {"status": "ERROR", "message": "No data found in session memory."}
-    return {"status": "ANALYZED", "length": len(cached_data), "source": cached_data}
-
+    return {"status": "SUCCESS", "metadata_received": args["nested_config"]}
 
 async def run_pipeline():
-    click.echo("🔮 Starting Async Stateful Engine...")
-
+    click.echo("🔮 Starting Async Stateful Engine with Deterministic Hashes...")
     router = LocalRuntimeRouter()
     router.register_tool("download", download_secure_data)
-    router.register_tool("analyze", analyze_stored_data)
 
-    # Initialize a singular shared tracking context
-    session = SessionContext(session_id="session_alpha_2026")
+    session = SessionContext(session_id="session_stable_omega")
 
-    # Step 1: Execute download tool
-    receipt_1 = await router.dispatch("download", {"resource_id": "kernel_mod"}, session)
-    click.echo(f"▶️ Tool 1 Complete. Depth: {session.execution_depth}")
+    # REAL-WORLD NESTED PAYLOAD (Previously would raise TypeError with python's hash())
+    complex_arguments = {
+        "resource_id": "kernel_mod_v2",
+        "nested_config": {
+            "encryption": "AES-GCM",
+            "allowed_nodes": ["node_alpha", "node_beta"],
+            "flags": {"force_verify": True}
+        }
+    }
 
-    # Step 2: Execute analysis tool (reads memory from Step 1)
-    receipt_2 = await router.dispatch("analyze", {}, session)
-    click.echo(f"▶️ Tool 2 Complete. Depth: {session.execution_depth}\n")
+    receipt = await router.dispatch("download", complex_arguments, session)
 
-    click.echo("🔒 Final Pipeline Receipt Payload Proof:")
-    click.echo(json.dumps(receipt_2, indent=2))
-
+    click.echo("\n🔒 Final Production Pipeline Receipt Proof:")
+    click.echo(json.dumps(receipt, indent=2))
 
 @click.command()
 def main():
     asyncio.run(run_pipeline())
-
 
 if __name__ == "__main__":
     main()

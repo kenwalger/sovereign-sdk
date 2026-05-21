@@ -1,6 +1,7 @@
 # packages/sovereign-runtime/src/sovereign_runtime/router.py
 import sys
-import asyncio
+import json
+import hashlib
 from typing import Callable, Any, Dict, Awaitable
 from sovereign_core.crypto import SovereignKeyManager, ForensicReceipt
 from sovereign_core.gateway import SessionContext
@@ -12,7 +13,7 @@ AsyncTool = Callable[[SessionContext, Dict[str, Any]], Awaitable[Any]]
 class LocalRuntimeRouter:
     """
     An asynchronous engine that dispatches operations within a stateful session context
-    and seals the results into validated Forensic Receipts.
+    and seals the results into validated, cryptographically verifiable Forensic Receipts.
     """
 
     def __init__(self, key_manager: SovereignKeyManager | None = None):
@@ -22,6 +23,23 @@ class LocalRuntimeRouter:
     def register_tool(self, name: str, func: AsyncTool) -> None:
         """Registers an asynchronous local capability."""
         self.tool_registry[name] = func
+
+    @staticmethod
+    def _calculate_stable_arguments_hash(arguments: Dict[str, Any]) -> str:
+        """
+        Generates a deterministic, process-stable SHA-256 string hash for arbitrary
+        argument dictionaries, sorting keys to avoid dictionary order mismatching
+        and handling nested objects safely.
+        """
+        try:
+            # json.dumps with sort_keys converts lists and nested dicts to a stable string representation
+            canonical_json = json.dumps(arguments, sort_keys=True, default=str)
+            sha256_digest = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+            return sha256_digest
+        except Exception as e:
+            # Fallback wrapper for un-serializable objects to prevent runtime crashes
+            fallback_bytes = f"fallback_opaque_hash_{repr(arguments)}".encode("utf-8")
+            return hashlib.sha256(fallback_bytes).hexdigest()
 
     async def dispatch(
             self,
@@ -49,8 +67,8 @@ class LocalRuntimeRouter:
             "session_id": context.session_id,
             "execution_depth": context.execution_depth,
             "target_tool": tool_name,
-            # FIXED: Restored deterministic tracing hash over input parameters
-            "arguments_hash": hash(tuple(sorted(arguments.items()))),
+            # FIXED: Stable SHA-256 serialization replaces process-unstable hash()
+            "arguments_hash": self._calculate_stable_arguments_hash(arguments),
             "result": execution_result
         }
 
