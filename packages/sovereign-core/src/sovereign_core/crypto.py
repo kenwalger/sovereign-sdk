@@ -177,6 +177,7 @@ class SovereignKeyManager:
                         os.chmod(tmp_path, 0o600)
                         tmp.write(encrypted_pem)
                         tmp.flush()
+                        os.fsync(tmp.fileno())
                     os.replace(tmp_path, self.private_key_path)
                     tmp_path = ""  # Renamed successfully; nothing left to clean up.
                 finally:
@@ -192,7 +193,8 @@ class SovereignKeyManager:
             self._public_key = self._private_key.public_key()
 
             self.key_dir.mkdir(parents=True, exist_ok=True)
-            with open(self.private_key_path, "wb") as f:
+            fd = os.open(self.private_key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as f:
                 f.write(
                     self._private_key.private_bytes(
                         encoding=serialization.Encoding.PEM,
@@ -200,7 +202,6 @@ class SovereignKeyManager:
                         encryption_algorithm=serialization.BestAvailableEncryption(passphrase)
                     )
                 )
-            os.chmod(self.private_key_path, 0o600)
 
             with open(self.public_key_path, "wb") as f:
                 f.write(

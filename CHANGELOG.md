@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-05-21
+
+### Fixed
+
+- **Filesystem Durability and Creation-Time Permission Hardening** (`crypto.py`
+  — `load_or_generate_keypair`): Hardened filesystem durability by injecting
+  pre-rename `os.fsync` controls on atomic migration tasks and establishing
+  strict creation-time permission bounds on greenfield key generation.  In the
+  atomic migration path, `os.fsync(tmp.fileno())` is now called after
+  `tmp.flush()` and before `os.replace()`, guaranteeing that encrypted PEM
+  bytes are physically committed to storage before the rename promotes the temp
+  file over the original key.  In the new-keypair generation path, the private
+  key file is now opened via `os.open(path, O_WRONLY | O_CREAT | O_TRUNC,
+  0o600)` wrapped with `os.fdopen`, so the inode is created with `0o600`
+  permissions as its first filesystem operation.  The previous pattern of
+  `open(..., "wb")` followed by `os.chmod` left a window where the file existed
+  with inheritable process umask permissions before the restriction was applied.
+
+## [0.5.2] - 2026-05-21
+
 ### Changed
 
 - **Graceful Legacy Keypair Migration** (`crypto.py` —
