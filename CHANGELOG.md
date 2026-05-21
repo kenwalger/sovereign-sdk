@@ -32,6 +32,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Prose Tax — Preamble Pattern Greedy Wildcard Removed** (`gateway.py` —
+  `_FILLER_PATTERNS`): Corrected the ``"I hope"`` preamble regex to remove
+  the greedy trailing ``.*`` wildcard that consumed the entire remainder of
+  the line, causing silent deletion of any sentence content that followed the
+  phrase.  The pattern now terminates at the word boundary immediately after
+  the subject pronoun (``\bI hope (?:this|that|you)\b``), stripping only the
+  literal preamble token itself and leaving all trailing content on the same
+  line perfectly intact.  The capturing group ``(this|that|you)`` is converted
+  to a non-capturing group ``(?:this|that|you)`` as the capture was unused.
+
+- **Prose Tax — List Payload Structure Preserved on Return** (`gateway.py` —
+  ``process_prose_tax``): Stabilized the list-input branch to return the
+  original message list structure with each ``"content"`` field individually
+  minimized, instead of collapsing the structure into a flat joined string.
+  Messages without a string ``"content"`` field are forwarded unmodified.
+  All other dict keys within each message are preserved via shallow copy.
+  The return type annotation is updated from ``tuple[str, OptimizationReceipt]``
+  to ``tuple[Union[str, List[Dict[str, Any]]], OptimizationReceipt]`` to
+  reflect list-in/list-out structural parity.  Token approximation metrics
+  continue to use the joined minimized string internally.
+
 - **Prose Tax — Affirmation Alternation Unified Under Global Lookahead**
   (`gateway.py` — `_FILLER_PATTERNS`): Unified the ``certainly`` and
   ``absolutely`` affirmation tokens inside a non-capturing group so that the

@@ -124,8 +124,12 @@ _FILLER_PATTERNS: List[tuple[re.Pattern[str], str]] = [
     #     lookbehinds protect instructional directives ("make sure to", "be sure
     #     to"); the trailing lookahead protects hyphenated compounds ("sure-fire").
     (re.compile(r"\bof course\b|\b(?:certainly|absolutely)\b(?![-\w])|(?<!make )(?<!be )\bsure\b(?![-\w])", re.IGNORECASE), ""),
-    # Preamble phrases — erase to end of line.
-    (re.compile(r"\bI hope (this|that|you)\b.*", re.IGNORECASE), ""),
+    # Preamble phrases — erase only the literal preamble token itself.  The
+    # previous trailing .* greedily consumed the entire remainder of the line,
+    # silently deleting any sentence content that followed the phrase.  The
+    # pattern now terminates at the word boundary after the subject pronoun so
+    # that trailing content on the same line is fully preserved.
+    (re.compile(r"\bI hope (?:this|that|you)\b", re.IGNORECASE), ""),
     # Degenerate bold/italic marker runs — four or more consecutive asterisks
     # or underscores with no enclosed text (e.g. "****", "_____").
     # The threshold of 4+ preserves all valid Markdown wrappers:
@@ -161,7 +165,7 @@ def _approximate_token_count(text: str) -> int:
 async def process_prose_tax(
     payload: Union[str, List[Dict[str, Any]]],
     context: SessionContext,
-) -> tuple[str, OptimizationReceipt]:
+) -> tuple[Union[str, List[Dict[str, Any]]], OptimizationReceipt]:
     """Applies the Prose Tax Optimization pass to a raw payload and records the result.
 
     Executes three sequential phases against ``payload``:
@@ -188,11 +192,15 @@ async def process_prose_tax(
             are written.  Modified in place via :meth:`SessionContext.set`.
 
     Returns:
-        A 2-tuple of ``(minimized_text, receipt)`` where ``minimized_text`` is
-        the cleansed output string available for downstream consumers, and
-        ``receipt`` is an :class:`OptimizationReceipt` capturing
-        ``raw_token_count``, ``optimized_token_count``, and
-        ``tax_savings_percentage`` for this optimization pass.
+        A 2-tuple of ``(minimized_payload, receipt)`` where ``minimized_payload``
+        mirrors the structural type of the input: a cleansed ``str`` when
+        ``payload`` is a string, or a ``List[Dict[str, Any]]`` with each
+        ``"content"`` field individually minimized when ``payload`` is a message
+        list (all other dict keys and messages without a string ``"content"``
+        are forwarded unmodified).  ``receipt`` is an
+        :class:`OptimizationReceipt` capturing ``raw_token_count``,
+        ``optimized_token_count``, and ``tax_savings_percentage`` for this
+        optimization pass.
 
     Raises:
         TypeError: If ``payload`` is neither a ``str`` nor a ``list``.
@@ -220,12 +228,18 @@ async def process_prose_tax(
             msg["content"] for msg in payload if isinstance(msg.get("content"), str)
         ]
         raw_text = " ".join(raw_parts)
+        minimized_messages: List[Dict[str, Any]] = []
         minimized_parts: List[str] = []
-        for part in raw_parts:
-            minimized = part
-            for pattern, repl in _FILLER_PATTERNS:
-                minimized = pattern.sub(repl, minimized)
-            minimized_parts.append(minimized.strip())
+        for msg in payload:
+            if isinstance(msg.get("content"), str):
+                minimized = msg["content"]
+                for pattern, repl in _FILLER_PATTERNS:
+                    minimized = pattern.sub(repl, minimized)
+                minimized = minimized.strip()
+                minimized_parts.append(minimized)
+                minimized_messages.append({**msg, "content": minimized})
+            else:
+                minimized_messages.append(msg)
         minimized_text = " ".join(minimized_parts)
 
     # ------------------------------------------------------------------
@@ -254,4 +268,4 @@ async def process_prose_tax(
     prior_savings: int = context.get("prose_tax_total_savings", 0)
     context.set("prose_tax_total_savings", prior_savings + (raw_count - optimized_count))
 
-    return minimized_text, receipt
+    return (minimized_messages if isinstance(payload, list) else minimized_text), receipt
