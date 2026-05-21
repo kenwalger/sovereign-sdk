@@ -1,55 +1,61 @@
+# packages/sovereign-runtime/src/sovereign_runtime/router.py
 import sys
-from typing import Callable, Any, Dict
-# Import the primitive directly from our core workspace member
+import asyncio
+from typing import Callable, Any, Dict, Awaitable
 from sovereign_core.crypto import SovereignKeyManager, ForensicReceipt
+from sovereign_core.gateway import SessionContext
+
+# Define a type for asynchronous local tools
+AsyncTool = Callable[[SessionContext, Dict[str, Any]], Awaitable[Any]]
 
 
 class LocalRuntimeRouter:
     """
-    Dispatches inbound payload payloads to validated tool execution chains,
-    wrapping the execution results inside cryptographic forensic receipts.
+    An asynchronous engine that dispatches operations within a stateful session context
+    and seals the results into validated Forensic Receipts.
     """
 
     def __init__(self, key_manager: SovereignKeyManager | None = None):
-        # Fallback to a default managed local key store instance if none injected
         self.key_manager = key_manager or SovereignKeyManager()
-        self.tool_registry: Dict[str, Callable[..., Any]] = {}
+        self.tool_registry: Dict[str, AsyncTool] = {}
 
-    def register_tool(self, name: str, func: Callable[..., Any]) -> None:
-        """Registers a deterministic or local execution tool into the runtime engine."""
+    def register_tool(self, name: str, func: AsyncTool) -> None:
+        """Registers an asynchronous local capability."""
         self.tool_registry[name] = func
 
-    def dispatch(self, tool_name: str, arguments: Dict[str, Any]) -> ForensicReceipt:
+    async def dispatch(
+            self,
+            tool_name: str,
+            arguments: Dict[str, Any],
+            context: SessionContext
+    ) -> ForensicReceipt:
         """
-        Executes a targeted tool and returns a cryptographically signed receipt of the result.
+        Executes a target tool asynchronously within a tracking session context,
+        mutating state and generating an immutable cryptographic execution receipt.
         """
         if tool_name not in self.tool_registry:
-            raise ValueError(f"Execution Error: Tool '{tool_name}' not registered in this node environment.")
+            raise ValueError(f"Tool '{tool_name}' not found in runtime registry.")
 
-        # 1. Execute the local tool routine
+        context.increment_depth()
+
+        # 1. Await concurrent/local tool execution safely
         try:
-            execution_result = self.tool_registry[tool_name](**arguments)
+            execution_result = await self.tool_registry[tool_name](context, arguments)
         except Exception as e:
             execution_result = {"status": "FAILED", "error": str(e)}
 
-        # 2. Package structured target payload data
+        # 2. Package deterministic validation payload
         execution_payload = {
+            "session_id": context.session_id,
+            "execution_depth": context.execution_depth,
             "target_tool": tool_name,
-            "arguments_hash": hash(tuple(sorted(arguments.items()))),
             "result": execution_result
         }
 
-        # 3. Structural contextual forensic data
-        execution_metadata = {
-            "runtime_environment": "sovereign-local-node",
-            "python_version": sys.version.split()[0],
-            "execution_success": "error" not in str(execution_result)
-        }
-
-        # 4. Invoke sovereign-core to mint our immutable cryptographic artifact
+        # 3. Mint the validation signature via sovereign-core
         receipt = self.key_manager.generate_receipt(
             payload=execution_payload,
-            metadata=execution_metadata
+            metadata={"runtime": "async-sovereign-node", "py_ver": sys.version.split()[0]}
         )
 
         return receipt
