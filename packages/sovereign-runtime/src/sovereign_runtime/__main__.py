@@ -10,8 +10,13 @@ from sovereign_runtime.router import LocalRuntimeRouter
 async def download_secure_data(ctx: SessionContext, args: dict) -> dict:
     await asyncio.sleep(0.05)
     resource_id = args.get("resource_id", "unknown_resource")
-    if "fail" in resource_id:
-        raise RuntimeError(f"Network Timeout: Failed to reach remote storage pool for {resource_id}.")
+
+    # Simulate a dynamic fault state that clears out on a second attempt
+    retry_count = ctx.get("download_attempts", 0)
+    if "fail" in resource_id and retry_count < 1:
+        ctx.set("download_attempts", retry_count + 1)
+        raise RuntimeError(f"Network Latency Spike: Storage target {resource_id} unreachable.")
+
     ctx.set("downloaded_resource", f"raw_data_stream_for_{resource_id}")
     return {"status": "SUCCESS", "resource_id": resource_id}
 
@@ -19,7 +24,6 @@ async def download_secure_data(ctx: SessionContext, args: dict) -> dict:
 async def analyze_stored_data(ctx: SessionContext, args: dict) -> dict:
     cached_data = ctx.get("downloaded_resource")
     if not cached_data:
-        # FIXED: Allow standalone debugging/testing by fallback hydrating context if none exists
         click.echo("⚠️ Standalone mode detected: Context empty. Hydrating baseline diagnostic state...")
         ctx.set("downloaded_resource", "fallback_standalone_telemetry_stream")
         cached_data = ctx.get("downloaded_resource")
@@ -28,7 +32,7 @@ async def analyze_stored_data(ctx: SessionContext, args: dict) -> dict:
 
 
 async def execute_runtime_node(tool: str, resource_id: str, session_id: str):
-    """Internal loop orchestrator routing arguments dynamically with symmetric fail-fast validation."""
+    """Orchestrates runtime routing with verified non-colliding monotonic transaction indexing."""
     router = LocalRuntimeRouter()
     router.register_tool("download", download_secure_data)
     router.register_tool("analyze", analyze_stored_data)
@@ -36,21 +40,30 @@ async def execute_runtime_node(tool: str, resource_id: str, session_id: str):
     session = SessionContext(session_id=session_id)
 
     if tool == "pipeline":
-        click.echo(f"🔄 Executing complete stateful pipeline under session: {session_id}...")
+        click.echo(f"🔄 Executing stateful pipeline under session: {session_id}...")
 
-        # Step 1: Download
+        # Step 1: First Attempt
         receipt_1 = await router.dispatch("download", {"resource_id": resource_id}, session)
-        click.echo("\n🔒 Step 1 [download] Completed. Inspecting Forensic Receipt...")
-        click.echo(json.dumps(receipt_1, indent=2))
+        click.echo(
+            f"\n🔒 Attempt 1 [download] Completed (Index: {receipt_1['payload_hash'][:8]}... Depth: {session.execution_depth - 1})")
 
+        # If it failed, let's perform an immediate library-level recovery retry loop!
         if not receipt_1["metadata"].get("execution_success", False):
-            click.echo("\n❌ Pipeline Execution Terminated: Step 1 failed. Aborting downstream tools.", err=True)
-            raise click.Abort()
+            click.echo(
+                "⚠️ Attempt 1 failed under operational conditions. Initializing automated recovery retry loop...")
+            receipt_1 = await router.dispatch("download", {"resource_id": resource_id}, session)
+            click.echo(f"🔒 Attempt 2 [download Recovery] Completed (Depth: {session.execution_depth - 1})")
+            click.echo(json.dumps(receipt_1, indent=2))
+
+            if not receipt_1["metadata"].get("execution_success", False):
+                click.echo("\n❌ Pipeline Terminated: Recovery retry exhausted.", err=True)
+                raise click.Abort()
 
         # Step 2: Analyze
-        click.echo("\n🔄 Step 1 Verified. Advancing to Step 2 [analyze]...")
+        click.echo("\n🔄 Advancing to Step 2 [analyze]...")
         receipt_2 = await router.dispatch("analyze", {}, session)
-        click.echo("\n🔒 Step 2 [analyze] Completed. Pipeline Forensic Receipt Proof:")
+        click.echo(
+            f"\n🔒 Step 2 [analyze] Completed. Pipeline Forensic Receipt Proof (Depth: {session.execution_depth - 1}):")
         click.echo(json.dumps(receipt_2, indent=2))
 
         if not receipt_2["metadata"].get("execution_success", False):
@@ -60,7 +73,6 @@ async def execute_runtime_node(tool: str, resource_id: str, session_id: str):
     else:
         click.echo(f"🔄 Dispatching single tool execution: '{tool}'...")
         receipt = await router.dispatch(tool, {"resource_id": resource_id}, session)
-
         click.echo("\n🔒 Authenticated Forensic Receipt Proof:")
         click.echo(json.dumps(receipt, indent=2))
 

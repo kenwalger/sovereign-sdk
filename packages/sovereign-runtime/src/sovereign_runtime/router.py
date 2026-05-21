@@ -34,19 +34,20 @@ class LocalRuntimeRouter:
     ) -> ForensicReceipt:
         """
         Executes a target tool asynchronously within a tracking session context.
-        Locks deterministic, collision-free transaction tracking indexes into receipts.
+        Consumes an execution slot unconditionally to preserve total chronological uniqueness
+        and prevent duplicate ledger index collisions during external application retry loops.
         """
         if tool_name not in self.tool_registry:
             raise ValueError(f"Tool '{tool_name}' not found in runtime registry.")
 
-        # FIXED: Capture the exact starting index BEFORE any logic mutations occur
+        # FIXED: Capture current position and instantly advance context depth
+        # unconditionally to defend the timeline index allocation against concurrent/retry races.
         assigned_receipt_index = context.execution_depth
+        context.increment_depth()
 
         # 1. Await cooperative tool execution safely
         try:
             execution_result = await self.tool_registry[tool_name](context, arguments)
-            # Increment the session counter exclusively after verified operational success
-            context.increment_depth()
             execution_success = True
         except Exception as e:
             execution_result = {"status": "FAILED", "error": str(e)}
@@ -55,7 +56,7 @@ class LocalRuntimeRouter:
         # 2. Package deterministic validation payload
         execution_payload = {
             "session_id": context.session_id,
-            "execution_depth": assigned_receipt_index,  # FIXED: Sealed index is unique and stable
+            "execution_depth": assigned_receipt_index,  # Guaranteed unique across retries
             "target_tool": tool_name,
             "arguments_hash": self._calculate_stable_arguments_hash(arguments),
             "result": execution_result
