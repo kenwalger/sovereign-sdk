@@ -2,6 +2,8 @@
 
 A high-integrity, local-first monorepo platform enforcing the architectural boundaries of the **Sovereign Systems Specification**. This workspace contains the development frameworks, primitive tools, and local execution barriers designed to eliminate the Prose Tax, guarantee cryptographic provenance, and establish append-only chains of custody for agentic workflows entirely on local silicon.
 
+To learn more about the philosophy and reasoning behind the project's origins, please check out [this doc](PHILOSOPHY.md).
+
 ---
 
 ## Workspace Topography
