@@ -7,6 +7,124 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-05-21
+
+### Fixed
+
+- **Greenfield Key Generation — Descriptor-Level `os.fchmod` Permission
+  Tracking** (`crypto.py` — `load_or_generate_keypair`): Eliminated path-based
+  TOCTOU race windows during greenfield key generation by upgrading file
+  permission tracking to descriptor-level `os.fchmod` actions.  The previous
+  `os.chmod(tmp_path, 0o600)` call resolved the temp file through the filesystem
+  namespace, leaving a window between path resolution and permission application
+  where a symlink substitution or concurrent rename could redirect the chmod to
+  an unintended target.  On POSIX hosts the block now calls
+  `os.fchmod(tmp_file.fileno(), 0o600)`, operating directly on the open file
+  descriptor and bypassing the filesystem namespace entirely.  On Windows, where
+  `os.fchmod` is unavailable, `os.chmod(tmp_path, 0o600)` is retained as a
+  portable fallback via `hasattr(os, "fchmod")`.
+
+- **Greenfield Key Generation — Native Buffered Stream Write** (`crypto.py` —
+  `load_or_generate_keypair`): Streamlined filesystem I/O operations by
+  substituting low-level raw `os.write` tracking with native
+  `NamedTemporaryFile` buffered streaming blocks.  The previous manual
+  `while remaining_bytes` loop called `os.write` directly on the file
+  descriptor, mixing raw syscall-level I/O with a high-level `NamedTemporaryFile`
+  object and creating a layered buffering mismatch where Python's internal stream
+  buffer and the raw write path could diverge.  The block now calls
+  `tmp_file.write(pem_bytes)` directly on the `NamedTemporaryFile` instance;
+  Python's buffered I/O layer handles short-write recovery internally, and the
+  subsequent `tmp_file.flush()` drains the stream buffer to the kernel before
+  `os.fsync` commits it to physical storage.
+
+## [0.5.6] - 2026-05-21
+
+### Fixed
+
+- **Greenfield Key Path — Atomic `NamedTemporaryFile` Creation Pattern**
+  (`crypto.py` — `load_or_generate_keypair`): Eliminated process-wide umask
+  leaks by migrating the greenfield key path to an atomic `NamedTemporaryFile`
+  creation pattern.  The previous `os.umask(0)` / `os.open` sequence mutated
+  the process-wide umask between the capture and restore calls, creating a race
+  window where concurrent threads could create files with world-readable
+  permissions.  The block now uses `tempfile.NamedTemporaryFile(dir=…,
+  delete=False)`, which the Python runtime creates with `0o600` permissions
+  internally without touching the process umask.  The fully written temp file
+  is promoted over the final path via `os.replace()`, and an `except` block
+  removes the temp file on any failure so no partial material is left on disk.
+
+- **Greenfield Key Path — Strict Byte-Tracking `os.write` Loop**
+  (`crypto.py` — `load_or_generate_keypair`): Protected key persistence against
+  filesystem resource constraints by implementing a strict byte-tracking write
+  loop over raw `os.write` boundaries.  A single `os.write` call is not
+  guaranteed to consume the full buffer under resource pressure; a short write
+  silently truncates the key file with no exception raised.  The block now
+  iterates over the remaining bytes, re-submitting the unwritten tail on each
+  pass, and raises `RuntimeError` explicitly on a zero-byte return (disk full
+  or broken pipe) before that condition can produce a partial or empty identity
+  file on disk.
+
+- **Greenfield Key Generation — Explicit `os.chmod` Permission Symmetry**
+  (`crypto.py` — `load_or_generate_keypair`): Hardened greenfield key generation
+  by injecting an explicit, umask-independent `os.chmod(..., 0o600)` guard onto
+  the atomic temp-file path, achieving perfect permission symmetry with the
+  legacy migration architecture.  Although `tempfile.NamedTemporaryFile` targets
+  `0o600` by default, this behaviour is not guaranteed across all host
+  configurations and Python runtime versions.  The explicit `os.chmod` call
+  is placed immediately after `tmp_path` is captured and before any bytes are
+  written, inside the existing `try/except` wrapper so a permission failure
+  triggers the same temp-file cleanup and re-raise path as any other pre-replace
+  error.  Both the migration and greenfield paths now enforce file security
+  through an unconditional `os.chmod` regardless of the inherited process
+  environment.
+
+## [0.5.4] - 2026-05-21
+
+### Fixed
+
+- **Greenfield Key Generation — Process Umask Isolation** (`crypto.py` —
+  `load_or_generate_keypair`): Enforced process umask isolation around
+  `os.open` boundaries during greenfield key generation to guarantee
+  umask-independent `0o600` file permissions.  The `os.open` mode argument is
+  ANDed with the bitwise complement of the current process umask at the kernel
+  level, meaning a non-zero umask could silently strip permission bits from the
+  newly created inode.  The block now captures the active umask with
+  `old_umask = os.umask(0)` immediately before the `os.open` call and restores
+  it with `os.umask(old_umask)` immediately after the file descriptor is
+  obtained, so the `0o600` mode is applied unconditionally regardless of the
+  inherited process environment.
+
+- **Greenfield Key Generation — Pre-Close `os.fsync` Durability** (`crypto.py`
+  — `load_or_generate_keypair`): Hardened greenfield key initialization
+  durability by executing an explicit `os.fsync` on the newly generated file
+  descriptor before closure.  Without this call, the kernel's write-back cache
+  may not commit private key bytes to physical storage before the file descriptor
+  is closed, leaving an empty or partial key file on disk after a power fault.
+  `os.fsync(fd)` is now called after `os.write` and before `os.close(fd)` inside
+  a `try/finally` block that guarantees the descriptor is always released, making
+  the greenfield path's durability guarantee equivalent to the atomic migration
+  path.
+
+## [0.5.3] - 2026-05-21
+
+### Fixed
+
+- **Filesystem Durability and Creation-Time Permission Hardening** (`crypto.py`
+  — `load_or_generate_keypair`): Hardened filesystem durability by injecting
+  pre-rename `os.fsync` controls on atomic migration tasks and establishing
+  strict creation-time permission bounds on greenfield key generation.  In the
+  atomic migration path, `os.fsync(tmp.fileno())` is now called after
+  `tmp.flush()` and before `os.replace()`, guaranteeing that encrypted PEM
+  bytes are physically committed to storage before the rename promotes the temp
+  file over the original key.  In the new-keypair generation path, the private
+  key file is now opened via `os.open(path, O_WRONLY | O_CREAT | O_TRUNC,
+  0o600)` wrapped with `os.fdopen`, so the inode is created with `0o600`
+  permissions as its first filesystem operation.  The previous pattern of
+  `open(..., "wb")` followed by `os.chmod` left a window where the file existed
+  with inheritable process umask permissions before the restriction was applied.
+
+## [0.5.2] - 2026-05-21
+
 ### Changed
 
 - **Graceful Legacy Keypair Migration** (`crypto.py` —
