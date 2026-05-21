@@ -1,9 +1,12 @@
 import base64
 import json
+import hashlib
 import os
+import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TypedDict, Any
+from typing import Any, TypedDict
 from pydantic import BaseModel, Field
 
 from cryptography.hazmat.primitives.asymmetric import ed25519
@@ -11,19 +14,47 @@ from cryptography.hazmat.primitives import serialization
 
 
 class ForensicReceipt(TypedDict):
+    """Immutable, cryptographically sealed provenance record for a single tool execution.
+
+    Every field in this envelope is covered by the Ed25519 signature stored in
+    ``signature``.  Mutating any value — including those inside ``metadata`` —
+    causes :meth:`SovereignKeyManager.verify_receipt` to return ``False``.
+
+    Attributes:
+        timestamp: ISO 8601 UTC timestamp captured at receipt-minting time.
+        payload_hash: Hex-encoded SHA-256 digest of the deterministically
+            serialised execution payload.  During verification this value is
+            explicitly cross-checked against a fresh digest re-derived from the
+            original payload; a mismatch causes
+            :meth:`SovereignKeyManager.verify_receipt` to return ``False``
+            before the signature check is even attempted.
+        public_key: Base64-encoded raw Ed25519 public key bytes used to
+            produce and verify ``signature``.
+        signature: Base64-encoded raw Ed25519 signature over the canonical
+            manifest (``timestamp`` + ``payload_hash`` + ``metadata``).
+        metadata: Arbitrary key/value execution annotations sealed inside the
+            signature, e.g. ``execution_success``, ``runtime``, ``py_ver``.
     """
-    A typed representation of a secure provenance log entry.
-    Ensures structural integrity when passed through local-first runtime layers.
-    """
-    timestamp: str  # ISO 8601 UTC timestamp
-    payload_hash: str  # Hex-encoded stringified data representation
-    public_key: str  # Base64-encoded Ed25519 public key
-    signature: str  # Base64-encoded cryptographic signature
+
+    timestamp: str
+    payload_hash: str
+    public_key: str
+    signature: str
     metadata: dict[str, Any]
 
 
 class ReceiptSchema(BaseModel):
-    """Pydantic validation layer for forensic runtime checks."""
+    """Pydantic validation layer applied to every freshly minted ForensicReceipt.
+
+    Attributes:
+        timestamp: UTC datetime of receipt creation.  Defaults to the current
+            instant when not supplied explicitly.
+        payload_hash: Hex-encoded SHA-256 digest of the signed payload.
+        public_key: Base64-encoded raw Ed25519 public key bytes.
+        signature: Base64-encoded raw Ed25519 signature bytes.
+        metadata: Arbitrary execution annotation dictionary.
+    """
+
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     payload_hash: str
     public_key: str
@@ -32,48 +63,143 @@ class ReceiptSchema(BaseModel):
 
 
 class SovereignKeyManager:
-    """Manages local-first Ed25519 lifecycle operations and cryptographic verification."""
+    """Manages the local-first Ed25519 identity lifecycle and cryptographic receipt operations.
 
-    def __init__(self, key_dir: str | Path = ".keys"):
+    All private key material is stored on disk encrypted with the passphrase
+    sourced from the ``SOVEREIGN_NODE_SECRET`` environment variable.  The
+    corresponding public key is written as plain PEM for audit and rotation
+    purposes.
+
+    Args:
+        key_dir: Directory path for on-disk keypair persistence.  Defaults to
+            ``.keys`` relative to the current working directory.
+    """
+
+    def __init__(self, key_dir: str | Path = ".keys") -> None:
+        """Initialises path references for the identity keypair.  No I/O is performed.
+
+        Args:
+            key_dir: Directory where ``sovereign_identity.pem`` and
+                ``sovereign_identity.pub`` will be written or read.
+        """
         self.key_dir = Path(key_dir)
         self.private_key_path = self.key_dir / "sovereign_identity.pem"
         self.public_key_path = self.key_dir / "sovereign_identity.pub"
 
-        # Instantiate or recover state
         self._private_key: ed25519.Ed25519PrivateKey | None = None
         self._public_key: ed25519.Ed25519PublicKey | None = None
 
+    def _resolve_node_secret(self) -> bytes:
+        """Reads and validates the PEM encryption passphrase from the environment.
+
+        Returns:
+            UTF-8 encoded bytes of the ``SOVEREIGN_NODE_SECRET`` value.
+
+        Raises:
+            RuntimeError: If ``SOVEREIGN_NODE_SECRET`` is absent or blank.
+        """
+        secret = os.getenv("SOVEREIGN_NODE_SECRET", "").strip()
+        if not secret:
+            raise RuntimeError(
+                "SOVEREIGN_NODE_SECRET is not set. "
+                "An explicit cryptographic passcode wrapper must be declared before "
+                "initializing the sovereign identity keypair."
+            )
+        return secret.encode("utf-8")
+
     def load_or_generate_keypair(self) -> tuple[str, str]:
+        """Loads an existing Ed25519 keypair or generates and persists a new one.
+
+        Loading follows a two-attempt upgrade path to handle legacy deployments:
+
+        1. The PEM file is first loaded with the active ``SOVEREIGN_NODE_SECRET``
+           passphrase via
+           :func:`~cryptography.hazmat.primitives.serialization.BestAvailableEncryption`.
+        2. If that raises :exc:`TypeError` or :exc:`ValueError` (indicating an
+           unencrypted legacy key), a second attempt is made with
+           ``password=None``.  On success, an advisory warning is printed to
+           ``stderr`` and the key is immediately re-written to disk using the
+           current passphrase, migrating the file to the encrypted format
+           transparently.
+        3. If both attempts fail, a :exc:`RuntimeError` is raised with explicit
+           rotation guidance for the operator.
+
+        File permissions are tightened to ``0o600`` on initial creation and
+        after a legacy-key upgrade rewrite.
+
+        Returns:
+            A 2-tuple of ``(base64_private_key, base64_public_key)`` where each
+            element is the raw-bytes representation of the respective key
+            encoded as a base64 string.
+
+        Raises:
+            RuntimeError: If ``SOVEREIGN_NODE_SECRET`` is not set, or if the
+                on-disk PEM cannot be loaded by either attempt (corrupted file
+                or wrong passphrase).
         """
-        Derives an Ed25519 identity keypair. Restores from disk if available,
-        otherwise generates a new pair and persists them cleanly.
-        Returns a tuple of (B64_PrivateKey, B64_PublicKey).
-        """
+        passphrase = self._resolve_node_secret()
+
         if self.private_key_path.exists():
-            # Load private key from PEM file
-            with open(self.private_key_path, "rb") as f:
-                self._private_key = serialization.load_pem_private_key(
-                    f.read(),
-                    password=None
+            pem_data: bytes = self.private_key_path.read_bytes()
+
+            try:
+                self._private_key = serialization.load_pem_private_key(pem_data, password=passphrase)
+            except (TypeError, ValueError):
+                # First attempt failed — check for a legacy unencrypted key.
+                try:
+                    self._private_key = serialization.load_pem_private_key(pem_data, password=None)
+                except Exception:
+                    raise RuntimeError(
+                        f"Cannot load private key at '{self.private_key_path}': the file is "
+                        "either corrupted or was encrypted with a different "
+                        "SOVEREIGN_NODE_SECRET value.  Rotate the key by removing the file "
+                        "and restarting the node to generate a new encrypted identity."
+                    )
+
+                # Legacy unencrypted key loaded — warn and atomically re-encrypt in place.
+                print(
+                    "⚠️  Legacy unencrypted keypair detected. Automatically upgrading "
+                    "identity configuration to encrypted storage format...",
+                    file=sys.stderr,
                 )
+                encrypted_pem: bytes = self._private_key.private_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PrivateFormat.PKCS8,
+                    encryption_algorithm=serialization.BestAvailableEncryption(passphrase),
+                )
+                tmp_path: str = ""
+                try:
+                    with tempfile.NamedTemporaryFile(
+                        dir=os.path.dirname(self.private_key_path),
+                        delete=False,
+                    ) as tmp:
+                        tmp_path = tmp.name
+                        os.chmod(tmp_path, 0o600)
+                        tmp.write(encrypted_pem)
+                        tmp.flush()
+                    os.replace(tmp_path, self.private_key_path)
+                    tmp_path = ""  # Renamed successfully; nothing left to clean up.
+                finally:
+                    if tmp_path:
+                        try:
+                            os.remove(tmp_path)
+                        except FileNotFoundError:
+                            pass
+
             self._public_key = self._private_key.public_key()
         else:
-            # Generate new Ed25519 asymmetric pair
             self._private_key = ed25519.Ed25519PrivateKey.generate()
             self._public_key = self._private_key.public_key()
 
-            # Persist raw keys with restricted file permissions
             self.key_dir.mkdir(parents=True, exist_ok=True)
-
             with open(self.private_key_path, "wb") as f:
                 f.write(
                     self._private_key.private_bytes(
                         encoding=serialization.Encoding.PEM,
                         format=serialization.PrivateFormat.PKCS8,
-                        encryption_algorithm=serialization.NoEncryption()
+                        encryption_algorithm=serialization.BestAvailableEncryption(passphrase)
                     )
                 )
-            # Ensure proper OS-level access control list permissions (Unix 600 equivalent)
             os.chmod(self.private_key_path, 0o600)
 
             with open(self.public_key_path, "wb") as f:
@@ -87,9 +213,19 @@ class SovereignKeyManager:
         return self.get_base64_private_key(), self.get_base64_public_key()
 
     def get_base64_private_key(self) -> str:
-        """Extracts raw Private Key bytes encoded cleanly in Base64."""
+        """Exports the in-memory private key as a base64-encoded raw byte string.
+
+        Returns:
+            Base64-encoded string of the 32-byte Ed25519 private key seed.
+            This export is unencrypted and lives only in memory; it is never
+            written to disk by this method.
+
+        Raises:
+            RuntimeError: If the keypair has not been loaded via
+                :meth:`load_or_generate_keypair`.
+        """
         if not self._private_key:
-            raise RuntimeError("Keypair not loaded or generated.")
+            raise RuntimeError("Keypair not loaded.")
         raw_bytes = self._private_key.private_bytes(
             encoding=serialization.Encoding.Raw,
             format=serialization.PrivateFormat.Raw,
@@ -98,67 +234,190 @@ class SovereignKeyManager:
         return base64.b64encode(raw_bytes).decode("utf-8")
 
     def get_base64_public_key(self) -> str:
-        """Extracts raw Public Key bytes encoded cleanly in Base64."""
+        """Exports the in-memory public key as a base64-encoded raw byte string.
+
+        Returns:
+            Base64-encoded string of the 32-byte Ed25519 public key.
+
+        Raises:
+            RuntimeError: If the keypair has not been loaded via
+                :meth:`load_or_generate_keypair`.
+        """
         if not self._public_key:
-            raise RuntimeError("Keypair not loaded or generated.")
+            raise RuntimeError("Keypair not loaded.")
         raw_bytes = self._public_key.public_bytes(
             encoding=serialization.Encoding.Raw,
             format=serialization.PublicFormat.Raw
         )
         return base64.b64encode(raw_bytes).decode("utf-8")
 
-    def generate_receipt(self, payload: dict[str, Any], metadata: dict[str, Any] | None = None) -> ForensicReceipt:
+    @property
+    def public_key(self) -> str:
+        """The node's pinned public key as a base64-encoded string.
+
+        Convenience accessor that returns the same value as
+        :meth:`get_base64_public_key`.  Intended to be passed directly as the
+        ``expected_public_key`` argument to
+        :meth:`verify_receipt` so that call sites can enforce key pinning
+        without holding a separate reference to the raw key string.
+
+        Returns:
+            Base64-encoded string of the 32-byte Ed25519 public key.
+
+        Raises:
+            RuntimeError: If the keypair has not been loaded via
+                :meth:`load_or_generate_keypair`.
         """
-        Signs a structured data payload and constructs an immutable ForensicReceipt payload dictionary.
+        return self.get_base64_public_key()
+
+    def generate_receipt(
+        self,
+        payload: dict[str, Any],
+        metadata: dict[str, Any] | None = None,
+    ) -> ForensicReceipt:
+        """Mints a cryptographically sealed ForensicReceipt for the given payload.
+
+        Assembles a canonical manifest that binds ``timestamp``, ``payload_hash``,
+        and ``metadata`` into a single deterministic JSON string, then signs that
+        string with the node's Ed25519 private key.  Because the entire manifest
+        is signed, any post-issuance mutation of ``metadata`` — including flipping
+        ``execution_success`` — is detectable by :meth:`verify_receipt`.
+
+        Args:
+            payload: Arbitrary dictionary representing the tool's execution result.
+                Serialised with ``json.dumps(sort_keys=True, default=str)`` before
+                hashing to guarantee deterministic output.
+            metadata: Optional key/value annotations embedded in the sealed
+                envelope, e.g. ``{"execution_success": True, "runtime": "…"}``.
+                Defaults to an empty dictionary when ``None``.
+
+        Returns:
+            A :class:`ForensicReceipt` TypedDict whose ``signature`` covers the
+            ``timestamp``, ``payload_hash``, and ``metadata`` fields atomically.
+
+        Raises:
+            RuntimeError: If the keypair is not loaded and
+                ``SOVEREIGN_NODE_SECRET`` is unset.
         """
         if not self._private_key:
             self.load_or_generate_keypair()
 
-        # Deterministic string representation for hash normalization
-        serialized_payload = json.dumps(payload, sort_keys=True)
-        payload_hash = str(hash(serialized_payload))  # Lightweight process hash or custom hash logic
+        metadata = metadata or {}
 
-        # Generate raw signature
-        raw_signature = self._private_key.sign(serialized_payload.encode("utf-8"))
+        # 1. Stable SHA-256 digest of the payload
+        serialized_payload = json.dumps(payload, sort_keys=True, default=str)
+        payload_hash = hashlib.sha256(serialized_payload.encode("utf-8")).hexdigest()
 
-        # Construct and validate receipt structure
-        receipt_data = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+        # 2. Canonical manifest that binds every security-critical field
+        timestamp = datetime.now(timezone.utc).isoformat()
+        manifest = {
+            "metadata": metadata,
             "payload_hash": payload_hash,
-            "public_key": self.get_base64_public_key(),
-            "signature": base64.b64encode(raw_signature).decode("utf-8"),
-            "metadata": metadata or {}
+            "timestamp": timestamp,
         }
+        canonical = json.dumps(manifest, sort_keys=True, default=str)
 
-        # Enforce validation schemas at runtime boundary
-        validated = ReceiptSchema(**receipt_data)
+        # 3. Sign the full manifest, not just the raw payload
+        raw_signature = self._private_key.sign(canonical.encode("utf-8"))
+        signature_b64 = base64.b64encode(raw_signature).decode("utf-8")
 
+        # 4. Validate structure through Pydantic before returning
+        validated = ReceiptSchema(
+            timestamp=timestamp,
+            payload_hash=payload_hash,
+            public_key=self.get_base64_public_key(),
+            signature=signature_b64,
+            metadata=metadata,
+        )
+
+        # Return the exact timestamp string that was signed so verify_receipt can reconstruct it
         return ForensicReceipt(
-            timestamp=validated.timestamp.isoformat(),
+            timestamp=timestamp,
             payload_hash=validated.payload_hash,
             public_key=validated.public_key,
             signature=validated.signature,
-            metadata=validated.metadata
+            metadata=validated.metadata,
         )
 
     @staticmethod
-    def verify_receipt(receipt: ForensicReceipt, original_payload: dict[str, Any]) -> bool:
-        """
-        Stateless audit verification of a ForensicReceipt against the original payload dictionary.
+    def verify_receipt(
+        receipt: ForensicReceipt,
+        original_payload: dict[str, Any],
+        expected_public_key: str | None = None,
+    ) -> bool:
+        """Verifies the cryptographic integrity of a ForensicReceipt against the original payload.
+
+        Verification proceeds in three sequential, independent steps:
+
+        1. **Key-pin assertion** *(optional)*: When ``expected_public_key`` is
+           supplied, the base64-encoded public key string extracted from
+           ``receipt["public_key"]`` is compared directly against it.  A
+           mismatch returns ``False`` immediately, before any cryptographic
+           operation is attempted.  This prevents *identity self-attestation
+           forgery*: without this gate, an attacker could mint a receipt with
+           a rogue keypair that verifies correctly against its own public key
+           rather than the node's pinned identity.  Pass
+           :attr:`SovereignKeyManager.public_key` to enforce provenance.
+
+        2. **Explicit payload-hash assertion**: The SHA-256 digest of
+           ``original_payload`` is re-derived and compared byte-for-byte
+           against ``receipt["payload_hash"]``.  A mismatch returns ``False``
+           before any signature operation is attempted, closing the *phantom
+           field* attack vector.
+
+        3. **Signature verification**: The canonical manifest
+           ``{"metadata": …, "payload_hash": …, "timestamp": …}`` is
+           reconstructed using ``receipt["payload_hash"]`` (confirmed
+           consistent with ``original_payload``) and verified against the
+           Ed25519 ``signature`` embedded in the envelope.  Any mutation of
+           ``metadata`` or ``timestamp`` is caught here.
+
+        Args:
+            receipt: The :class:`ForensicReceipt` envelope to audit.
+            original_payload: The exact payload dictionary passed to
+                :meth:`generate_receipt`.  Its SHA-256 digest is re-derived
+                internally and compared against ``receipt["payload_hash"]``;
+                the caller must not pre-hash it.
+            expected_public_key: Optional base64-encoded Ed25519 public key
+                string that the receipt's embedded key must match exactly.
+                When provided, any receipt whose ``public_key`` field differs
+                from this value is rejected before crypto operations begin.
+                Pass :attr:`SovereignKeyManager.public_key` to pin receipts
+                to the local node identity.  Defaults to ``None`` (no pin).
+
+        Returns:
+            ``True`` if and only if all active checks pass: the optional key
+            pin matches, the re-derived payload hash equals
+            ``receipt["payload_hash"]``, and the Ed25519 signature is valid
+            for the reconstructed manifest.  ``False`` for any pin mismatch,
+            hash mismatch, signature failure, or decoding error.
         """
         try:
-            # Decode signature and public key from base64
+            # Step 1 — key-pin assertion (identity provenance guard).
+            # Fail fast on a string comparison before touching any crypto.
+            if expected_public_key is not None and receipt["public_key"] != expected_public_key:
+                return False
+
             public_bytes = base64.b64decode(receipt["public_key"])
             signature_bytes = base64.b64decode(receipt["signature"])
-
-            # Reconstruct the public key class object
             public_key = ed25519.Ed25519PublicKey.from_public_bytes(public_bytes)
 
-            # Reconstruct original serialized target data
-            serialized_payload = json.dumps(original_payload, sort_keys=True)
+            # Step 2 — explicit payload-hash assertion (phantom field guard).
+            serialized_payload = json.dumps(original_payload, sort_keys=True, default=str)
+            expected_payload_hash = hashlib.sha256(serialized_payload.encode("utf-8")).hexdigest()
+            if expected_payload_hash != receipt["payload_hash"]:
+                return False
 
-            # Verify signature over data payload
-            public_key.verify(signature_bytes, serialized_payload.encode("utf-8"))
+            # Step 3 — reconstruct the canonical manifest and verify the signature.
+            # receipt["payload_hash"] is now confirmed to match original_payload.
+            manifest = {
+                "metadata": receipt["metadata"],
+                "payload_hash": receipt["payload_hash"],
+                "timestamp": receipt["timestamp"],
+            }
+            canonical = json.dumps(manifest, sort_keys=True, default=str)
+
+            public_key.verify(signature_bytes, canonical.encode("utf-8"))
             return True
         except Exception:
             return False
