@@ -34,6 +34,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or broken pipe) before that condition can produce a partial or empty identity
   file on disk.
 
+- **Greenfield Key Generation — Explicit `os.chmod` Permission Symmetry**
+  (`crypto.py` — `load_or_generate_keypair`): Hardened greenfield key generation
+  by injecting an explicit, umask-independent `os.chmod(..., 0o600)` guard onto
+  the atomic temp-file path, achieving perfect permission symmetry with the
+  legacy migration architecture.  Although `tempfile.NamedTemporaryFile` targets
+  `0o600` by default, this behaviour is not guaranteed across all host
+  configurations and Python runtime versions.  The explicit `os.chmod` call
+  is placed immediately after `tmp_path` is captured and before any bytes are
+  written, inside the existing `try/except` wrapper so a permission failure
+  triggers the same temp-file cleanup and re-raise path as any other pre-replace
+  error.  Both the migration and greenfield paths now enforce file security
+  through an unconditional `os.chmod` regardless of the inherited process
+  environment.
+
 ## [0.5.4] - 2026-05-21
 
 ### Fixed
