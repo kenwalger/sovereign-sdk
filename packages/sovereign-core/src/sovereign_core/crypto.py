@@ -193,15 +193,21 @@ class SovereignKeyManager:
             self._public_key = self._private_key.public_key()
 
             self.key_dir.mkdir(parents=True, exist_ok=True)
+            old_umask = os.umask(0)
             fd = os.open(self.private_key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "wb") as f:
-                f.write(
+            os.umask(old_umask)
+            try:
+                os.write(
+                    fd,
                     self._private_key.private_bytes(
                         encoding=serialization.Encoding.PEM,
                         format=serialization.PrivateFormat.PKCS8,
                         encryption_algorithm=serialization.BestAvailableEncryption(passphrase)
-                    )
+                    ),
                 )
+                os.fsync(fd)
+            finally:
+                os.close(fd)
 
             with open(self.public_key_path, "wb") as f:
                 f.write(

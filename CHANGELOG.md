@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-05-21
+
+### Fixed
+
+- **Greenfield Key Generation — Process Umask Isolation** (`crypto.py` —
+  `load_or_generate_keypair`): Enforced process umask isolation around
+  `os.open` boundaries during greenfield key generation to guarantee
+  umask-independent `0o600` file permissions.  The `os.open` mode argument is
+  ANDed with the bitwise complement of the current process umask at the kernel
+  level, meaning a non-zero umask could silently strip permission bits from the
+  newly created inode.  The block now captures the active umask with
+  `old_umask = os.umask(0)` immediately before the `os.open` call and restores
+  it with `os.umask(old_umask)` immediately after the file descriptor is
+  obtained, so the `0o600` mode is applied unconditionally regardless of the
+  inherited process environment.
+
+- **Greenfield Key Generation — Pre-Close `os.fsync` Durability** (`crypto.py`
+  — `load_or_generate_keypair`): Hardened greenfield key initialization
+  durability by executing an explicit `os.fsync` on the newly generated file
+  descriptor before closure.  Without this call, the kernel's write-back cache
+  may not commit private key bytes to physical storage before the file descriptor
+  is closed, leaving an empty or partial key file on disk after a power fault.
+  `os.fsync(fd)` is now called after `os.write` and before `os.close(fd)` inside
+  a `try/finally` block that guarantees the descriptor is always released, making
+  the greenfield path's durability guarantee equivalent to the atomic migration
+  path.
+
 ## [0.5.3] - 2026-05-21
 
 ### Fixed
