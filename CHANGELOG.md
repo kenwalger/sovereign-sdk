@@ -3,7 +3,63 @@
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.5.0] - 2026-05-21
+
+### Added
+
+- **`_audit_receipt` Helper** (`__main__.py`): Extracted cryptographic audit
+  logic into a dedicated `_audit_receipt(receipt, payload, label)` function.
+  Centralises `SovereignKeyManager.verify_receipt` and `execution_success`
+  checks, eliminating duplicated abort logic across pipeline and single-tool
+  call paths.
+- **`SovereignKeyManager._resolve_node_secret`** (`crypto.py`): New private
+  helper that reads and validates the `SOVEREIGN_NODE_SECRET` environment
+  variable, raising a descriptive `RuntimeError` immediately when the secret is
+  absent or blank rather than silently falling back to plaintext storage.
+- **Google-Style Docstrings**: Added complete `Args:`, `Returns:`, and
+  `Raises:` documentation blocks to every public class, method, and async tool
+  function across `crypto.py`, `gateway.py`, `router.py`, and `__main__.py`.
+- **Explicit PEP 484 Type Annotations**: Applied complete return-type and
+  parameter annotations to all previously untyped functions, including
+  `Dict[str, Any]` signatures on async tool callbacks and `-> None` on
+  side-effect-only methods.
+
+### Changed
+
+- **`LocalRuntimeRouter.dispatch` Return Type** (`router.py`): Changed from
+  `ForensicReceipt` to `tuple[ForensicReceipt, Dict[str, Any]]`.  The
+  execution payload is now returned alongside the receipt so call sites can
+  independently reconstruct the signed manifest for re-verification without
+  duplicating internal router logic.
+- **`__main__.py` Dispatch Call Sites**: All three `await router.dispatch(...)`
+  calls now unpack the 2-tuple `(receipt, payload)`.  Receipt auditing is
+  delegated to `_audit_receipt` at every pipeline step.
+
+### Fixed
+
+- **Unverified Envelope Propagation** (`router.py`): `dispatch` now calls
+  `SovereignKeyManager.verify_receipt(receipt, execution_payload)` immediately
+  after minting and raises `RuntimeError` if the seal check fails, preventing
+  a corrupted receipt from reaching the caller.
+
+### Security
+
+- **Full Envelope Signing** (`crypto.py` — `generate_receipt` /
+  `verify_receipt`): The Ed25519 signature previously covered only the raw
+  serialised payload, leaving `metadata` (including `execution_success`),
+  `timestamp`, and `payload_hash` unsigned and mutable after issuance.  The
+  signature now covers a canonical JSON manifest binding all three fields;
+  `verify_receipt` reconstructs the identical manifest before checking the
+  signature, so any post-issuance mutation of the envelope returns `False`.
+- **Encrypted Private Key Storage** (`crypto.py` — `load_or_generate_keypair`):
+  Replaced `serialization.NoEncryption()` with
+  `serialization.BestAvailableEncryption(passphrase)` when writing the PKCS8
+  PEM to disk.  The passphrase is derived from the mandatory
+  `SOVEREIGN_NODE_SECRET` environment variable; the node refuses to initialise
+  when the variable is absent.  Existing unencrypted PEM files are rejected at
+  load time and must be rotated.
 
 ## [0.4.1] - 2026-05-20
 
