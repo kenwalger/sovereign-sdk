@@ -113,17 +113,17 @@ _FILLER_PATTERNS: List[tuple[re.Pattern[str], str]] = [
         ),
         "",
     ),
-    # Affirmation filler — erased only when "sure" stands as a pure colloquial
-    # filler modifier.  Two guards enforce this:
-    #   • Negative lookbehinds (?<!make )(?<!be ) prevent stripping "sure"
-    #     when it follows an instructional verb anchor (e.g. "make sure to",
-    #     "be sure to"), where "sure" forms part of a directive, not filler.
-    #     Both lookbehinds are fixed-width (5 chars each) so Python's re engine
-    #     accepts them; re.IGNORECASE makes them case-insensitive at runtime.
-    #   • Negative lookahead (?![-\w]) prevents stripping "sure" when it is
-    #     the first component of a hyphenated compound (e.g. "sure-fire",
-    #     "sure-footed").
-    (re.compile(r"\bof course\b|\bcertainly\b|\babsolutely\b|(?<!make )(?<!be )\bsure\b(?![-\w])", re.IGNORECASE), ""),
+    # Affirmation filler — three sub-patterns with distinct guard structures:
+    #   • \bof course\b — phrase-anchored; cannot form a hyphenated compound,
+    #     so no lookahead guard is required.
+    #   • \b(?:certainly|absolutely)\b(?![-\w]) — grouped inside a non-capturing
+    #     alternation so the trailing (?![-\w]) applies uniformly to both tokens.
+    #     Prevents "certainly-not" or "absolutely-not" from being mangled into
+    #     "-not".
+    #   • (?<!make )(?<!be )\bsure\b(?![-\w]) — dual guards: paired fixed-width
+    #     lookbehinds protect instructional directives ("make sure to", "be sure
+    #     to"); the trailing lookahead protects hyphenated compounds ("sure-fire").
+    (re.compile(r"\bof course\b|\b(?:certainly|absolutely)\b(?![-\w])|(?<!make )(?<!be )\bsure\b(?![-\w])", re.IGNORECASE), ""),
     # Preamble phrases — erase to end of line.
     (re.compile(r"\bI hope (this|that|you)\b.*", re.IGNORECASE), ""),
     # Degenerate bold/italic marker runs — four or more consecutive asterisks

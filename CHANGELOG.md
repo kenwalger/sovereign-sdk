@@ -32,6 +32,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Prose Tax — Affirmation Alternation Unified Under Global Lookahead**
+  (`gateway.py` — `_FILLER_PATTERNS`): Unified the ``certainly`` and
+  ``absolutely`` affirmation tokens inside a non-capturing group so that the
+  ``(?![-\w])`` negative lookahead applies collectively to both options.  The
+  previous naked ``\bcertainly\b|\babsolutely\b`` form carried no lookahead
+  guard, making it vulnerable to corrupting hyphenated compound words
+  (e.g. ``"certainly-not"`` → ``"-not"``).  Pattern replaced with
+  ``\b(?:certainly|absolutely)\b(?![-\w])``.  The ``of course`` phrase-anchor
+  and the dual-guarded ``sure`` sub-pattern are unchanged.  Inline comment
+  restructured into a three-bullet breakdown documenting each sub-pattern's
+  distinct guard rationale.
+
 - **Prose Tax — Greeting Alternation Unified Under Global Lookahead**
   (`gateway.py` — `_FILLER_PATTERNS`): Unified the greeting alternation
   string inside a non-capturing group so that the ``(?![-\w])`` negative
