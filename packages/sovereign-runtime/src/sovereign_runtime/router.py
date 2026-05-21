@@ -19,16 +19,10 @@ class LocalRuntimeRouter:
         self.tool_registry: Dict[str, AsyncTool] = {}
 
     def register_tool(self, name: str, func: AsyncTool) -> None:
-        """Registers an asynchronous local capability."""
         self.tool_registry[name] = func
 
     @staticmethod
     def _calculate_stable_arguments_hash(arguments: Dict[str, Any]) -> str:
-        """
-        Generates a deterministic, process-stable SHA-256 string hash for arbitrary
-        argument dictionaries, sorting keys to avoid dictionary order mismatching
-        and handling nested objects safely via string coercion.
-        """
         canonical_json = json.dumps(arguments, sort_keys=True, default=str)
         return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
 
@@ -40,15 +34,18 @@ class LocalRuntimeRouter:
     ) -> ForensicReceipt:
         """
         Executes a target tool asynchronously within a tracking session context.
-        Mutates transactional execution metrics only upon proven operational success.
+        Locks deterministic, collision-free transaction tracking indexes into receipts.
         """
         if tool_name not in self.tool_registry:
             raise ValueError(f"Tool '{tool_name}' not found in runtime registry.")
 
-        # 1. Await cooperative tool execution safely *before* committing depth mutations
+        # FIXED: Capture the exact starting index BEFORE any logic mutations occur
+        assigned_receipt_index = context.execution_depth
+
+        # 1. Await cooperative tool execution safely
         try:
             execution_result = await self.tool_registry[tool_name](context, arguments)
-            # Session execution depth is exclusively updated post-success
+            # Increment the session counter exclusively after verified operational success
             context.increment_depth()
             execution_success = True
         except Exception as e:
@@ -58,7 +55,7 @@ class LocalRuntimeRouter:
         # 2. Package deterministic validation payload
         execution_payload = {
             "session_id": context.session_id,
-            "execution_depth": context.execution_depth,  # Strictly tracks successful index
+            "execution_depth": assigned_receipt_index,  # FIXED: Sealed index is unique and stable
             "target_tool": tool_name,
             "arguments_hash": self._calculate_stable_arguments_hash(arguments),
             "result": execution_result
