@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-05-21
+
+### Fixed
+
+- **Greenfield Key Path — Atomic `NamedTemporaryFile` Creation Pattern**
+  (`crypto.py` — `load_or_generate_keypair`): Eliminated process-wide umask
+  leaks by migrating the greenfield key path to an atomic `NamedTemporaryFile`
+  creation pattern.  The previous `os.umask(0)` / `os.open` sequence mutated
+  the process-wide umask between the capture and restore calls, creating a race
+  window where concurrent threads could create files with world-readable
+  permissions.  The block now uses `tempfile.NamedTemporaryFile(dir=…,
+  delete=False)`, which the Python runtime creates with `0o600` permissions
+  internally without touching the process umask.  The fully written temp file
+  is promoted over the final path via `os.replace()`, and an `except` block
+  removes the temp file on any failure so no partial material is left on disk.
+
+- **Greenfield Key Path — Strict Byte-Tracking `os.write` Loop**
+  (`crypto.py` — `load_or_generate_keypair`): Protected key persistence against
+  filesystem resource constraints by implementing a strict byte-tracking write
+  loop over raw `os.write` boundaries.  A single `os.write` call is not
+  guaranteed to consume the full buffer under resource pressure; a short write
+  silently truncates the key file with no exception raised.  The block now
+  iterates over the remaining bytes, re-submitting the unwritten tail on each
+  pass, and raises `RuntimeError` explicitly on a zero-byte return (disk full
+  or broken pipe) before that condition can produce a partial or empty identity
+  file on disk.
+
 ## [0.5.4] - 2026-05-21
 
 ### Fixed

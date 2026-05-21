@@ -193,21 +193,37 @@ class SovereignKeyManager:
             self._public_key = self._private_key.public_key()
 
             self.key_dir.mkdir(parents=True, exist_ok=True)
-            old_umask = os.umask(0)
-            fd = os.open(self.private_key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            os.umask(old_umask)
+            pem_bytes = self._private_key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.BestAvailableEncryption(passphrase),
+            )
+            tmp_path: str = ""
             try:
-                os.write(
-                    fd,
-                    self._private_key.private_bytes(
-                        encoding=serialization.Encoding.PEM,
-                        format=serialization.PrivateFormat.PKCS8,
-                        encryption_algorithm=serialization.BestAvailableEncryption(passphrase)
-                    ),
-                )
-                os.fsync(fd)
-            finally:
-                os.close(fd)
+                with tempfile.NamedTemporaryFile(
+                    dir=os.path.dirname(self.private_key_path),
+                    delete=False,
+                ) as tmp_file:
+                    tmp_path = tmp_file.name
+                    remaining_bytes = pem_bytes
+                    while remaining_bytes:
+                        written = os.write(tmp_file.fileno(), remaining_bytes)
+                        if written == 0:
+                            raise RuntimeError(
+                                "Disk full or broken pipe encountered during private key serialization."
+                            )
+                        remaining_bytes = remaining_bytes[written:]
+                    tmp_file.flush()
+                    os.fsync(tmp_file.fileno())
+                os.replace(tmp_path, self.private_key_path)
+                tmp_path = ""
+            except Exception:
+                if tmp_path:
+                    try:
+                        os.remove(tmp_path)
+                    except FileNotFoundError:
+                        pass
+                raise
 
             with open(self.public_key_path, "wb") as f:
                 f.write(
