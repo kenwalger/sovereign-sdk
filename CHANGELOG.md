@@ -32,6 +32,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Prose Tax — `hi` Greeting Boundary Hardened** (`gateway.py` —
+  `_FILLER_PATTERNS`): Hardened the conversational ``hi`` greeting regex
+  boundary with a negative lookahead guard to prevent corruption of technical
+  terms like ``hi-fi``, ``hi-res``, and ``hi-DPI``.  The previous ``\bhi\b``
+  pattern matched the ``hi`` prefix in hyphenated compounds because ``\b``
+  fires at the alphanumeric/hyphen boundary.  The pattern is updated to
+  ``\bhi\b(?![-\w])``, suppressing the match when ``hi`` is immediately
+  followed by a hyphen or word character.
+
+- **Repository Tracking — `CLAUDE.md` Removed from Git Index**
+  (`.gitignore` / git index): Removed ``CLAUDE.md`` from the active git
+  tracking index to properly honor the repository ``.gitignore`` boundary.
+  The file is already listed in ``.gitignore`` but remained tracked due to a
+  prior ``git add``; ``git rm --cached CLAUDE.md`` cleanly removes it from
+  the index while leaving the physical file intact on disk.
+
 - **Prose Tax — `process_prose_tax` Returns Optimized Text Payload**
   (`gateway.py` — `process_prose_tax`): Corrected `process_prose_tax` to
   explicitly return the optimized text payload string alongside its tracking
