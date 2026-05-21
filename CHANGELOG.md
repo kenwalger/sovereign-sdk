@@ -32,6 +32,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Prose Tax — Greeting Alternation Unified Under Global Lookahead**
+  (`gateway.py` — `_FILLER_PATTERNS`): Unified the greeting alternation
+  string inside a non-capturing group so that the ``(?![-\w])`` negative
+  lookahead guard applies collectively to all four tokens.  The previous
+  per-token form ``\bhi\b(?![-\w])|\bhello\b|\bhey\b|\bgreetings\b``
+  guarded only ``hi``, leaving ``hello``, ``hey``, and ``greetings``
+  unguarded and vulnerable to mangling hyphenated compound strings (e.g.
+  ``"hello-world"`` → ``"-world"``).  Pattern replaced with
+  ``\b(?:hi|hello|hey|greetings)\b(?![-\w])``.  Inline comment updated to
+  document the grouping rationale.
+
 - **Prose Tax — `sure` Affirmation Directive Guard** (`gateway.py` —
   `_FILLER_PATTERNS`): Corrected the ``sure`` affirmation pattern to enforce
   absolute mechanical symmetry between comment promises and regex behavior.

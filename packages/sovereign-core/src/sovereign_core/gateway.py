@@ -93,10 +93,12 @@ class OptimizationReceipt(BaseModel):
 # clean copy of the header rather than erasing both.
 # ---------------------------------------------------------------------------
 _FILLER_PATTERNS: List[tuple[re.Pattern[str], str]] = [
-    # Greeting tokens — safe to erase entirely.  "hi" gets an explicit negative
-    # lookahead (?![-\w]) so hyphenated technical terms like "hi-fi", "hi-res",
-    # and "hi-DPI" are not corrupted by stripping the "hi" prefix.
-    (re.compile(r"\bhi\b(?![-\w])|\bhello\b|\bhey\b|\bgreetings\b", re.IGNORECASE), ""),
+    # Greeting tokens — grouped inside a non-capturing alternation so that the
+    # trailing (?![-\w]) lookahead applies uniformly to every option.  The
+    # previous per-token form guarded only "hi", leaving "hello", "hey", and
+    # "greetings" unguarded and vulnerable to mangling hyphenated compounds
+    # (e.g. "hello-world" → "-world").
+    (re.compile(r"\b(?:hi|hello|hey|greetings)\b(?![-\w])", re.IGNORECASE), ""),
     # Hedging adverbs — stripped only when they stand as isolated colloquial
     # filler.  Negative lookahead (?![-\w]) prevents matching when the word is
     # the first component of a hyphenated compound (e.g. "just-in-time",
