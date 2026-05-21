@@ -49,6 +49,8 @@ class LocalRuntimeRouter:
             "session_id": context.session_id,
             "execution_depth": context.execution_depth,
             "target_tool": tool_name,
+            # FIXED: Restored deterministic tracing hash over input parameters
+            "arguments_hash": hash(tuple(sorted(arguments.items()))),
             "result": execution_result
         }
 
