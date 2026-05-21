@@ -32,6 +32,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Prose Tax — `sure` Affirmation Directive Guard** (`gateway.py` —
+  `_FILLER_PATTERNS`): Corrected the ``sure`` affirmation pattern to enforce
+  absolute mechanical symmetry between comment promises and regex behavior.
+  The previous ``\bsure\b(?![-\w])`` lookahead-only guard did not protect
+  instructional directives like ``"make sure to"`` because the lookahead
+  examines only what follows ``sure`` (a space, which passes the guard), not
+  what precedes it.  Added paired negative lookbehinds
+  ``(?<!make )(?<!be )`` before ``\bsure\b`` so that ``sure`` is suppressed
+  only when it appears as a standalone colloquial modifier, never as the
+  anchor of an instructional phrase.  Both lookbehinds are fixed-width (5
+  characters) and honor ``re.IGNORECASE`` at runtime.
+
+- **Prose Tax — Hedging Adverb Coverage Expanded** (`gateway.py` —
+  `_FILLER_PATTERNS`): Added ``actually``, ``basically``, and ``probably``
+  to the hedging-adverb entry, each guarded with an explicit
+  ``(?![-\w])`` negative lookahead to insulate technical documentation prose
+  and hyphenated compound forms from accidental optimization corruption.
+
+- **Repository — `.mailmap` Attribution Anchor** (`.mailmap`): Confirmed
+  a root ``.mailmap`` file is present with a single clean entry mapping the
+  ``noreply@anthropic`` committer identity to
+  ``Ken W. Alger <kenalger@comcast.net>``, standardizing Git author graph
+  attribution across all local workspace environments.
+
 - **Prose Tax — `hi` Greeting Boundary Hardened** (`gateway.py` —
   `_FILLER_PATTERNS`): Hardened the conversational ``hi`` greeting regex
   boundary with a negative lookahead guard to prevent corruption of technical

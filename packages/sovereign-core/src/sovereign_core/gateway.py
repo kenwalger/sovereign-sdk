@@ -100,20 +100,28 @@ _FILLER_PATTERNS: List[tuple[re.Pattern[str], str]] = [
     # Hedging adverbs — stripped only when they stand as isolated colloquial
     # filler.  Negative lookahead (?![-\w]) prevents matching when the word is
     # the first component of a hyphenated compound (e.g. "just-in-time",
-    # "simply-typed").  The leading \b guards against embedded substrings
-    # (e.g. "adjust", "justified", "unkindly") from the other direction.
+    # "simply-typed", "basically-correct").  The leading \b guards against
+    # embedded substrings (e.g. "adjust", "justified", "unkindly", "probably-not"
+    # compound forms) from the other direction.
     (
         re.compile(
-            r"\bplease(?![-\w])|\bkindly(?![-\w])|\bjust(?![-\w])|\bsimply(?![-\w])",
+            r"\bplease(?![-\w])|\bkindly(?![-\w])|\bjust(?![-\w])|\bsimply(?![-\w])"
+            r"|\bactually(?![-\w])|\bbasically(?![-\w])|\bprobably(?![-\w])",
             re.IGNORECASE,
         ),
         "",
     ),
-    # Affirmation filler — erased when standing alone.  "sure" gets an
-    # explicit negative lookahead (?![-\w]) so hyphenated compounds like
-    # "sure-fire" and adjacent technical phrases like "make sure to" are
-    # not corrupted by stripping the "sure" prefix.
-    (re.compile(r"\bof course\b|\bcertainly\b|\babsolutely\b|\bsure\b(?![-\w])", re.IGNORECASE), ""),
+    # Affirmation filler — erased only when "sure" stands as a pure colloquial
+    # filler modifier.  Two guards enforce this:
+    #   • Negative lookbehinds (?<!make )(?<!be ) prevent stripping "sure"
+    #     when it follows an instructional verb anchor (e.g. "make sure to",
+    #     "be sure to"), where "sure" forms part of a directive, not filler.
+    #     Both lookbehinds are fixed-width (5 chars each) so Python's re engine
+    #     accepts them; re.IGNORECASE makes them case-insensitive at runtime.
+    #   • Negative lookahead (?![-\w]) prevents stripping "sure" when it is
+    #     the first component of a hyphenated compound (e.g. "sure-fire",
+    #     "sure-footed").
+    (re.compile(r"\bof course\b|\bcertainly\b|\babsolutely\b|(?<!make )(?<!be )\bsure\b(?![-\w])", re.IGNORECASE), ""),
     # Preamble phrases — erase to end of line.
     (re.compile(r"\bI hope (this|that|you)\b.*", re.IGNORECASE), ""),
     # Degenerate bold/italic marker runs — four or more consecutive asterisks
