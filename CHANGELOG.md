@@ -32,6 +32,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Prose Tax — `process_prose_tax` Returns Optimized Text Payload**
+  (`gateway.py` — `process_prose_tax`): Corrected `process_prose_tax` to
+  explicitly return the optimized text payload string alongside its tracking
+  analytics receipt.  The previous return type was ``OptimizationReceipt`` only,
+  making the cleansed text inaccessible to downstream consumers.  The function
+  now returns ``tuple[str, OptimizationReceipt]`` — ``(minimized_text, receipt)``
+  — and the docstring ``Returns:`` block and type annotation are updated to
+  match.
+
+- **Prose Tax — `sure` Affirmation Boundary Hardened** (`gateway.py` —
+  `_FILLER_PATTERNS`): Hardened the conversational ``sure`` affirmation regex
+  boundary with a negative lookahead guard to protect technical compound words
+  from corruption.  The previous ``\bsure\b`` pattern matched the ``sure``
+  prefix in hyphenated compounds such as ``sure-fire`` and ``sure-footed``
+  because ``\b`` fires at the alphanumeric/hyphen boundary.  The pattern is
+  updated to ``\bsure\b(?![-\w])``, suppressing the match when ``sure`` is
+  immediately followed by a hyphen or word character.
+
 - **Prose Tax — Bold/Italic Markdown Deduplication Bounds** (`gateway.py` —
   `_FILLER_PATTERNS`): Refined bold/italic markdown deduplication patterns to
   preserve valid formatting tags while stripping only degenerate token

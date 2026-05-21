@@ -107,8 +107,11 @@ _FILLER_PATTERNS: List[tuple[re.Pattern[str], str]] = [
         ),
         "",
     ),
-    # Affirmation filler — safe to erase entirely.
-    (re.compile(r"\bof course\b|\bcertainly\b|\babsolutely\b|\bsure\b", re.IGNORECASE), ""),
+    # Affirmation filler — erased when standing alone.  "sure" gets an
+    # explicit negative lookahead (?![-\w]) so hyphenated compounds like
+    # "sure-fire" and adjacent technical phrases like "make sure to" are
+    # not corrupted by stripping the "sure" prefix.
+    (re.compile(r"\bof course\b|\bcertainly\b|\babsolutely\b|\bsure\b(?![-\w])", re.IGNORECASE), ""),
     # Preamble phrases — erase to end of line.
     (re.compile(r"\bI hope (this|that|you)\b.*", re.IGNORECASE), ""),
     # Degenerate bold/italic marker runs — four or more consecutive asterisks
@@ -146,7 +149,7 @@ def _approximate_token_count(text: str) -> int:
 async def process_prose_tax(
     payload: Union[str, List[Dict[str, Any]]],
     context: SessionContext,
-) -> OptimizationReceipt:
+) -> tuple[str, OptimizationReceipt]:
     """Applies the Prose Tax Optimization pass to a raw payload and records the result.
 
     Executes three sequential phases against ``payload``:
@@ -173,9 +176,11 @@ async def process_prose_tax(
             are written.  Modified in place via :meth:`SessionContext.set`.
 
     Returns:
-        An :class:`OptimizationReceipt` capturing ``raw_token_count``,
-        ``optimized_token_count``, and ``tax_savings_percentage`` for this
-        optimization pass.
+        A 2-tuple of ``(minimized_text, receipt)`` where ``minimized_text`` is
+        the cleansed output string available for downstream consumers, and
+        ``receipt`` is an :class:`OptimizationReceipt` capturing
+        ``raw_token_count``, ``optimized_token_count``, and
+        ``tax_savings_percentage`` for this optimization pass.
 
     Raises:
         TypeError: If ``payload`` is neither a ``str`` nor a ``list``.
@@ -237,4 +242,4 @@ async def process_prose_tax(
     prior_savings: int = context.get("prose_tax_total_savings", 0)
     context.set("prose_tax_total_savings", prior_savings + (raw_count - optimized_count))
 
-    return receipt
+    return minimized_text, receipt
