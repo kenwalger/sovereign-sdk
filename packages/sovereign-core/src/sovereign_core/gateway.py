@@ -111,8 +111,14 @@ _FILLER_PATTERNS: List[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bof course\b|\bcertainly\b|\babsolutely\b|\bsure\b", re.IGNORECASE), ""),
     # Preamble phrases — erase to end of line.
     (re.compile(r"\bI hope (this|that|you)\b.*", re.IGNORECASE), ""),
-    # Collapsed redundant bold/italic marker runs — erase extra markers.
-    (re.compile(r"(\*{1,3})(\s*\1)+", re.IGNORECASE), ""),
+    # Degenerate bold/italic marker runs — four or more consecutive asterisks
+    # or underscores with no enclosed text (e.g. "****", "_____").
+    # The threshold of 4+ preserves all valid Markdown wrappers:
+    #   *italic*  **bold**  ***bold-italic***  (1–3 markers each side)
+    # The previous (\*{1,3})(\s*\1)+ pattern was overbroad: it matched the
+    # closing ** of one span and the opening ** of the next when only
+    # whitespace separated them, collapsing "**foo** **bar**" to "**foo**bar**".
+    (re.compile(r"\*{4,}|_{4,}"), ""),
     # Duplicate consecutive headings — replace the full match (first + newline +
     # second) with \1 so exactly one clean copy of the heading is preserved.
     (re.compile(r"(#{1,6} [^\n]+)\n\1", re.IGNORECASE), r"\1"),

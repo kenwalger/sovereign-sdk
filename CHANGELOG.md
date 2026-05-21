@@ -32,6 +32,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Prose Tax — Bold/Italic Markdown Deduplication Bounds** (`gateway.py` —
+  `_FILLER_PATTERNS`): Refined bold/italic markdown deduplication patterns to
+  preserve valid formatting tags while stripping only degenerate token
+  repetitions.  The previous ``(\*{1,3})(\s*\1)+`` pattern was overbroad: it
+  matched the closing ``**`` of one bold span and the opening ``**`` of the next
+  when only whitespace separated them (e.g. ``**foo** **bar**`` was corrupted
+  to ``**foo**bar**``).  The pattern is replaced with ``\*{4,}|_{4,}``, which
+  targets only runs of four or more consecutive bare asterisks or underscores.
+  All valid Markdown wrappers (``*italic*``, ``**bold**``, ``***bold-italic***``,
+  ``__double__``, ``___triple___``) are left completely untouched.
+
+- **`example.env` — Synthetic Placeholder Sanitization** (`example.env`):
+  Sanitized ``example.env`` to deploy explicit synthetic placeholders,
+  eliminating credential-leak hazards for local node installations.  The
+  previous value ``"super-secret-passphrase"`` was realistic enough to be copied
+  verbatim into a live ``.env`` file without triggering alarm.  The value is
+  replaced with the screaming placeholder
+  ``"YOUR_SECRET_PASSPHRASE_HERE_DO_NOT_USE_THIS_LITERAL_VALUE"`` and the
+  inline comment now explicitly warns that using this literal string in a live
+  environment breaks cryptographic node identity uniqueness bounds.
+
 - **Legacy Migration Path — Descriptor-Level `os.fchmod` Symmetry** (`crypto.py`
   — `load_or_generate_keypair`): Upgraded the legacy migration block to match
   the greenfield path's descriptor-level permission model.  The previous
