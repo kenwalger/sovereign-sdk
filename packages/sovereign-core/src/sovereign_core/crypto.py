@@ -2,6 +2,7 @@ import base64
 import json
 import hashlib
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypedDict
@@ -106,12 +107,24 @@ class SovereignKeyManager:
         return secret.encode("utf-8")
 
     def load_or_generate_keypair(self) -> tuple[str, str]:
-        """Loads an existing encrypted Ed25519 keypair or generates and persists a new one.
+        """Loads an existing Ed25519 keypair or generates and persists a new one.
 
-        The private key PEM file is encrypted with
-        :func:`~cryptography.hazmat.primitives.serialization.BestAvailableEncryption`
-        keyed to the passphrase returned by :meth:`_resolve_node_secret`.
-        File permissions are tightened to ``0o600`` on creation.
+        Loading follows a two-attempt upgrade path to handle legacy deployments:
+
+        1. The PEM file is first loaded with the active ``SOVEREIGN_NODE_SECRET``
+           passphrase via
+           :func:`~cryptography.hazmat.primitives.serialization.BestAvailableEncryption`.
+        2. If that raises :exc:`TypeError` or :exc:`ValueError` (indicating an
+           unencrypted legacy key), a second attempt is made with
+           ``password=None``.  On success, an advisory warning is printed to
+           ``stderr`` and the key is immediately re-written to disk using the
+           current passphrase, migrating the file to the encrypted format
+           transparently.
+        3. If both attempts fail, a :exc:`RuntimeError` is raised with explicit
+           rotation guidance for the operator.
+
+        File permissions are tightened to ``0o600`` on initial creation and
+        after a legacy-key upgrade rewrite.
 
         Returns:
             A 2-tuple of ``(base64_private_key, base64_public_key)`` where each
@@ -119,15 +132,45 @@ class SovereignKeyManager:
             encoded as a base64 string.
 
         Raises:
-            RuntimeError: If ``SOVEREIGN_NODE_SECRET`` is not set.
-            ValueError: If the on-disk PEM cannot be decrypted with the current
-                passphrase (e.g. the key was encrypted with a different secret).
+            RuntimeError: If ``SOVEREIGN_NODE_SECRET`` is not set, or if the
+                on-disk PEM cannot be loaded by either attempt (corrupted file
+                or wrong passphrase).
         """
         passphrase = self._resolve_node_secret()
 
         if self.private_key_path.exists():
-            with open(self.private_key_path, "rb") as f:
-                self._private_key = serialization.load_pem_private_key(f.read(), password=passphrase)
+            pem_data: bytes = self.private_key_path.read_bytes()
+
+            try:
+                self._private_key = serialization.load_pem_private_key(pem_data, password=passphrase)
+            except (TypeError, ValueError):
+                # First attempt failed — check for a legacy unencrypted key.
+                try:
+                    self._private_key = serialization.load_pem_private_key(pem_data, password=None)
+                except Exception:
+                    raise RuntimeError(
+                        f"Cannot load private key at '{self.private_key_path}': the file is "
+                        "either corrupted or was encrypted with a different "
+                        "SOVEREIGN_NODE_SECRET value.  Rotate the key by removing the file "
+                        "and restarting the node to generate a new encrypted identity."
+                    )
+
+                # Legacy unencrypted key loaded — warn and re-encrypt in place.
+                print(
+                    "⚠️  Legacy unencrypted keypair detected. Automatically upgrading "
+                    "identity configuration to encrypted storage format...",
+                    file=sys.stderr,
+                )
+                with open(self.private_key_path, "wb") as f:
+                    f.write(
+                        self._private_key.private_bytes(
+                            encoding=serialization.Encoding.PEM,
+                            format=serialization.PrivateFormat.PKCS8,
+                            encryption_algorithm=serialization.BestAvailableEncryption(passphrase),
+                        )
+                    )
+                os.chmod(self.private_key_path, 0o600)
+
             self._public_key = self._private_key.public_key()
         else:
             self._private_key = ed25519.Ed25519PrivateKey.generate()

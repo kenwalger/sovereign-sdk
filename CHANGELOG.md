@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Graceful Legacy Keypair Migration** (`crypto.py` —
+  `load_or_generate_keypair`): Hardened the PEM identity loading sequence to
+  automatically detect, warn, and seamlessly upgrade legacy unencrypted
+  keypairs to password-encrypted storage without breaking the operator
+  migration path.  On first boot after upgrading, the node attempts to open
+  the existing `sovereign_identity.pem` with the active
+  `SOVEREIGN_NODE_SECRET` passphrase.  If that raises `TypeError` or
+  `ValueError` (the signature of an unencrypted legacy file), a second attempt
+  is made with `password=None`.  Success triggers an advisory warning to
+  `stderr` and an immediate in-place rewrite of the PEM under
+  `BestAvailableEncryption`; subsequent boots load the now-encrypted file
+  silently.  If both attempts fail, a `RuntimeError` is raised with explicit
+  rotation guidance rather than exposing the raw library exception.
+
 ## [0.5.1] - 2026-05-21
 
 ### Fixed
