@@ -7,6 +7,234 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Automated `.env` Environment Hydration** (`__main__.py`): Added
+  `python-dotenv>=1.0.0` as a runtime dependency and wired `load_dotenv()` at
+  the absolute top of the node entrypoint.  `SOVEREIGN_NODE_SECRET` (and any
+  other environment overrides) can now be specified in an uncommitted `.env`
+  file at the repository root, eliminating the need to export variables
+  manually before running `uv run sovereign-node`.
+
+- **Prose Tax Optimization Layer — Phase 2 Scaffold** (`gateway.py`):
+  Initialized the core architectural scaffold for the Prose Tax Optimization
+  Layer inside `gateway.py`.  Added `OptimizationReceipt`, a Pydantic model
+  tracking `raw_token_count`, `optimized_token_count`, and
+  `tax_savings_percentage` for each compression pass.  Added the async gateway
+  entry point `process_prose_tax(payload, context)`, which executes three
+  sequential phases: Text Minimization (stripping conversational filler,
+  greeting tokens, hedging preambles, and redundant markdown decoration via a
+  compiled regex library), Local Token Approximation (UTF-8 byte-density
+  heuristic; no external tokenizer), and Ledger Accumulation (writing the
+  `OptimizationReceipt` and running savings total directly into
+  `context.variables` so every downstream `ForensicReceipt` envelope carries a
+  complete optimization audit trail).
+
+### Fixed
+
+- **Prose Tax — Duplicate Heading Deduplication Case-Sensitive** (`gateway.py`
+  — `_FILLER_PATTERNS`): Removed ``re.IGNORECASE`` from the duplicate-heading
+  compilation so that headings are only collapsed when their text and
+  capitalisation match exactly.  The previous case-insensitive form silently
+  mutated distinct headings that differed only in case (e.g.
+  ``## Setup`` followed by ``## setup`` would have been collapsed to one).
+
+- **Prose Tax — Whitespace Normalization Pass** (`gateway.py` —
+  ``process_prose_tax``): Added a post-substitution whitespace normalization
+  step in both the string and list-message processing branches.  After all
+  filler patterns are applied, consecutive spaces are collapsed to a single
+  space and orphaned spaces before punctuation characters are removed.  This
+  cleans up double-space and space-punctuation artifacts that filler-word
+  removal leaves behind.
+
+- **Crypto — Class Docstring Aligned with Descriptor-Level Architecture**
+  (`crypto.py` — ``SovereignKeyManager``): Updated the class-level docstring
+  to replace the stale reference to path-based ``os.chmod`` with an accurate
+  description of the current descriptor-level ``os.fchmod`` approach and its
+  ``os.chmod`` fallback for platforms that lack ``fchmod``.
+
+- **Runtime — E402 noqa Guards Applied** (`__main__.py`): Appended
+  ``# noqa: E402`` suppression comments to every import line that follows the
+  early ``load_dotenv()`` invocation, ensuring PEP 8 module-level import-order
+  rules do not flag the intentional environment-hydration-first pattern.
+
+- **Prose Tax — Preamble Pattern Greedy Wildcard Removed** (`gateway.py` —
+  `_FILLER_PATTERNS`): Corrected the ``"I hope"`` preamble regex to remove
+  the greedy trailing ``.*`` wildcard that consumed the entire remainder of
+  the line, causing silent deletion of any sentence content that followed the
+  phrase.  The pattern now terminates at the word boundary immediately after
+  the subject pronoun (``\bI hope (?:this|that|you)\b``), stripping only the
+  literal preamble token itself and leaving all trailing content on the same
+  line perfectly intact.  The capturing group ``(this|that|you)`` is converted
+  to a non-capturing group ``(?:this|that|you)`` as the capture was unused.
+
+- **Prose Tax — List Payload Structure Preserved on Return** (`gateway.py` —
+  ``process_prose_tax``): Stabilized the list-input branch to return the
+  original message list structure with each ``"content"`` field individually
+  minimized, instead of collapsing the structure into a flat joined string.
+  Messages without a string ``"content"`` field are forwarded unmodified.
+  All other dict keys within each message are preserved via shallow copy.
+  The return type annotation is updated from ``tuple[str, OptimizationReceipt]``
+  to ``tuple[Union[str, List[Dict[str, Any]]], OptimizationReceipt]`` to
+  reflect list-in/list-out structural parity.  Token approximation metrics
+  continue to use the joined minimized string internally.
+
+- **Prose Tax — Affirmation Alternation Unified Under Global Lookahead**
+  (`gateway.py` — `_FILLER_PATTERNS`): Unified the ``certainly`` and
+  ``absolutely`` affirmation tokens inside a non-capturing group so that the
+  ``(?![-\w])`` negative lookahead applies collectively to both options.  The
+  previous naked ``\bcertainly\b|\babsolutely\b`` form carried no lookahead
+  guard, making it vulnerable to corrupting hyphenated compound words
+  (e.g. ``"certainly-not"`` → ``"-not"``).  Pattern replaced with
+  ``\b(?:certainly|absolutely)\b(?![-\w])``.  The ``of course`` phrase-anchor
+  and the dual-guarded ``sure`` sub-pattern are unchanged.  Inline comment
+  restructured into a three-bullet breakdown documenting each sub-pattern's
+  distinct guard rationale.
+
+- **Prose Tax — Greeting Alternation Unified Under Global Lookahead**
+  (`gateway.py` — `_FILLER_PATTERNS`): Unified the greeting alternation
+  string inside a non-capturing group so that the ``(?![-\w])`` negative
+  lookahead guard applies collectively to all four tokens.  The previous
+  per-token form ``\bhi\b(?![-\w])|\bhello\b|\bhey\b|\bgreetings\b``
+  guarded only ``hi``, leaving ``hello``, ``hey``, and ``greetings``
+  unguarded and vulnerable to mangling hyphenated compound strings (e.g.
+  ``"hello-world"`` → ``"-world"``).  Pattern replaced with
+  ``\b(?:hi|hello|hey|greetings)\b(?![-\w])``.  Inline comment updated to
+  document the grouping rationale.
+
+- **Prose Tax — `sure` Affirmation Directive Guard** (`gateway.py` —
+  `_FILLER_PATTERNS`): Corrected the ``sure`` affirmation pattern to enforce
+  absolute mechanical symmetry between comment promises and regex behavior.
+  The previous ``\bsure\b(?![-\w])`` lookahead-only guard did not protect
+  instructional directives like ``"make sure to"`` because the lookahead
+  examines only what follows ``sure`` (a space, which passes the guard), not
+  what precedes it.  Added paired negative lookbehinds
+  ``(?<!make )(?<!be )`` before ``\bsure\b`` so that ``sure`` is suppressed
+  only when it appears as a standalone colloquial modifier, never as the
+  anchor of an instructional phrase.  Both lookbehinds are fixed-width (5
+  characters) and honor ``re.IGNORECASE`` at runtime.
+
+- **Prose Tax — Hedging Adverb Coverage Expanded** (`gateway.py` —
+  `_FILLER_PATTERNS`): Added ``actually``, ``basically``, and ``probably``
+  to the hedging-adverb entry, each guarded with an explicit
+  ``(?![-\w])`` negative lookahead to insulate technical documentation prose
+  and hyphenated compound forms from accidental optimization corruption.
+
+- **Repository — `.mailmap` Attribution Anchor** (`.mailmap`): Confirmed
+  a root ``.mailmap`` file is present with a single clean entry mapping the
+  ``noreply@anthropic`` committer identity to
+  ``Ken W. Alger <kenalger@comcast.net>``, standardizing Git author graph
+  attribution across all local workspace environments.
+
+- **Prose Tax — `hi` Greeting Boundary Hardened** (`gateway.py` —
+  `_FILLER_PATTERNS`): Hardened the conversational ``hi`` greeting regex
+  boundary with a negative lookahead guard to prevent corruption of technical
+  terms like ``hi-fi``, ``hi-res``, and ``hi-DPI``.  The previous ``\bhi\b``
+  pattern matched the ``hi`` prefix in hyphenated compounds because ``\b``
+  fires at the alphanumeric/hyphen boundary.  The pattern is updated to
+  ``\bhi\b(?![-\w])``, suppressing the match when ``hi`` is immediately
+  followed by a hyphen or word character.
+
+- **Repository Tracking — `CLAUDE.md` Removed from Git Index**
+  (`.gitignore` / git index): Removed ``CLAUDE.md`` from the active git
+  tracking index to properly honor the repository ``.gitignore`` boundary.
+  The file is already listed in ``.gitignore`` but remained tracked due to a
+  prior ``git add``; ``git rm --cached CLAUDE.md`` cleanly removes it from
+  the index while leaving the physical file intact on disk.
+
+- **Prose Tax — `process_prose_tax` Returns Optimized Text Payload**
+  (`gateway.py` — `process_prose_tax`): Corrected `process_prose_tax` to
+  explicitly return the optimized text payload string alongside its tracking
+  analytics receipt.  The previous return type was ``OptimizationReceipt`` only,
+  making the cleansed text inaccessible to downstream consumers.  The function
+  now returns ``tuple[str, OptimizationReceipt]`` — ``(minimized_text, receipt)``
+  — and the docstring ``Returns:`` block and type annotation are updated to
+  match.
+
+- **Prose Tax — `sure` Affirmation Boundary Hardened** (`gateway.py` —
+  `_FILLER_PATTERNS`): Hardened the conversational ``sure`` affirmation regex
+  boundary with a negative lookahead guard to protect technical compound words
+  from corruption.  The previous ``\bsure\b`` pattern matched the ``sure``
+  prefix in hyphenated compounds such as ``sure-fire`` and ``sure-footed``
+  because ``\b`` fires at the alphanumeric/hyphen boundary.  The pattern is
+  updated to ``\bsure\b(?![-\w])``, suppressing the match when ``sure`` is
+  immediately followed by a hyphen or word character.
+
+- **Prose Tax — Bold/Italic Markdown Deduplication Bounds** (`gateway.py` —
+  `_FILLER_PATTERNS`): Refined bold/italic markdown deduplication patterns to
+  preserve valid formatting tags while stripping only degenerate token
+  repetitions.  The previous ``(\*{1,3})(\s*\1)+`` pattern was overbroad: it
+  matched the closing ``**`` of one bold span and the opening ``**`` of the next
+  when only whitespace separated them (e.g. ``**foo** **bar**`` was corrupted
+  to ``**foo**bar**``).  The pattern is replaced with ``\*{4,}|_{4,}``, which
+  targets only runs of four or more consecutive bare asterisks or underscores.
+  All valid Markdown wrappers (``*italic*``, ``**bold**``, ``***bold-italic***``,
+  ``__double__``, ``___triple___``) are left completely untouched.
+
+- **`example.env` — Synthetic Placeholder Sanitization** (`example.env`):
+  Sanitized ``example.env`` to deploy explicit synthetic placeholders,
+  eliminating credential-leak hazards for local node installations.  The
+  previous value ``"super-secret-passphrase"`` was realistic enough to be copied
+  verbatim into a live ``.env`` file without triggering alarm.  The value is
+  replaced with the screaming placeholder
+  ``"YOUR_SECRET_PASSPHRASE_HERE_DO_NOT_USE_THIS_LITERAL_VALUE"`` and the
+  inline comment now explicitly warns that using this literal string in a live
+  environment breaks cryptographic node identity uniqueness bounds.
+
+- **Legacy Migration Path — Descriptor-Level `os.fchmod` Symmetry** (`crypto.py`
+  — `load_or_generate_keypair`): Upgraded the legacy migration block to match
+  the greenfield path's descriptor-level permission model.  The previous
+  `os.chmod(tmp_path, 0o600)` call resolved the temp file through the filesystem
+  namespace, leaving a TOCTOU race window.  On POSIX hosts the call is now
+  `os.fchmod(tmp.fileno(), 0o600)`, operating directly on the open file
+  descriptor.  A `hasattr(os, "fchmod")` guard retains `os.chmod` as a portable
+  fallback on Windows.  Both key write paths now enforce permissions through an
+  identical descriptor-first pattern.
+
+- **Stale `RuntimeError` Docstring Entry Pruned** (`crypto.py` —
+  `load_or_generate_keypair`): Removed the `Raises: RuntimeError` entry that
+  documented a zero-byte `os.write` return as a disk-full signal.  This guard
+  belonged to the manual raw write loop, which was fully replaced by
+  `tmp_file.write(pem_bytes)` in v0.5.7.  The `Raises:` block now reflects only
+  conditions that can actually be triggered by the current implementation.
+
+- **Prose Tax — Duplicate Heading Deduplication** (`gateway.py` —
+  `_FILLER_PATTERNS`): Corrected the duplicate-heading deduplication regex to
+  properly preserve a single instance of consecutive matching markdown headers.
+  The previous `pattern.sub("", ...)` call erased both the original and the
+  duplicate heading entirely.  `_FILLER_PATTERNS` is now a list of
+  ``(pattern, replacement)`` pairs; the heading entry uses ``r"\1"`` as its
+  replacement so the captured first heading is restored after the match is
+  consumed, leaving exactly one clean copy in the output.
+
+- **Prose Tax — Filler Word Boundary Hardening** (`gateway.py` —
+  `_FILLER_PATTERNS`): Hardened conversational filler word-stripping boundaries
+  to prevent collateral text corruption or mangling of technical prose.  The
+  previous ``\bword\b`` anchors were insufficient: ``\bsimply\b`` matched the
+  ``simply`` prefix in ``simply-typed``, and ``\bjust\b`` matched inside
+  ``just-in-time``, because ``\b`` only transitions on alphanumeric/non-alphanumeric
+  boundaries and the hyphen is non-alphanumeric.  Each hedging adverb pattern now
+  appends ``(?![-\w])`` — a negative lookahead that prevents a match when the
+  token is immediately followed by a hyphen or word character — so only
+  standalone colloquial uses are stripped.
+
+## [0.5.8] - 2026-05-21
+
+### Fixed
+
+- **Greenfield Key Generation — Descriptor-Level `os.fchmod` and Buffered
+  Stream Write** (`crypto.py` — `load_or_generate_keypair`): Eliminated
+  path-based TOCTOU race windows and resolved the I/O layer buffering mismatch
+  introduced in v0.5.6.  `os.chmod(tmp_path, 0o600)` was replaced with
+  `os.fchmod(tmp_file.fileno(), 0o600)` on POSIX hosts (portable fallback via
+  `hasattr(os, "fchmod")`) so permission enforcement operates on the open
+  descriptor rather than the filesystem path.  The manual `while remaining_bytes`
+  / `os.write` loop was replaced by `tmp_file.write(pem_bytes)`, aligning the
+  write path with the high-level `NamedTemporaryFile` stream object and
+  delegating short-write recovery to Python's buffered I/O layer.  The
+  `tmp_file.flush()` → `os.fsync` → `os.replace` durability pipeline is
+  retained unchanged.
+
 ## [0.5.7] - 2026-05-21
 
 ### Fixed

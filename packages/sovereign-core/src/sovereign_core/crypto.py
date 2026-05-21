@@ -71,9 +71,11 @@ class SovereignKeyManager:
     purposes.
 
     Both the legacy-migration and greenfield key-write paths enforce identical,
-    umask-independent ``0o600`` file permissions via explicit ``os.chmod`` calls
-    on the staging temp file before any bytes are written, and both promote the
-    fully synced temp file over the target path via ``os.replace()`` for atomicity.
+    umask-independent ``0o600`` file permissions via descriptor-level
+    ``os.fchmod`` (with a path-based ``os.chmod`` fallback on platforms that
+    lack ``fchmod``) applied to the open staging file descriptor before any
+    bytes are written, and both promote the fully synced temp file over the
+    target path via ``os.replace()`` for atomicity.
 
     Args:
         key_dir: Directory path for on-disk keypair persistence.  Defaults to
@@ -130,11 +132,13 @@ class SovereignKeyManager:
            rotation guidance for the operator.
 
         Both the migration and greenfield paths enforce ``0o600`` permissions
-        via an explicit ``os.chmod`` call on the staging temp file immediately
-        after creation and before any bytes are written, guaranteeing
-        umask-independent file security regardless of the host process
-        environment.  The fully synced temp file is promoted over the target
-        path via ``os.replace()`` for atomicity on both paths.
+        via a descriptor-level call — ``os.fchmod(fd, 0o600)`` on POSIX hosts,
+        with a portable fallback to ``os.chmod(path, 0o600)`` on Windows — applied
+        immediately after the staging temp file is created and before any bytes
+        are written.  Operating on the file descriptor rather than the path closes
+        the TOCTOU window present in path-based permission calls.  The fully synced
+        temp file is promoted over the target path via ``os.replace()`` for
+        atomicity on both paths.
 
         Returns:
             A 2-tuple of ``(base64_private_key, base64_public_key)`` where each
@@ -145,9 +149,6 @@ class SovereignKeyManager:
             RuntimeError: If ``SOVEREIGN_NODE_SECRET`` is not set, or if the
                 on-disk PEM cannot be loaded by either attempt (corrupted file
                 or wrong passphrase).
-            RuntimeError: During greenfield key creation if a zero-byte
-                ``os.write`` return indicates a disk-full or broken-pipe
-                condition before the key is fully serialized.
         """
         passphrase = self._resolve_node_secret()
 
@@ -186,7 +187,10 @@ class SovereignKeyManager:
                         delete=False,
                     ) as tmp:
                         tmp_path = tmp.name
-                        os.chmod(tmp_path, 0o600)
+                        if hasattr(os, "fchmod"):
+                            os.fchmod(tmp.fileno(), 0o600)
+                        else:
+                            os.chmod(tmp_path, 0o600)
                         tmp.write(encrypted_pem)
                         tmp.flush()
                         os.fsync(tmp.fileno())
