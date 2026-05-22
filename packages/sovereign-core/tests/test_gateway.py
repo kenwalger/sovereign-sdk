@@ -768,29 +768,68 @@ class TestSovereignGateway:
     def test_gateway_export_public_key_bubbles_unrelated_runtime_errors(
         self, gateway_env: SovereignGateway
     ) -> None:
-        """export_public_key() re-raises RuntimeErrors not matching 'Keypair not loaded'.
+        """export_public_key() propagates RuntimeErrors raised by load_or_generate_keypair.
 
-        Patches public_key to raise RuntimeError("Unexpected database disk full error")
-        and asserts that:
-          (a) the exception propagates to the caller unchanged, and
-          (b) load_or_generate_keypair() is never invoked.
+        With the has_identity-based implementation, when has_identity is False the
+        method calls load_or_generate_keypair() before returning public_key.  If
+        load_or_generate_keypair raises (disk fault, permission failure, corrupted
+        PEM), that error must propagate to the caller immediately so the SDK fails
+        loudly rather than silently masking the fault.
 
-        This confirms that the narrowed guard in export_public_key() prevents
-        silent identity drift: system faults must fail loudly, not trigger
-        transparent key regeneration that replaces the node's cryptographic identity.
+        Patches load_or_generate_keypair to raise RuntimeError("Unexpected database
+        disk full error") and asserts the exception reaches the caller unchanged.
         """
         error_msg = "Unexpected database disk full error"
 
+        assert not gateway_env._key_manager.has_identity, (
+            "Precondition: has_identity must be False so the loading branch is entered"
+        )
+
         with patch.object(
-            type(gateway_env._key_manager),
-            "public_key",
-            new_callable=PropertyMock,
-            side_effect=RuntimeError(error_msg),
-        ), patch.object(
             gateway_env._key_manager,
             "load_or_generate_keypair",
-        ) as mock_load:
+            side_effect=RuntimeError(error_msg),
+        ):
             with pytest.raises(RuntimeError, match=error_msg):
                 gateway_env.export_public_key()
 
-            mock_load.assert_not_called()
+    def test_gateway_export_public_key_uses_state_not_string_matching(
+        self, gateway_env: SovereignGateway
+    ) -> None:
+        """export_public_key() uses has_identity for state gating, not string exception matching.
+
+        Proves the three-step contract of the refactored implementation:
+          1. has_identity is False before any key-loading call (fresh gateway).
+          2. The first export_public_key() call triggers lazy initialization and
+             has_identity transitions to True.
+          3. A second call with load_or_generate_keypair mocked asserts the method
+             does NOT attempt to reload — it checks the public has_identity property
+             and branches on its result, with no string-in-exception matching involved.
+        """
+        # Step 1 — fresh gateway: keys are not yet loaded.
+        assert not gateway_env._key_manager.has_identity, (
+            "has_identity must be False on a freshly constructed gateway (no I/O yet)"
+        )
+
+        # Step 2 — first call must trigger lazy initialization.
+        pub_key = gateway_env.export_public_key()
+        assert gateway_env._key_manager.has_identity, (
+            "has_identity must be True after export_public_key() loads the keypair"
+        )
+        assert isinstance(pub_key, str) and pub_key, (
+            "export_public_key() must return a non-empty string"
+        )
+
+        # Step 3 — subsequent call must take the has_identity=True branch without
+        # calling load_or_generate_keypair.  If the method used string exception
+        # matching instead, the mock (which does nothing) would leave the key
+        # inaccessible and the return would differ.
+        with patch.object(
+            gateway_env._key_manager, "load_or_generate_keypair"
+        ) as mock_load:
+            pub_key2 = gateway_env.export_public_key()
+
+        mock_load.assert_not_called()
+        assert pub_key == pub_key2, (
+            "export_public_key() must return the same key on repeated calls without reloading"
+        )

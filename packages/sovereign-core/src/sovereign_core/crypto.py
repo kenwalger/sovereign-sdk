@@ -114,6 +114,22 @@ class SovereignKeyManager:
             )
         return secret.encode("utf-8")
 
+    @property
+    def has_identity(self) -> bool:
+        """Returns ``True`` when the Ed25519 keypair is fully initialised in memory.
+
+        A clean, public alternative to inspecting the private ``_private_key`` or
+        ``_public_key`` slots from outside the class.  Callers should check this
+        property before calling :meth:`public_key` or :meth:`get_base64_public_key`
+        to avoid the ``RuntimeError`` that those methods raise when the keypair is
+        not yet loaded.
+
+        Returns:
+            ``True`` if both ``_private_key`` and ``_public_key`` are non-``None``,
+            ``False`` otherwise.
+        """
+        return self._private_key is not None and self._public_key is not None
+
     def load_or_generate_keypair(self) -> tuple[str, str]:
         """Loads an existing Ed25519 keypair or generates and persists a new one.
 

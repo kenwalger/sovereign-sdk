@@ -10,7 +10,7 @@ authors = [
 
 dependencies = [
     "sovereign-core",
-    "starlette>=0.27.0",
+    "starlette>=0.35.0,<1.0.0",
 ]
 
 [tool.uv.sources]

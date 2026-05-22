@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from typing import Any
 
 import pytest
@@ -233,4 +234,42 @@ class TestSovereignMiddleware:
             f"Content-Length header ({data['content_length_header']!r}) must equal "
             f"the true body byte length ({data['body_byte_len']}) after the sieve "
             f"rewrite; a stale value would cause downstream consumers to hang on read"
+        )
+
+    async def test_middleware_emits_error_log_on_interception_failure(
+        self, app_env: FastAPI, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Non-strict interception failures fall through AND emit a logging.ERROR record.
+
+        Forces a KeyError inside the middleware's try block by sending a JSON
+        payload that is missing the configured payload_field key ("text").  In
+        non-strict mode the middleware must:
+          (a) allow the request to complete with HTTP 200 (defensive bypass), and
+          (b) emit at least one ERROR-level log record to the "sovereign_fastapi"
+              logger whose message contains "Sovereign boundary processing failed".
+
+        This guarantees that silent failures are impossible: operators watching
+        structured logs will always see evidence of an interception bypass rather
+        than a hidden no-op.
+        """
+        caplog.set_level(logging.ERROR, logger="sovereign_fastapi")
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app_env), base_url="http://test"
+        ) as client:
+            # "text" key is absent → KeyError inside the middleware try block.
+            response = await client.post("/ingest", json={"wrong_key": "no text field here"})
+
+        assert response.status_code == 200, (
+            "Non-strict middleware must fall through on interception failure, not 500"
+        )
+
+        assert any(
+            "Sovereign boundary processing failed" in record.getMessage()
+            for record in caplog.records
+            if record.levelno == logging.ERROR and record.name == "sovereign_fastapi"
+        ), (
+            "At least one ERROR record from 'sovereign_fastapi' must contain "
+            "'Sovereign boundary processing failed'; "
+            f"records captured: {[(r.name, r.levelno, r.getMessage()) for r in caplog.records]!r}"
         )

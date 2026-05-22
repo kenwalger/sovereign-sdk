@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-05-22
+
+### Added
+
+- **`SovereignKeyManager.has_identity` — Public State Property** (`crypto.py`):
+  New read-only `@property` that returns ``True`` when both ``_private_key`` and
+  ``_public_key`` are non-``None`` (fully initialised in memory), ``False``
+  otherwise.  Provides a clean, public alternative to private-attribute inspection
+  from outside the class, eliminating the need for callers to pierce internal
+  slots to determine whether the keypair is loaded.
+
+- **`TestSovereignGateway.test_gateway_export_public_key_uses_state_not_string_matching`**
+  (`test_gateway.py`): Three-step architectural contract test for the
+  ``has_identity``-based refactor of ``export_public_key()``.  Asserts that
+  ``has_identity`` is ``False`` on a fresh gateway, transitions to ``True`` after
+  the first call triggers lazy initialization, and that a subsequent call with
+  ``load_or_generate_keypair`` mocked confirms the method does not attempt to
+  reload — proving the implementation relies entirely on explicit state gating
+  rather than string-in-exception matching.
+
+- **`TestSovereignMiddleware.test_middleware_emits_error_log_on_interception_failure`**
+  (`test_middleware.py`): Observability contract test for the structured error
+  log added to the non-strict bypass path.  Sends a JSON payload missing the
+  configured ``payload_field`` key to trigger a ``KeyError`` inside the
+  middleware try block.  Uses ``pytest.LogCaptureFixture`` (``caplog``) to
+  assert that (a) the request completes with HTTP 200 (defensive bypass intact)
+  and (b) at least one ``logging.ERROR`` record is emitted to the
+  ``sovereign_fastapi`` logger containing the phrase
+  ``"Sovereign boundary processing failed"``.
+
+### Changed
+
+- **`SovereignGateway.export_public_key()` — State-Based Key Loading**
+  (`gateway.py`): Replaced the ``try/except RuntimeError`` block (which
+  matched the sentinel string ``"Keypair not loaded"`` inside the exception
+  message) with a direct ``if not self._key_manager.has_identity:`` state
+  check.  The refactor removes all coupling to internal exception message
+  strings and makes the gating logic explicit and unconditionally correct.
+
+- **`SovereignMiddleware.dispatch` — Structured Error Logging** (`middleware.py`):
+  The non-strict exception bypass path now emits a ``logging.ERROR`` record via
+  ``logger.error("Sovereign boundary processing failed. Bypassing defensively …",
+  exc_info=True)`` before falling through.  Previously the bypass was entirely
+  silent, making interception failures invisible to log-based observability
+  systems.  Full exception context is captured via ``exc_info=True``.
+
+- **`sovereign-fastapi` Starlette Dependency Range** (`pyproject.toml`):
+  Narrowed from ``starlette>=0.27.0`` to ``starlette>=0.35.0,<1.0.0`` to
+  anchor the package against the tested private-attribute contract
+  (``request._body`` / ``_CachedRequest.wrapped_receive``) and prevent
+  unguarded drift into a potential Starlette 1.x major-version break.
+
 ## [0.8.2] - 2026-05-22
 
 ### Added

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Callable, Awaitable, Optional
+
+logger = logging.getLogger("sovereign_fastapi")
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -107,6 +110,11 @@ class SovereignMiddleware(BaseHTTPMiddleware):
                         {"detail": f"Sovereign middleware validation error: {exc}"},
                         status_code=422,
                     )
+                logger.error(
+                    "Sovereign boundary processing failed. "
+                    "Bypassing defensively to ensure system availability.",
+                    exc_info=True,
+                )
 
             # Overwrite the _CachedRequest body cache.  Every downstream
             # receive() call issued by Starlette's routing layer will replay
