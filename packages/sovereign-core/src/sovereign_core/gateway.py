@@ -499,15 +499,6 @@ class SovereignGateway:
             RuntimeError: If ``SOVEREIGN_NODE_SECRET`` is not set in the
                 environment and no keypair has been pre-loaded.
         """
-        try:
-            # If the key is already loaded, this will succeed and return immediately.
-            return self._key_manager.public_key
-        except RuntimeError as e:
-            # Only swallow the documented "Keypair not loaded" sentinel.  Any
-            # other RuntimeError (disk fault, permission failure, corrupted PEM)
-            # must propagate immediately so the SDK fails loudly rather than
-            # silently generating a rogue replacement identity.
-            if "Keypair not loaded" in str(e):
-                self._key_manager.load_or_generate_keypair()
-                return self._key_manager.public_key
-            raise
+        if not self._key_manager.has_identity:
+            self._key_manager.load_or_generate_keypair()
+        return self._key_manager.public_key
