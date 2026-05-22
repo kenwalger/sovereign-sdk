@@ -7,6 +7,199 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-05-22
+
+### Added
+
+- **`SovereignGateway` — Unified High-Level Developer Interface** (`gateway.py`):
+  Introduced the `SovereignGateway` class as the primary entry point for application
+  code interacting with the Sovereign Systems SDK.  The class accepts a `signing_key`
+  file path (defaulting to `.keys/sovereign_identity.pem`), defensively creates the
+  key directory via `os.makedirs(..., exist_ok=True)` before initializing the
+  `SovereignKeyManager` (preventing `FileNotFoundError` in stateless containerized
+  environments), and exposes four public methods:
+  (1) `async sieve(text_payload: str) -> str` — delegates to `process_prose_tax` to
+  strip conversational boilerplate, remove filler tokens, and normalize whitespace,
+  returning the purified string and accumulating optimization metrics in the gateway's
+  internal `SessionContext`; (2) `sign(clean_context: str) -> ForensicReceipt` — wraps
+  `SovereignKeyManager.generate_receipt` to produce a fully minted, Ed25519-signed
+  `ForensicReceipt` envelope that seals both data provenance and FinOps
+  cost-optimization telemetry in a single cryptographic manifest (see below);
+  (3) `async sieve_and_sign(text_payload: str) -> SovereignBoundaryResponse` — one-shot
+  macro that internally calls `sieve()` then `sign()` and returns both the purified
+  string and the sealed receipt together in a `SovereignBoundaryResponse` Pydantic model
+  (see below); (4) `export_public_key() -> str` — returns the base64-encoded Ed25519
+  public verification key, triggering keypair loading if not yet initialised, enabling
+  out-of-band receipt verification by third parties who hold only the public key.
+  The class is importable from `sovereign_core.gateway`.
+
+- **`SovereignBoundaryResponse` — Structured Pydantic Return Model** (`gateway.py`):
+  Added `SovereignBoundaryResponse(BaseModel)` as the return type of `sieve_and_sign()`,
+  replacing the previous `SieveAndSignResult` TypedDict.  Exposes two attributes:
+  `content: str` (the minimized payload) and `receipt: Dict[str, Any]` (the
+  `ForensicReceipt` envelope).  Provides attribute-style access (`result.content`,
+  `result.receipt`) rather than error-prone dict key lookups, and is validated by
+  Pydantic on construction.  Exportable from `sovereign_core.gateway`.
+
+- **`SovereignGateway.__init__` — Defensive Key Directory Creation** (`gateway.py`):
+  Added `os.makedirs(key_path.parent, exist_ok=True)` as the first operation in
+  `__init__`, executed before `SovereignKeyManager` is constructed.  Prevents
+  unhandled `FileNotFoundError` crashes in stateless containerized environments
+  (Docker, Kubernetes, CI runners) where the `.keys/` directory is not guaranteed
+  to pre-exist.
+
+- **`SovereignGateway.export_public_key()` — Public Verification Key Export**
+  (`gateway.py`): New method that returns the base64-encoded raw 32-byte Ed25519
+  public key for the gateway's signing identity.  Triggers lazy keypair loading if
+  the `SovereignKeyManager` has not yet been initialised.  The returned value is
+  identical to `receipt["public_key"]` in every `ForensicReceipt` minted by this
+  gateway instance, enabling third-party receipt verification against a distributed
+  public key without access to the node secret.
+
+- **`SieveAndSignResult` — TypedDict Legacy Export** (`gateway.py`):
+  The original `SieveAndSignResult` TypedDict remains exported from
+  `sovereign_core.gateway` for backwards compatibility.  New code should use
+  `SovereignBoundaryResponse` instead.
+
+- **`ROADMAP.md` — Sovereign Systems Specification Strategic Plan** (repo root):
+  Added `ROADMAP.md` documenting the full long-range architectural trajectory.
+  Summarises the four completed phases (cryptographic identity, Prose Tax
+  optimization, testing infrastructure, `SovereignGateway` interface).  Specifies
+  Phase 5 drop-in framework middleware targets — `sovereign-fastapi`
+  (`SovereignMiddleware` ASGI), `sovereign-django` (`SovereignDjangoMiddleware`),
+  `sovereign-langchain` (`SovereignCallbackHandler` + `SovereignChain`), and
+  `sovereign-llamaindex` (`SovereignNodePostprocessor` + `SovereignQueryTransform`)
+  — with copy-paste-accurate usage examples for each.  Specifies Phase 6
+  verification key protocol targets — `PublicKeyBundle` export format,
+  `sovereign-verify` CLI, `SovereignKeyManager.rotate_keypair()` succession
+  receipts, and `FederatedVerifier` multi-node trust registry.  Closes with four
+  non-negotiable guiding invariants (local-first, tamper-evidence, zero regression,
+  dependency minimalism).
+
+- **Dual-Receipt Cryptographic Manifest — Prose Tax Telemetry Fusion** (`gateway.py`
+  — `SovereignGateway.sign`): When `sieve()` has been called on a gateway instance
+  prior to `sign()`, the Prose Tax optimization metrics accumulated in the internal
+  `SessionContext` are injected into the `ForensicReceipt` metadata envelope under
+  the `"prose_tax_summary"` key before the Ed25519 signature is computed.  This
+  means the signed manifest atomically covers both the cleansed payload and its
+  FinOps cost profile: `raw_token_count` and `optimized_token_count` (estimated
+  via UTF-8 byte-density heuristic), `tokens_eliminated` (the raw minus optimized
+  delta), `tax_savings_percentage` (percentage reduction rounded to four decimal
+  places), and `total_tokens_saved` (accumulated savings across all `sieve()` calls
+  on the same gateway instance).  When `sieve()` has not been called, `sign()`
+  behaves identically to its prior form and omits the `"prose_tax_summary"` key.
+  Any post-issuance mutation of the telemetry values — like all other metadata
+  fields — causes `verify_receipt` to return `False`.
+
+- **`TestSovereignGateway` — High-Level Interface Test Suite** (`test_gateway.py`):
+  Added 11 functional test cases covering the `SovereignGateway` interface:
+  (1) `test_sieve_returns_string` — confirms the return type is always `str`;
+  (2) `test_sieve_strips_filler_tokens` — verifies full filler removal pipeline
+  (`hi`, `please`, `just`) yields the expected clean output;
+  (3) `test_sieve_normalizes_whitespace` — confirms multi-space runs collapse to
+  single spaces; (4) `test_sieve_preserves_guarded_phrases` — asserts that
+  instructional directives like `make sure to` pass through unmarred;
+  (5) `test_sign_returns_forensic_receipt_fields` — checks all five required
+  `ForensicReceipt` fields (`timestamp`, `payload_hash`, `public_key`,
+  `signature`, `metadata`) are present; (6) `test_sign_receipt_is_cryptographically_valid`
+  — performs a full `SovereignKeyManager.verify_receipt` pass against the
+  original payload, proving end-to-end signing fidelity;
+  (7) `test_sign_receipt_fails_on_tampered_payload` — asserts that `verify_receipt`
+  returns `False` when the payload is mutated after signing, confirming
+  tamper-evidence; (8) `test_sign_receipt_metadata_contains_source_tag` — verifies
+  the `source` annotation is stamped into every receipt;
+  (9) `test_gateway_sieve_and_sign_atomic` — calls `sieve_and_sign()` in one
+  invocation and asserts the result is a `SovereignBoundaryResponse` with
+  `result.content == "help me now"`, all five receipt fields present via
+  `result.receipt`, `verify_receipt` passes, and `prose_tax_summary` is fused
+  and arithmetically consistent — using attribute access throughout;
+  (10) `test_gateway_export_public_key` — asserts the returned string is base64-
+  decodable to exactly 32 bytes (Ed25519 key size) and matches `receipt["public_key"]`
+  in receipts from the same gateway instance;
+  (11) `test_gateway_fuses_prose_tax_metadata` — calls `sieve()` then `sign()` on
+  the same gateway instance and asserts that `receipt["metadata"]["prose_tax_summary"]`
+  contains all five keys, carries exact arithmetic-verified token counts
+  (`raw=6`, `optimized=2`, `eliminated=4` for the 26-byte input `"hi please just
+  help me now"`), and that the enriched envelope still passes full Ed25519
+  `verify_receipt` verification — confirming dual-receipt manifest integrity.
+
+- **pytest-asyncio Loop Scope Configuration** (`pyproject.toml`):
+  Added `asyncio_default_fixture_loop_scope = "function"` to
+  `[tool.pytest.ini_options]` to explicitly configure per-function fixture loop
+  scoping and silence the pytest-asyncio loop deprecation warning.  The
+  `pytest-asyncio` dependency floor is tightened from `>=0.23.0` to `>=1.0.0`
+  to explicitly track the installed v1.x major release block.
+
+### Changed
+
+- **Documentation — `PHILOSOPHY.md` "Intended Usage" Sync**: Updated the
+  illustrative code block in the "Intended Usage" section to mirror the
+  implemented `SovereignGateway` API exactly.  The import is corrected to
+  `from sovereign_core.gateway import SovereignGateway`; `signing_key` is
+  updated to the canonical `.keys/sovereign_identity.pem` default; `gateway.sieve()`
+  is prefixed with `await` to match its `async def` signature; and the
+  `receipt.uuid` attribute reference is replaced with `receipt["payload_hash"]`
+  to reflect `ForensicReceipt`'s TypedDict access pattern.
+
+- **Documentation — `README.md` Primary Interface Showcase**: Added a new
+  "Primary Developer Interface: `SovereignGateway`" section at the top of the
+  implementation target block.  Provides a complete, copy-paste-ready usage
+  example — including gateway initialization, async `.sieve()` call, `.sign()`
+  receipt minting, and an independent `verify_receipt` check — establishing
+  `SovereignGateway` as the canonical integration pattern for downstream
+  application code.
+
+### Fixed
+
+- **`SovereignGateway.__init__` — Key Filename Contract** (`gateway.py`):
+  When a custom `signing_key` path such as `"vault/node-alpha.pem"` was passed,
+  only the parent directory was forwarded to `SovereignKeyManager`, which
+  silently replaced the caller-specified filename with the hardcoded default
+  `sovereign_identity.pem`.  The fix resolves the full absolute path via
+  `Path(...).resolve()`, constructs `SovereignKeyManager` with the parent
+  directory as before, then immediately overrides `private_key_path` and
+  `public_key_path` on the key manager instance to honour the exact filename
+  provided.  The companion `.pub` path is derived via `key_path.with_suffix(".pub")`.
+
+- **`SovereignGateway.sieve_and_sign` — Concurrent Session Contention**
+  (`gateway.py`): The original one-shot macro called `self.sieve()` (which
+  wrote Prose Tax metrics into the shared `self._session`) and then `self.sign()`
+  (which read those metrics back from the same shared session).  Under concurrent
+  async load on the same gateway instance, a second request's `sieve()` could
+  overwrite the session before the first request's `sign()` read it, silently
+  fusing the wrong metrics into the receipt.  Fixed by having `sieve_and_sign`
+  call `process_prose_tax` directly, capturing the returned `OptimizationReceipt`
+  in the coroutine's local scope, and forwarding it to `sign()` via the new
+  `prose_tax_receipt=` keyword argument.  The `sign()` method now branches on
+  this argument: when present it reads only from the locally scoped receipt
+  (concurrent-safe); when absent it falls back to session state (preserving the
+  existing two-step `sieve()` + `sign()` workflow).
+
+- **Documentation — Pydantic Attribute Access Alignment** (`PHILOSOPHY.md`,
+  `README.md`): All usage examples updated from legacy dict subscripts
+  (`result["content"]`, `result["receipt"]`) to `SovereignBoundaryResponse`
+  Pydantic v2 attribute access (`result.content`, `result.receipt`).
+
+- **Test Filesystem Isolation — Sieve-Only Key Path Hardening** (`test_gateway.py`):
+  Four sieve-only tests updated to accept `tmp_path` and pass an isolated
+  temporary key path to `SovereignGateway(signing_key=...)`, preventing a stray
+  `.keys/` directory from being created at the workspace root during test sweeps.
+
+- **`total_tokens_saved` — Cumulative FinOps Semantic Alignment** (`gateway.py`,
+  `test_gateway.py`): The `total_tokens_saved` field in `prose_tax_summary` carried
+  different semantics across the two execution tracks.  The sequential `sieve()` +
+  `sign()` path correctly read the cumulative session accumulator (all prior sieve
+  calls on the instance), while the concurrent-safe one-shot `sieve_and_sign()` path
+  incorrectly emitted only the per-call delta (`raw - opt`), making the field
+  meaningless for multi-call FinOps accounting.  Fixed by adding a
+  `total_tokens_saved: Optional[int] = None` keyword argument to `sign()`.
+  `sieve_and_sign()` now reads `self._session.get("prose_tax_total_savings", 0)` once
+  — immediately after `process_prose_tax` has updated the accumulator — and forwards
+  it via `total_tokens_saved=`.  The `sign()` method uses this explicit value in the
+  one-shot branch and continues reading the session accumulator in the two-step branch,
+  guaranteeing identical cumulative semantics across both tracks.  Verified by the new
+  `test_gateway_telemetry_semantic_consistency` test case.
+
 ## [0.7.0] - 2026-05-21
 
 ### Added
