@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-05-22
+
+### Added
+
+- **`sovereign-fastapi` — Phase 5 ASGI Middleware Package** (new workspace member
+  `packages/sovereign-fastapi/`): Implements Phase 5 of the Sovereign Systems
+  Specification by introducing a drop-in `SovereignMiddleware` class for
+  FastAPI and Starlette applications.  The class inherits from Starlette's
+  `BaseHTTPMiddleware` and intercepts every inbound JSON request in its
+  `dispatch` lifecycle:
+  (1) Extracts the target text from the configurable `payload_field` key (or
+  falls back to the serialised root body when no field is specified).
+  (2) Invokes `await self.gateway.sieve_and_sign(target_text)` to strip Prose
+  Tax filler, normalise whitespace, and mint a fully signed Ed25519
+  `ForensicReceipt` in coroutine-local scope — concurrent requests sharing the
+  same middleware instance never bleed per-request metrics into each other's
+  receipts.
+  (3) Overwrites `request._body` on the `_CachedRequest` instance so that
+  `_CachedRequest.wrapped_receive` serves the cleaned payload to every downstream
+  route handler transparently, without requiring any code changes in the application.
+  (4) Caches the sealed receipt at `request.state.sovereign_receipt` for
+  in-route auditability.
+  (5) Injects `X-Sovereign-Receipt-Signature` (Ed25519 base64 signature) and
+  `X-Sovereign-Tokens-Saved` (cumulative FinOps savings counter) headers on
+  the outbound response.
+  The constructor accepts `signing_key: str`, `strict_mode: bool = False`
+  (returns HTTP 422 on any interception error rather than falling through), and
+  `payload_field: Optional[str] = None`.  Importable as
+  `from sovereign_fastapi.middleware import SovereignMiddleware`.
+
+- **`sovereign-fastapi` Test Suite** (`packages/sovereign-fastapi/tests/test_middleware.py`):
+  Four functional test cases covering the middleware contract:
+  (1) `test_middleware_happy_path` — asserts that a filler-laden inbound
+  payload is sieved to `"help me now"` before the route handler sees it, and
+  that both `X-Sovereign-*` response headers are present and well-formed.
+  (2) `test_middleware_passthrough_for_non_json` — verifies that requests with
+  non-JSON content types bypass sieve processing entirely and produce no receipt
+  header.
+  (3) `test_middleware_strict_mode_missing_field` — confirms that `strict_mode=True`
+  returns HTTP 422 when the `payload_field` key is absent from the JSON body.
+  (4) `test_middleware_concurrency_isolation` — fires 20 simultaneous requests
+  (10 filler + 10 clean payloads) via `asyncio.gather` and asserts that every
+  response body reflects the correct minimized form of its own payload, proving
+  that the coroutine-local `OptimizationReceipt` capture in `sieve_and_sign`
+  prevents cross-request metric contamination under concurrent load.
+
+- **Workspace `--import-mode=importlib`** (`pyproject.toml`): Added
+  `addopts = "--import-mode=importlib"` to `[tool.pytest.ini_options]` so that
+  pytest resolves test module paths via the `importlib` import system.  This
+  prevents the `ModuleNotFoundError` collision that arises when multiple
+  workspace packages each contain a `tests/` directory with an `__init__.py`,
+  which the default `prepend` import mode treats as a single shared `tests`
+  package.
+
+- **Workspace dev-dependencies** (`pyproject.toml`): Added `fastapi>=0.100.0`,
+  `httpx>=0.24.0`, and `sovereign-fastapi` to the root workspace dev-dependencies
+  so that `uv run pytest` discovers and executes the new middleware test suite
+  without requiring per-package invocations.
+
 ## [0.7.2] - 2026-05-22
 
 ### Added
@@ -199,6 +258,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one-shot branch and continues reading the session accumulator in the two-step branch,
   guaranteeing identical cumulative semantics across both tracks.  Verified by the new
   `test_gateway_telemetry_semantic_consistency` test case.
+
+- **`SovereignGateway.export_public_key()` — Private Attribute Encapsulation**
+  (`gateway.py`): The original implementation guarded keypair loading with
+  `if not self._key_manager._private_key:`, directly piercing the private
+  `._private_key` slot and treating any falsy value as an unloaded keypair.  The fix
+  replaces this with a `try/except` wrapper around `self._key_manager.public_key`:
+  the property raises `RuntimeError('Keypair not loaded.')` when the keypair has
+  not been initialised, which is caught to trigger `load_or_generate_keypair()`
+  before the key is returned.  This eliminates the private attribute dependency and
+  uses only the documented public interface.
 
 ## [0.7.0] - 2026-05-21
 
