@@ -18,8 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`tests/` Topology — `packages/sovereign-core/tests/`**: Established a unified test topology
   by creating the `tests/` directory (with `__init__.py`) inside `packages/sovereign-core/`.
-  The `testpaths` ini option points `uv run pytest` directly at this directory for clean
-  workspace-root invocation.
+  The `testpaths` ini option is set to `["packages"]` so that `uv run pytest` discovers
+  any future package's `tests/` directory automatically without requiring manual path additions.
 
 - **`test_crypto.py` — Cryptographic Identity Test Suite** (`packages/sovereign-core/tests/`):
   Authored 19 fully type-hinted, docstring-backed test cases across four classes covering:
@@ -50,8 +50,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are forwarded unmodified, content fields are minimized, messages without string content pass
   through intact, list length is preserved, and the `SessionContext` receives the
   `prose_tax_receipt` entry after each pass.
-
-### Added
 
 - **Automated `.env` Environment Hydration** (`__main__.py`): Added
   `python-dotenv>=1.0.0` as a runtime dependency and wired `load_dotenv()` at
