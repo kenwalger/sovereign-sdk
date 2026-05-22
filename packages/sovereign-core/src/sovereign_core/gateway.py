@@ -360,6 +360,7 @@ class SovereignGateway:
         clean_context: str,
         *,
         prose_tax_receipt: Optional["OptimizationReceipt"] = None,
+        total_tokens_saved: Optional[int] = None,
     ) -> "ForensicReceipt":
         """Cryptographically seal a clean payload and return a ForensicReceipt envelope.
 
@@ -388,6 +389,13 @@ class SovereignGateway:
                 from a local :func:`process_prose_tax` call.  When provided,
                 its fields are embedded directly in the receipt metadata without
                 touching shared session state.
+            total_tokens_saved: Optional pre-computed cumulative savings total
+                to embed as ``"total_tokens_saved"`` in the receipt metadata.
+                Passed by :meth:`sieve_and_sign` after reading the updated
+                session accumulator so that the one-shot macro and the two-step
+                sequential workflow expose identical cumulative semantics.
+                Defaults to the per-call delta (``raw - opt``) when ``None``
+                and ``prose_tax_receipt`` is supplied.
 
         Returns:
             A :class:`~sovereign_core.crypto.ForensicReceipt` TypedDict whose
@@ -403,8 +411,8 @@ class SovereignGateway:
         metadata: Dict[str, Any] = {"source": "SovereignGateway"}
 
         if prose_tax_receipt is not None:
-            # Concurrent-safe path: use only the locally captured receipt;
-            # no shared session reads.
+            # Concurrent-safe path: use only the locally captured receipt and
+            # the explicitly passed cumulative total — no shared session reads.
             raw: int = prose_tax_receipt.raw_token_count
             opt: int = prose_tax_receipt.optimized_token_count
             metadata["prose_tax_summary"] = {
@@ -412,7 +420,7 @@ class SovereignGateway:
                 "optimized_token_count": opt,
                 "tokens_eliminated": raw - opt,
                 "tax_savings_percentage": prose_tax_receipt.tax_savings_percentage,
-                "total_tokens_saved": raw - opt,
+                "total_tokens_saved": total_tokens_saved if total_tokens_saved is not None else raw - opt,
             }
         else:
             # Sequential two-step path: read from shared session state.
@@ -453,12 +461,20 @@ class SovereignGateway:
               dict covering ``content`` and the Prose Tax telemetry summary.
         """
         # Call process_prose_tax directly so the OptimizationReceipt is captured
-        # in this coroutine's local scope.  Passing it explicitly to sign() via
-        # prose_tax_receipt= ensures concurrent requests on the same gateway
-        # instance never read each other's metrics from shared session state.
+        # in this coroutine's local scope.  After it returns, the session
+        # accumulator already holds the updated cumulative total (prior savings
+        # + this call's delta); read it once here and forward both values
+        # explicitly to sign() so the one-shot macro and the two-step sequential
+        # workflow expose identical total_tokens_saved semantics without any
+        # further shared-state reads inside sign().
         clean, tax_receipt = await process_prose_tax(text_payload, self._session)
         content = clean if isinstance(clean, str) else str(clean)
-        receipt = self.sign(content, prose_tax_receipt=tax_receipt)
+        cumulative_saved: int = self._session.get("prose_tax_total_savings", 0)
+        receipt = self.sign(
+            content,
+            prose_tax_receipt=tax_receipt,
+            total_tokens_saved=cumulative_saved,
+        )
         return SovereignBoundaryResponse(content=content, receipt=receipt)
 
     def export_public_key(self) -> str:

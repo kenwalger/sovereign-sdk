@@ -185,6 +185,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   temporary key path to `SovereignGateway(signing_key=...)`, preventing a stray
   `.keys/` directory from being created at the workspace root during test sweeps.
 
+- **`total_tokens_saved` — Cumulative FinOps Semantic Alignment** (`gateway.py`,
+  `test_gateway.py`): The `total_tokens_saved` field in `prose_tax_summary` carried
+  different semantics across the two execution tracks.  The sequential `sieve()` +
+  `sign()` path correctly read the cumulative session accumulator (all prior sieve
+  calls on the instance), while the concurrent-safe one-shot `sieve_and_sign()` path
+  incorrectly emitted only the per-call delta (`raw - opt`), making the field
+  meaningless for multi-call FinOps accounting.  Fixed by adding a
+  `total_tokens_saved: Optional[int] = None` keyword argument to `sign()`.
+  `sieve_and_sign()` now reads `self._session.get("prose_tax_total_savings", 0)` once
+  — immediately after `process_prose_tax` has updated the accumulator — and forwards
+  it via `total_tokens_saved=`.  The `sign()` method uses this explicit value in the
+  one-shot branch and continues reading the session accumulator in the two-step branch,
+  guaranteeing identical cumulative semantics across both tracks.  Verified by the new
+  `test_gateway_telemetry_semantic_consistency` test case.
+
 ## [0.7.0] - 2026-05-21
 
 ### Added

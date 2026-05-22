@@ -718,3 +718,48 @@ class TestSovereignGateway:
             "ForensicReceipt enriched with prose_tax_summary must still pass "
             "full Ed25519 signature verification"
         )
+
+    async def test_gateway_telemetry_semantic_consistency(
+        self, gateway_env: SovereignGateway
+    ) -> None:
+        """total_tokens_saved carries identical cumulative semantics on both execution tracks.
+
+        Exercises the shared gateway instance through the sequential sieve() + sign()
+        track first, then through the atomic sieve_and_sign() track.  Asserts that the
+        total_tokens_saved embedded in the second receipt equals the accumulated total
+        from both operations, not merely the per-call delta of the second invocation.
+
+        Token arithmetic for the fixed payload 'hi please just help me now':
+          - 26 UTF-8 bytes → raw_token_count = 6
+          - 'help me now' → 11 UTF-8 bytes → optimized_token_count = 2
+          - tokens_eliminated = 4 per call
+          - After sequential track:  session accumulator = 4
+          - After atomic track:      session accumulator = 8
+        """
+        payload = "hi please just help me now"
+
+        # Sequential track — sieve() writes to the session accumulator, sign() reads it.
+        clean = await gateway_env.sieve(payload)
+        seq_receipt = gateway_env.sign(clean)
+        seq_total = seq_receipt["metadata"]["prose_tax_summary"]["total_tokens_saved"]
+        seq_delta = seq_receipt["metadata"]["prose_tax_summary"]["tokens_eliminated"]
+
+        # Atomic track — sieve_and_sign() must forward the updated accumulator to sign().
+        atomic_result = await gateway_env.sieve_and_sign(payload)
+        atomic_summary = atomic_result.receipt["metadata"]["prose_tax_summary"]
+        atomic_total = atomic_summary["total_tokens_saved"]
+        atomic_delta = atomic_summary["tokens_eliminated"]
+
+        expected_total = seq_total + atomic_delta
+        assert atomic_total == expected_total, (
+            f"total_tokens_saved after sieve_and_sign() must equal the cumulative "
+            f"accumulation of both tracks ({seq_total} + {atomic_delta} = {expected_total}); "
+            f"got: {atomic_total}"
+        )
+
+        assert SovereignKeyManager.verify_receipt(
+            atomic_result.receipt, {"content": atomic_result.content}
+        ), (
+            "ForensicReceipt from sieve_and_sign() must pass full Ed25519 "
+            "verify_receipt after telemetry alignment fix"
+        )
