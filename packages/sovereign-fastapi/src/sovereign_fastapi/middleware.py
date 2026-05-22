@@ -113,6 +113,21 @@ class SovereignMiddleware(BaseHTTPMiddleware):
             # this value instead of the original stream.
             request._body = new_body  # type: ignore[attr-defined]
 
+            # Realign Content-Length with the (possibly sieved) body so that
+            # downstream ASGI handlers, routers, and reverse proxies never
+            # encounter a stale-length mismatch against the overwritten body
+            # bytes or a hanging read timeout waiting for bytes that no longer
+            # exist.
+            new_content_length = str(len(new_body)).encode("utf-8")
+            scope_headers = request.scope["headers"]
+            patched = [
+                (n, new_content_length if n == b"content-length" else v)
+                for n, v in scope_headers
+            ]
+            if not any(n == b"content-length" for n, _ in scope_headers):
+                patched.append((b"content-length", new_content_length))
+            request.scope["headers"] = patched
+
         response = await call_next(request)
 
         if receipt is not None:

@@ -182,3 +182,55 @@ class TestSovereignMiddleware:
             assert response.headers.get("x-sovereign-receipt-signature"), (
                 f"Request {i}: missing or empty X-Sovereign-Receipt-Signature header"
             )
+
+    async def test_middleware_corrects_content_length_header(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+    ) -> None:
+        """After a sieve pass, Content-Length exactly matches the sieved body's byte length.
+
+        Builds a route handler that echoes back both the Content-Length header it
+        observes on the inbound request and the actual byte count of the body it
+        reads.  A filler-dense payload (multiple stripped tokens) ensures the body
+        shrinks measurably so that a stale header would produce a clearly visible
+        mismatch.
+
+        Specifically verifies:
+        - The Content-Length header seen inside the route handler equals the string
+          representation of len(await request.body()), confirming that
+          request.scope["headers"] was patched in-place by the middleware.
+        - This guarantees downstream ASGI handlers, routers, and reverse proxies
+          never hang waiting for bytes that no longer exist.
+        """
+        monkeypatch.setenv("SOVEREIGN_NODE_SECRET", "pytest-middleware-cl-header-secret")
+
+        app = FastAPI()
+        app.add_middleware(
+            SovereignMiddleware,
+            signing_key=str(tmp_path / "cl_keys" / "sovereign_identity.pem"),
+            payload_field="text",
+        )
+
+        @app.post("/measure")
+        async def measure(request: Request) -> JSONResponse:
+            body_bytes = await request.body()
+            return JSONResponse({
+                "content_length_header": request.headers.get("content-length"),
+                "body_byte_len": len(body_bytes),
+            })
+
+        # Multiple filler tokens ensure the body shrinks after sieving.
+        # "hi please just certainly of course help me now" → "help me now"
+        raw_text = "hi please just certainly of course help me now"
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post("/measure", json={"text": raw_text})
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["content_length_header"] == str(data["body_byte_len"]), (
+            f"Content-Length header ({data['content_length_header']!r}) must equal "
+            f"the true body byte length ({data['body_byte_len']}) after the sieve "
+            f"rewrite; a stale value would cause downstream consumers to hang on read"
+        )

@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-05-22
+
+### Added
+
+- **`TestSovereignMiddleware.test_middleware_corrects_content_length_header`**
+  (`packages/sovereign-fastapi/tests/test_middleware.py`): Functional regression
+  test for the v0.8.1 `Content-Length` realignment fix.  A custom route handler
+  echoes back both the `content-length` header it observes on the inbound request
+  and the actual byte count of the body it reads via `await request.body()`.  A
+  filler-dense payload (`"hi please just certainly of course help me now"` → sieved
+  to `"help me now"`) ensures the body shrinks measurably, making a stale header
+  produce a clearly visible mismatch.  Asserts that both values are identical,
+  confirming that `request.scope["headers"]` was patched in-place by the middleware
+  so downstream ASGI consumers never hang waiting for bytes that no longer exist.
+
+- **`TestSovereignGateway.test_gateway_export_public_key_bubbles_unrelated_runtime_errors`**
+  (`packages/sovereign-core/tests/test_gateway.py`): Defensive regression test for
+  the v0.8.1 `export_public_key()` exception-narrowing fix.  Uses
+  `unittest.mock.patch.object` with `PropertyMock` to make the underlying
+  `SovereignKeyManager.public_key` property raise
+  `RuntimeError("Unexpected database disk full error")`.  Asserts that (a) the
+  exception propagates to the caller unchanged via `pytest.raises`, and (b)
+  `load_or_generate_keypair()` — mocked and tracked independently — is never
+  invoked.  This guarantees that system faults fail loudly rather than triggering
+  silent key regeneration that would replace the node's cryptographic identity.
+
+## [0.8.1] - 2026-05-22
+
+### Fixed
+
+- **`SovereignMiddleware` — `Content-Length` Header Realignment** (`middleware.py`):
+  After the Prose Tax sieve shrinks or rewrites the JSON body, the inbound
+  `Content-Length` header retained the original byte count.  Downstream ASGI
+  handlers, routers, and reverse proxies that validate header/body length parity
+  could therefore encounter a stale-length payload mismatch or a hanging read
+  timeout waiting for bytes that no longer exist.  Fixed by computing
+  ``len(new_body)`` immediately after ``request._body`` is overwritten and
+  patching ``request.scope["headers"]`` in place: existing ``content-length``
+  entries are replaced in a single list comprehension pass, and the header is
+  appended if it was absent.
+
+- **`SovereignGateway.export_public_key()` — RuntimeError Path Narrowing**
+  (`gateway.py`): The bare ``except RuntimeError:`` guard intercepted every
+  ``RuntimeError`` raised inside ``self._key_manager.public_key``, including
+  system-level failures such as disk faults and file permission errors.
+  Swallowing those errors silently triggered ``load_or_generate_keypair()``,
+  risking the generation of a rogue cryptographic identity on a node that
+  could not safely read its existing key material.  The handler is narrowed to
+  ``except RuntimeError as e:`` with an explicit
+  ``"Keypair not loaded" in str(e)`` guard; any ``RuntimeError`` whose message
+  does not match the documented sentinel is re-raised immediately so the SDK
+  fails loudly and defensively.
+
 ## [0.8.0] - 2026-05-22
 
 ### Added
