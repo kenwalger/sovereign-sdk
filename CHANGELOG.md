@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-05-21
+
+### Added
+
+- **Phase 3 Testing Framework — `pytest` + `pytest-asyncio` Infrastructure** (root `pyproject.toml`):
+  Added `pytest>=8.0.0` and `pytest-asyncio>=0.23.0` as workspace-level development dependencies
+  and configured `asyncio_mode = "auto"` under `[tool.pytest.ini_options]` so async test coroutines
+  are discovered and executed without explicit per-function decorator decoration.
+
+- **`tests/` Topology — `packages/sovereign-core/tests/`**: Established a unified test topology
+  by creating the `tests/` directory (with `__init__.py`) inside `packages/sovereign-core/`.
+  The `testpaths` ini option points `uv run pytest` directly at this directory for clean
+  workspace-root invocation.
+
+- **`test_crypto.py` — Cryptographic Identity Test Suite** (`packages/sovereign-core/tests/`):
+  Authored 19 fully type-hinted, docstring-backed test cases across four classes covering:
+  (1) `TestGreenfieldKeypairGeneration` — Ed25519 keypair generation returns valid 32-byte key
+  material, persists both PEM files, and exposes a consistent `public_key` property;
+  (2) `TestFchmodPermissionLocking` — private key file is non-empty, 0o600-permissioned on POSIX
+  (skipped on Windows with a platform-guard assertion), leaves no staging temp file after
+  `os.replace()`, and routes correctly through the `hasattr(os, 'fchmod')` branch;
+  (3) `TestWrongSecretKeyLoad` — wrong, missing, and blank `SOVEREIGN_NODE_SECRET` values each
+  raise `RuntimeError` before any key bytes are read or written;
+  (4) `TestForensicReceiptMinting` — freshly minted receipts contain all five required fields,
+  pass full key-pin/payload-hash/Ed25519 verification, carry a 64-byte signature, and return
+  `False` for tampered metadata, rogue key pins, altered payloads, and explicit metadata round-trips.
+
+- **`test_gateway.py` — Prose Tax Optimization Layer Regression Suite**
+  (`packages/sovereign-core/tests/`): Authored 31 fully type-hinted, async-native regression
+  test cases across five classes insulating `process_prose_tax` from future regressions:
+  (1) `TestFillerTokenStripping` — `hi`, `hello`, `please`, `certainly`, `of course`,
+  `I hope this`, and `just` are cleanly stripped while the remainder of each sentence is preserved;
+  (2) `TestHighIntegrityPhrasePassthrough` — `make sure to`, `hello-world`, `hi-fi`,
+  `certainly-not`, `be sure to`, and `absolutely-not` pass through the regex library completely
+  unmarred, each exercising a distinct lookahead or lookbehind guard;
+  (3) `TestCaseSensitiveHeadingPreservation` — identical duplicate headings are collapsed to one
+  copy via the `\\1` backreference, while headings that differ in case, level, or position are
+  preserved; (4) `TestWhitespaceNormalization` — multiple spaces collapse to one, orphaned spaces
+  before commas and periods are absorbed, and multi-filler removal leaves no double-space artifact;
+  (5) `TestDictMessageListStructure` — list-of-dicts input returns a list, all non-content keys
+  are forwarded unmodified, content fields are minimized, messages without string content pass
+  through intact, list length is preserved, and the `SessionContext` receives the
+  `prose_tax_receipt` entry after each pass.
+
 ### Added
 
 - **Automated `.env` Environment Hydration** (`__main__.py`): Added
