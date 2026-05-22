@@ -1,8 +1,12 @@
 # packages/sovereign-core/src/sovereign_core/gateway.py
 import asyncio
+import os
 import re
-from typing import Any, Dict, List, Union
+from pathlib import Path
+from typing import Any, Dict, List, TypedDict, Union
 from pydantic import BaseModel, Field
+
+from .crypto import ForensicReceipt, SovereignKeyManager
 
 
 class SessionContext(BaseModel):
@@ -275,3 +279,169 @@ async def process_prose_tax(
     context.set("prose_tax_total_savings", prior_savings + (raw_count - optimized_count))
 
     return (minimized_messages if isinstance(payload, list) else minimized_text), receipt
+
+
+class SieveAndSignResult(TypedDict):
+    """Structured result returned by :meth:`SovereignGateway.sieve_and_sign`.
+
+    Attributes:
+        content: The purified string produced by the Prose Tax sieve pass.
+        receipt: The cryptographically sealed :class:`~sovereign_core.crypto.ForensicReceipt`
+            envelope covering ``content`` and any accumulated Prose Tax telemetry.
+    """
+
+    content: str
+    receipt: ForensicReceipt
+
+
+class SovereignBoundaryResponse(BaseModel):
+    """Structured Pydantic model returned by :meth:`SovereignGateway.sieve_and_sign`.
+
+    Provides attribute-style access to both the purified content string and the
+    cryptographically sealed receipt in a single, validated Python object, avoiding
+    the error-prone key-lookup patterns inherent in raw dict returns.
+
+    Attributes:
+        content: The minimized string produced by the Prose Tax sieve pass —
+            conversational filler stripped, whitespace normalized.
+        receipt: The Ed25519-signed :class:`~sovereign_core.crypto.ForensicReceipt`
+            envelope covering ``content`` and any accumulated Prose Tax telemetry.
+            Access individual fields with standard dict syntax, e.g.
+            ``response.receipt["payload_hash"]``.
+    """
+
+    content: str
+    receipt: Dict[str, Any]
+
+
+class SovereignGateway:
+    """High-level developer interface for the Sovereign Systems SDK.
+
+    Wraps the Prose Tax sieve and cryptographic signing primitives behind a
+    clean two-method API so application code never touches the lower-level
+    ``process_prose_tax`` or ``SovereignKeyManager`` APIs directly.
+
+    Args:
+        signing_key: Path to the private key PEM file used for signing.  The
+            parent directory is passed to :class:`~sovereign_core.crypto.SovereignKeyManager`
+            as the ``key_dir``.  Defaults to ``.keys/sovereign_identity.pem``.
+    """
+
+    def __init__(self, signing_key: str = ".keys/sovereign_identity.pem") -> None:
+        key_path = Path(signing_key)
+        os.makedirs(key_path.parent, exist_ok=True)
+        self._key_manager = SovereignKeyManager(key_dir=key_path.parent)
+        self._session = SessionContext(session_id="sovereign-gateway")
+
+    async def sieve(self, text_payload: str) -> str:
+        """Strip conversational boilerplate, normalize whitespace, and return purified text.
+
+        Delegates to :func:`process_prose_tax` for filler-phrase removal and
+        whitespace normalization.  The underlying optimization metrics are
+        accumulated in the gateway's internal :class:`SessionContext`.
+
+        Args:
+            text_payload: Raw string to be cleaned.
+
+        Returns:
+            Minimized string with conversational filler removed and whitespace
+            normalized.
+        """
+        clean, _ = await process_prose_tax(text_payload, self._session)
+        return clean if isinstance(clean, str) else str(clean)
+
+    def sign(self, clean_context: str) -> "ForensicReceipt":
+        """Cryptographically seal a clean payload and return a ForensicReceipt envelope.
+
+        Wraps :meth:`~sovereign_core.crypto.SovereignKeyManager.generate_receipt`
+        to produce a fully minted, Ed25519-signed :class:`~sovereign_core.crypto.ForensicReceipt`
+        that can be independently verified with
+        :meth:`~sovereign_core.crypto.SovereignKeyManager.verify_receipt`.
+
+        When :meth:`sieve` has been called prior to this method on the same
+        gateway instance, the Prose Tax optimization metrics stored in the
+        internal :class:`SessionContext` are injected into the receipt's
+        ``metadata`` under the ``"prose_tax_summary"`` key.  This fuses
+        data-provenance and FinOps cost-optimization telemetry into a single
+        cryptographically signed manifest.
+
+        Args:
+            clean_context: Purified string payload (typically the output of
+                :meth:`sieve`) to be hashed and sealed.
+
+        Returns:
+            A :class:`~sovereign_core.crypto.ForensicReceipt` TypedDict whose
+            ``signature`` covers ``timestamp``, ``payload_hash``, and
+            ``metadata`` atomically.  The ``metadata`` dict always contains
+            ``"source": "SovereignGateway"`` and, when Prose Tax metrics are
+            available, a ``"prose_tax_summary"`` sub-dict with
+            ``raw_token_count``, ``optimized_token_count``,
+            ``tokens_eliminated``, ``tax_savings_percentage``, and
+            ``total_tokens_saved``.
+        """
+        payload: Dict[str, Any] = {"content": clean_context}
+        metadata: Dict[str, Any] = {"source": "SovereignGateway"}
+
+        tax_receipt = self._session.get("prose_tax_receipt")
+        if tax_receipt is not None:
+            raw: int = tax_receipt.get("raw_token_count", 0)
+            opt: int = tax_receipt.get("optimized_token_count", 0)
+            metadata["prose_tax_summary"] = {
+                "raw_token_count": raw,
+                "optimized_token_count": opt,
+                "tokens_eliminated": raw - opt,
+                "tax_savings_percentage": tax_receipt.get("tax_savings_percentage", 0.0),
+                "total_tokens_saved": self._session.get("prose_tax_total_savings", 0),
+            }
+
+        return self._key_manager.generate_receipt(payload, metadata=metadata)
+
+    async def sieve_and_sign(self, text_payload: str) -> SovereignBoundaryResponse:
+        """One-shot macro: sieve the payload and cryptographically seal it in a single call.
+
+        Equivalent to calling ``await self.sieve(text_payload)`` followed
+        immediately by ``self.sign(clean_context)``, but returns both the
+        purified content string and the sealed :class:`~sovereign_core.crypto.ForensicReceipt`
+        together in a validated :class:`SovereignBoundaryResponse` model.  The
+        Prose Tax telemetry accumulated during the sieve pass is automatically
+        fused into the receipt metadata before signing (see :meth:`sign` for the
+        full telemetry contract).
+
+        Args:
+            text_payload: Raw string to be cleaned and sealed.
+
+        Returns:
+            A :class:`SovereignBoundaryResponse` Pydantic model with two attributes:
+
+            - ``.content``: the minimized string after filler removal and
+              whitespace normalization.
+            - ``.receipt``: the Ed25519-signed :class:`~sovereign_core.crypto.ForensicReceipt`
+              dict covering ``content`` and the Prose Tax telemetry summary.
+        """
+        content = await self.sieve(text_payload)
+        receipt = self.sign(content)
+        return SovereignBoundaryResponse(content=content, receipt=receipt)
+
+    def export_public_key(self) -> str:
+        """Return the base64-encoded Ed25519 public verification key for this gateway identity.
+
+        Triggers keypair loading or generation if the underlying
+        :class:`~sovereign_core.crypto.SovereignKeyManager` has not yet been
+        initialised (i.e. on the first call before any :meth:`sign` or
+        :meth:`sieve_and_sign` invocation).  The returned string is the canonical
+        public key string that appears in the ``"public_key"`` field of every
+        :class:`~sovereign_core.crypto.ForensicReceipt` produced by this gateway
+        instance, enabling out-of-band receipt verification by third parties who
+        hold only the public key.
+
+        Returns:
+            Base64-encoded raw 32-byte Ed25519 public key string, identical to
+            ``receipt["public_key"]`` in all receipts minted by this instance.
+
+        Raises:
+            RuntimeError: If ``SOVEREIGN_NODE_SECRET`` is not set in the
+                environment and no keypair has been pre-loaded.
+        """
+        if not self._key_manager._private_key:
+            self._key_manager.load_or_generate_keypair()
+        return self._key_manager.public_key

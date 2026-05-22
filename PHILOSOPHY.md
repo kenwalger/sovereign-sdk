@@ -32,3 +32,30 @@ Sovereign Systems operates under a strict data isolation boundary. It acts as a 
 [Raw Input Data] ──> [ Sovereign Middleware ] ──> [ Enforced Boundary ] ──> [ Downstream AI Run]
                           (Sieve & Sign)
 ```
+
+---
+
+## Intended Usage
+Imagine a developer installing your library and using it to protect a standard FastAPI endpoint or an agent pipeline. The code would look incredibly clean and highly authoritative:
+
+
+```python
+from sovereign_core.gateway import SovereignGateway
+
+# Initialize local sovereign boundary — manages Ed25519 keypair lifecycle
+gateway = SovereignGateway(signing_key=".keys/sovereign_identity.pem")
+
+@app.post("/api/v1/ingest")
+async def handle_agent_input(raw_payload: dict):
+    # One-shot macro: sieve + sign in a single awaitable call.
+    # result["content"]  — Prose Tax stripped, whitespace normalized
+    # result["receipt"]  — ForensicReceipt with prose_tax_summary sealed inside
+    result = await gateway.sieve_and_sign(raw_payload["text"])
+
+    # Commit the purified payload and its sealed audit record
+    await reasoning_ledger.append(
+        payload=result["content"],
+        receipt=result["receipt"],
+    )
+    return {"status": "sovereign_verified", "receipt_id": result["receipt"]["payload_hash"]}
+```

@@ -372,7 +372,7 @@ dev = [
 [package.metadata.requires-dev]
 dev = [
     { name = "pytest", specifier = ">=8.0.0" },
-    { name = "pytest-asyncio", specifier = ">=0.23.0" },
+    { name = "pytest-asyncio", specifier = ">=1.0.0" },
     { name = "sovereign-core", editable = "packages/sovereign-core" },
     { name = "sovereign-runtime", editable = "packages/sovereign-runtime" },
 ]

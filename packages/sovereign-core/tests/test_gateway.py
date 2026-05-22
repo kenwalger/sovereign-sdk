@@ -1,10 +1,19 @@
-"""Regression tests for the Prose Tax Optimization Layer — process_prose_tax."""
+"""Regression tests for the Prose Tax Optimization Layer and SovereignGateway interface."""
 
+import base64
 from typing import Any
 
 import pytest
 
-from sovereign_core.gateway import OptimizationReceipt, SessionContext, process_prose_tax
+from sovereign_core.crypto import SovereignKeyManager
+from sovereign_core.gateway import (
+    OptimizationReceipt,
+    SessionContext,
+    SieveAndSignResult,
+    SovereignBoundaryResponse,
+    SovereignGateway,
+    process_prose_tax,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -465,4 +474,247 @@ class TestDictMessageListStructure:
 
         assert ctx.get("prose_tax_receipt") is not None, (
             "prose_tax_receipt must be written into the SessionContext after optimization"
+        )
+
+
+# ---------------------------------------------------------------------------
+# SovereignGateway high-level interface
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def gateway_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> SovereignGateway:
+    """Provide a SovereignGateway with a temp key directory and known node secret."""
+    monkeypatch.setenv("SOVEREIGN_NODE_SECRET", "pytest-gateway-secret-v072")
+    return SovereignGateway(signing_key=str(tmp_path / "keys" / "sovereign_identity.pem"))
+
+
+class TestSovereignGateway:
+    """Functional tests for the SovereignGateway high-level developer interface."""
+
+    async def test_sieve_returns_string(self) -> None:
+        """sieve() always returns a plain string regardless of input content."""
+        gw = SovereignGateway()
+        result = await gw.sieve("hello world")
+
+        assert isinstance(result, str), (
+            f"sieve() must return a str; got {type(result).__name__!r}"
+        )
+
+    async def test_sieve_strips_filler_tokens(self) -> None:
+        """sieve() removes greeting, hedging, and affirmation filler tokens."""
+        gw = SovereignGateway()
+        result = await gw.sieve("hi please just help me now")
+
+        assert result == "help me now", (
+            f"sieve() must strip 'hi', 'please', and 'just', leaving 'help me now'; "
+            f"got: {result!r}"
+        )
+
+    async def test_sieve_normalizes_whitespace(self) -> None:
+        """sieve() collapses multiple consecutive spaces to a single space."""
+        gw = SovereignGateway()
+        result = await gw.sieve("word   word    word")
+
+        assert result == "word word word", (
+            f"sieve() must normalize multi-space runs; got: {result!r}"
+        )
+
+    async def test_sieve_preserves_guarded_phrases(self) -> None:
+        """sieve() must not mangle guarded instructional phrases like 'make sure to'."""
+        gw = SovereignGateway()
+        result = await gw.sieve("make sure to validate the input before submitting")
+
+        assert "make sure to" in result, (
+            f"sieve() must preserve 'make sure to' intact; got: {result!r}"
+        )
+
+    def test_sign_returns_forensic_receipt_fields(self, gateway_env: SovereignGateway) -> None:
+        """sign() returns a ForensicReceipt dict containing all five required envelope fields."""
+        receipt = gateway_env.sign("clean context for signing")
+
+        for field in ("timestamp", "payload_hash", "public_key", "signature", "metadata"):
+            assert field in receipt, (
+                f"ForensicReceipt must contain '{field}' field; got keys: {list(receipt.keys())}"
+            )
+
+    def test_sign_receipt_is_cryptographically_valid(
+        self, gateway_env: SovereignGateway
+    ) -> None:
+        """sign() produces a receipt that passes full SovereignKeyManager.verify_receipt verification.
+
+        This confirms that the payload dict used internally by sign() matches
+        the one re-derived by verify_receipt, and that the Ed25519 signature
+        over the canonical manifest is intact.
+        """
+        clean_context = "sovereign verified payload for audit ledger"
+        receipt = gateway_env.sign(clean_context)
+
+        assert SovereignKeyManager.verify_receipt(
+            receipt, {"content": clean_context}
+        ), (
+            "The ForensicReceipt produced by sign() must pass full Ed25519 "
+            "signature verification against the original payload"
+        )
+
+    def test_sign_receipt_fails_on_tampered_payload(
+        self, gateway_env: SovereignGateway
+    ) -> None:
+        """verify_receipt returns False when the payload passed to it differs from the signed one."""
+        receipt = gateway_env.sign("original payload content")
+
+        assert not SovereignKeyManager.verify_receipt(
+            receipt, {"content": "tampered payload content"}
+        ), (
+            "A receipt verified against a mutated payload must return False"
+        )
+
+    def test_sign_receipt_metadata_contains_source_tag(
+        self, gateway_env: SovereignGateway
+    ) -> None:
+        """The ForensicReceipt metadata field carries the 'SovereignGateway' source tag."""
+        receipt = gateway_env.sign("tagged payload")
+
+        assert receipt["metadata"].get("source") == "SovereignGateway", (
+            f"Receipt metadata must carry source='SovereignGateway'; "
+            f"got: {receipt['metadata']!r}"
+        )
+
+    async def test_gateway_sieve_and_sign_atomic(
+        self, gateway_env: SovereignGateway
+    ) -> None:
+        """sieve_and_sign() returns a SovereignBoundaryResponse with minimized content and a valid receipt.
+
+        Verifies the one-shot macro contract via attribute access on the
+        SovereignBoundaryResponse Pydantic model:
+          - result.content equals the fully stripped output of sieve()
+          - result.receipt carries all five ForensicReceipt envelope fields
+          - the receipt passes full Ed25519 verify_receipt against {"content": ...}
+          - prose_tax_summary is present and internally consistent because sieve()
+            ran before sign() inside the same macro call
+        """
+        raw_payload = "hi please just help me now"
+        result = await gateway_env.sieve_and_sign(raw_payload)
+
+        assert isinstance(result, SovereignBoundaryResponse), (
+            f"sieve_and_sign() must return a SovereignBoundaryResponse; "
+            f"got {type(result).__name__!r}"
+        )
+
+        assert result.content == "help me now", (
+            f"content must be the fully minimized payload; got: {result.content!r}"
+        )
+
+        receipt = result.receipt
+        for field in ("timestamp", "payload_hash", "public_key", "signature", "metadata"):
+            assert field in receipt, (
+                f"ForensicReceipt must contain '{field}'; got keys: {list(receipt.keys())!r}"
+            )
+
+        assert SovereignKeyManager.verify_receipt(
+            receipt, {"content": result.content}
+        ), (
+            "Receipt from sieve_and_sign() must pass full Ed25519 "
+            "verify_receipt check against its own content"
+        )
+
+        assert "prose_tax_summary" in receipt["metadata"], (
+            "prose_tax_summary must be fused into metadata by the atomic macro call"
+        )
+        summary = receipt["metadata"]["prose_tax_summary"]
+        assert summary["tokens_eliminated"] == (
+            summary["raw_token_count"] - summary["optimized_token_count"]
+        ), "tokens_eliminated arithmetic must be self-consistent inside sieve_and_sign result"
+
+    def test_gateway_export_public_key(self, gateway_env: SovereignGateway) -> None:
+        """export_public_key() returns the base64-encoded Ed25519 public verification key.
+
+        Verifies three invariants against the ReceiptSchema criteria:
+          1. The return value is a plain string.
+          2. It base64-decodes to exactly 32 raw bytes (Ed25519 public key size).
+          3. It matches receipt["public_key"] in ForensicReceipt envelopes produced
+             by the same gateway instance, confirming key-pin consistency.
+        """
+        pub_key = gateway_env.export_public_key()
+
+        assert isinstance(pub_key, str), (
+            f"export_public_key() must return a str; got {type(pub_key).__name__!r}"
+        )
+
+        decoded = base64.b64decode(pub_key)
+        assert len(decoded) == 32, (
+            f"Decoded public key must be 32 bytes (Ed25519); got {len(decoded)} bytes"
+        )
+
+        receipt = gateway_env.sign("verification key pin check")
+        assert pub_key == receipt["public_key"], (
+            "export_public_key() must return the same key pinned in "
+            "ForensicReceipt envelopes from this gateway instance"
+        )
+
+    async def test_gateway_fuses_prose_tax_metadata(
+        self, gateway_env: SovereignGateway
+    ) -> None:
+        """sieve() then sign() fuses Prose Tax telemetry into the signed ForensicReceipt metadata.
+
+        Verifies that the prose_tax_summary sub-dict is present in the receipt
+        metadata, contains all five required keys, carries arithmetically
+        consistent and exact values for the known input payload, and that the
+        enriched envelope still passes full Ed25519 cryptographic verification —
+        confirming that data-provenance and FinOps optimization telemetry are
+        sealed together in a single tamper-evident manifest.
+
+        Token approximation uses the byte-density heuristic (UTF-8 bytes ÷ 4):
+          - 'hi please just help me now' → 26 bytes → raw_token_count = 6
+          - 'help me now'                → 11 bytes → optimized_token_count = 2
+          - tokens_eliminated            → 4
+        """
+        raw_payload = "hi please just help me now"
+        clean_context = await gateway_env.sieve(raw_payload)
+        receipt = gateway_env.sign(clean_context)
+
+        assert "prose_tax_summary" in receipt["metadata"], (
+            f"sign() after sieve() must inject prose_tax_summary into metadata; "
+            f"got keys: {list(receipt['metadata'].keys())!r}"
+        )
+        summary = receipt["metadata"]["prose_tax_summary"]
+
+        for key in (
+            "raw_token_count",
+            "optimized_token_count",
+            "tokens_eliminated",
+            "tax_savings_percentage",
+            "total_tokens_saved",
+        ):
+            assert key in summary, (
+                f"prose_tax_summary must contain '{key}'; got keys: {list(summary.keys())!r}"
+            )
+
+        assert summary["raw_token_count"] == 6, (
+            f"raw_token_count for 'hi please just help me now' (26 UTF-8 bytes) "
+            f"must be 6; got: {summary['raw_token_count']}"
+        )
+        assert summary["optimized_token_count"] == 2, (
+            f"optimized_token_count for 'help me now' (11 UTF-8 bytes) "
+            f"must be 2; got: {summary['optimized_token_count']}"
+        )
+        assert summary["tokens_eliminated"] == 4, (
+            f"tokens_eliminated must be 4; got: {summary['tokens_eliminated']}"
+        )
+        assert summary["tokens_eliminated"] == (
+            summary["raw_token_count"] - summary["optimized_token_count"]
+        ), "tokens_eliminated must equal raw_token_count - optimized_token_count"
+        assert 0.0 <= summary["tax_savings_percentage"] <= 100.0, (
+            f"tax_savings_percentage must be in [0.0, 100.0]; "
+            f"got: {summary['tax_savings_percentage']}"
+        )
+        assert summary["total_tokens_saved"] >= 0, (
+            "total_tokens_saved must be non-negative"
+        )
+
+        assert SovereignKeyManager.verify_receipt(
+            receipt, {"content": clean_context}
+        ), (
+            "ForensicReceipt enriched with prose_tax_summary must still pass "
+            "full Ed25519 signature verification"
         )

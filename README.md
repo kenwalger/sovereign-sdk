@@ -28,6 +28,70 @@ This repository is managed as an integrated workspace using `uv`. It cleanly sep
 └── uv.lock                   # Deterministic dependency lockfile
 ```
 
+## Primary Developer Interface: `SovereignGateway`
+
+The `SovereignGateway` class is the single entry point for application code interacting with the SDK. It wraps the full Sieve-and-Sign pipeline — stripping Prose Tax boilerplate, accumulating FinOps telemetry, and minting an Ed25519-sealed `ForensicReceipt` — behind a clean three-method API.
+
+### One-shot macro (recommended)
+
+`sieve_and_sign()` cleans the payload, fuses the Prose Tax telemetry summary into the receipt metadata, and seals it in a single awaitable call:
+
+```python
+from sovereign_core.gateway import SovereignGateway
+
+gateway = SovereignGateway(signing_key=".keys/sovereign_identity.pem")
+
+@app.post("/api/v1/ingest")
+async def handle_agent_input(raw_payload: dict):
+    result = await gateway.sieve_and_sign(raw_payload["text"])
+    # result["content"]  — purified string, Prose Tax stripped
+    # result["receipt"]  — ForensicReceipt with prose_tax_summary sealed inside
+
+    await reasoning_ledger.append(
+        payload=result["content"],
+        receipt=result["receipt"],
+    )
+    return {
+        "status": "sovereign_verified",
+        "receipt_id": result["receipt"]["payload_hash"],
+    }
+```
+
+### Granular two-step workflow
+
+When the clean context is needed independently before signing (e.g. for intermediate validation), call the methods separately:
+
+```python
+from sovereign_core.gateway import SovereignGateway
+
+gateway = SovereignGateway(signing_key=".keys/sovereign_identity.pem")
+
+@app.post("/api/v1/ingest")
+async def handle_agent_input(raw_payload: dict):
+    # 1. Strip the Prose Tax — remove boilerplate, normalize whitespace
+    clean_context = await gateway.sieve(raw_payload["text"])
+
+    # 2. Cryptographically seal — Prose Tax telemetry fused into metadata
+    receipt = gateway.sign(clean_context)
+
+    # 3. Commit to the Chain of Custody Ledger
+    await reasoning_ledger.append(payload=clean_context, receipt=receipt)
+
+    return {"status": "sovereign_verified", "receipt_id": receipt["payload_hash"]}
+```
+
+### Independent receipt verification
+
+Receipts produced by either workflow can be verified at any time:
+
+```python
+from sovereign_core.crypto import SovereignKeyManager
+
+is_valid = SovereignKeyManager.verify_receipt(receipt, {"content": clean_context})
+```
+
+---
+
 ## Core Systems Implementation Target
 1. The Ingestion Boundary (`sovereign-core`)
 Implements strict token and structural filters to execute Context Cleansing. It aggressively evaluates inbound traffic strings, strips conversational boilerplates or markdown filler, and calculates the exact byte/token delta returned to the host environment as a Prose Tax balance profile.
