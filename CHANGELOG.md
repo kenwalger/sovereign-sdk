@@ -151,25 +151,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`SovereignGateway.__init__` — Key Filename Contract** (`gateway.py`):
+  When a custom `signing_key` path such as `"vault/node-alpha.pem"` was passed,
+  only the parent directory was forwarded to `SovereignKeyManager`, which
+  silently replaced the caller-specified filename with the hardcoded default
+  `sovereign_identity.pem`.  The fix resolves the full absolute path via
+  `Path(...).resolve()`, constructs `SovereignKeyManager` with the parent
+  directory as before, then immediately overrides `private_key_path` and
+  `public_key_path` on the key manager instance to honour the exact filename
+  provided.  The companion `.pub` path is derived via `key_path.with_suffix(".pub")`.
+
+- **`SovereignGateway.sieve_and_sign` — Concurrent Session Contention**
+  (`gateway.py`): The original one-shot macro called `self.sieve()` (which
+  wrote Prose Tax metrics into the shared `self._session`) and then `self.sign()`
+  (which read those metrics back from the same shared session).  Under concurrent
+  async load on the same gateway instance, a second request's `sieve()` could
+  overwrite the session before the first request's `sign()` read it, silently
+  fusing the wrong metrics into the receipt.  Fixed by having `sieve_and_sign`
+  call `process_prose_tax` directly, capturing the returned `OptimizationReceipt`
+  in the coroutine's local scope, and forwarding it to `sign()` via the new
+  `prose_tax_receipt=` keyword argument.  The `sign()` method now branches on
+  this argument: when present it reads only from the locally scoped receipt
+  (concurrent-safe); when absent it falls back to session state (preserving the
+  existing two-step `sieve()` + `sign()` workflow).
+
 - **Documentation — Pydantic Attribute Access Alignment** (`PHILOSOPHY.md`,
-  `README.md`): All usage examples that referenced `sieve_and_sign()` output
-  via legacy dict subscripts (`result["content"]`, `result["receipt"]`,
-  `result["receipt"]["payload_hash"]`) have been updated to use Pydantic v2
-  attribute access (`result.content`, `result.receipt`,
-  `result.receipt["payload_hash"]`), matching the `SovereignBoundaryResponse`
-  model's actual interface and eliminating runtime `TypeError` risk for readers
-  who copy-paste the examples verbatim.
+  `README.md`): All usage examples updated from legacy dict subscripts
+  (`result["content"]`, `result["receipt"]`) to `SovereignBoundaryResponse`
+  Pydantic v2 attribute access (`result.content`, `result.receipt`).
 
 - **Test Filesystem Isolation — Sieve-Only Key Path Hardening** (`test_gateway.py`):
-  Four sieve-only test methods (`test_sieve_returns_string`,
-  `test_sieve_strips_filler_tokens`, `test_sieve_normalizes_whitespace`,
-  `test_sieve_preserves_guarded_phrases`) were updated to accept pytest's
-  `tmp_path` fixture and pass an isolated temporary key path to
-  `SovereignGateway(signing_key=...)`.  The `os.makedirs` call introduced in
-  `SovereignGateway.__init__` previously caused these tests to create a stray
-  `.keys/` directory at the workspace root on every test sweep.  All key
-  material is now scoped exclusively to pytest's ephemeral temp directory and
-  is cleaned up automatically after each test run.
+  Four sieve-only tests updated to accept `tmp_path` and pass an isolated
+  temporary key path to `SovereignGateway(signing_key=...)`, preventing a stray
+  `.keys/` directory from being created at the workspace root during test sweeps.
 
 ## [0.7.0] - 2026-05-21
 

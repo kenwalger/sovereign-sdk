@@ -3,7 +3,7 @@ import asyncio
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, TypedDict, Union
+from typing import Any, Dict, List, Optional, TypedDict, Union
 from pydantic import BaseModel, Field
 
 from .crypto import ForensicReceipt, SovereignKeyManager
@@ -328,9 +328,14 @@ class SovereignGateway:
     """
 
     def __init__(self, signing_key: str = ".keys/sovereign_identity.pem") -> None:
-        key_path = Path(signing_key)
+        key_path = Path(signing_key).resolve()
         os.makedirs(key_path.parent, exist_ok=True)
         self._key_manager = SovereignKeyManager(key_dir=key_path.parent)
+        # Override the key manager's default filename so a custom signing_key
+        # path (e.g. "vault/node-alpha.pem") is preserved exactly rather than
+        # silently replaced with the default "sovereign_identity.pem".
+        self._key_manager.private_key_path = key_path
+        self._key_manager.public_key_path = key_path.with_suffix(".pub")
         self._session = SessionContext(session_id="sovereign-gateway")
 
     async def sieve(self, text_payload: str) -> str:
@@ -350,7 +355,12 @@ class SovereignGateway:
         clean, _ = await process_prose_tax(text_payload, self._session)
         return clean if isinstance(clean, str) else str(clean)
 
-    def sign(self, clean_context: str) -> "ForensicReceipt":
+    def sign(
+        self,
+        clean_context: str,
+        *,
+        prose_tax_receipt: Optional["OptimizationReceipt"] = None,
+    ) -> "ForensicReceipt":
         """Cryptographically seal a clean payload and return a ForensicReceipt envelope.
 
         Wraps :meth:`~sovereign_core.crypto.SovereignKeyManager.generate_receipt`
@@ -358,16 +368,26 @@ class SovereignGateway:
         that can be independently verified with
         :meth:`~sovereign_core.crypto.SovereignKeyManager.verify_receipt`.
 
-        When :meth:`sieve` has been called prior to this method on the same
-        gateway instance, the Prose Tax optimization metrics stored in the
-        internal :class:`SessionContext` are injected into the receipt's
-        ``metadata`` under the ``"prose_tax_summary"`` key.  This fuses
-        data-provenance and FinOps cost-optimization telemetry into a single
-        cryptographically signed manifest.
+        Two metric-injection paths are supported:
+
+        * **Explicit receipt (concurrent-safe)**: when ``prose_tax_receipt`` is
+          supplied, its values are used directly and no shared session state is
+          read.  This is the path taken by :meth:`sieve_and_sign` to prevent
+          concurrent requests on the same gateway instance from clobbering each
+          other's metrics.
+        * **Session fallback (sequential two-step workflow)**: when
+          ``prose_tax_receipt`` is ``None``, the Prose Tax metrics written to
+          the internal :class:`SessionContext` by a prior :meth:`sieve` call are
+          used.  Appropriate only when a single request issues ``sieve()`` and
+          ``sign()`` sequentially without interleaved concurrent calls.
 
         Args:
             clean_context: Purified string payload (typically the output of
                 :meth:`sieve`) to be hashed and sealed.
+            prose_tax_receipt: Optional :class:`OptimizationReceipt` captured
+                from a local :func:`process_prose_tax` call.  When provided,
+                its fields are embedded directly in the receipt metadata without
+                touching shared session state.
 
         Returns:
             A :class:`~sovereign_core.crypto.ForensicReceipt` TypedDict whose
@@ -382,17 +402,31 @@ class SovereignGateway:
         payload: Dict[str, Any] = {"content": clean_context}
         metadata: Dict[str, Any] = {"source": "SovereignGateway"}
 
-        tax_receipt = self._session.get("prose_tax_receipt")
-        if tax_receipt is not None:
-            raw: int = tax_receipt.get("raw_token_count", 0)
-            opt: int = tax_receipt.get("optimized_token_count", 0)
+        if prose_tax_receipt is not None:
+            # Concurrent-safe path: use only the locally captured receipt;
+            # no shared session reads.
+            raw: int = prose_tax_receipt.raw_token_count
+            opt: int = prose_tax_receipt.optimized_token_count
             metadata["prose_tax_summary"] = {
                 "raw_token_count": raw,
                 "optimized_token_count": opt,
                 "tokens_eliminated": raw - opt,
-                "tax_savings_percentage": tax_receipt.get("tax_savings_percentage", 0.0),
-                "total_tokens_saved": self._session.get("prose_tax_total_savings", 0),
+                "tax_savings_percentage": prose_tax_receipt.tax_savings_percentage,
+                "total_tokens_saved": raw - opt,
             }
+        else:
+            # Sequential two-step path: read from shared session state.
+            tax_receipt = self._session.get("prose_tax_receipt")
+            if tax_receipt is not None:
+                raw = tax_receipt.get("raw_token_count", 0)
+                opt = tax_receipt.get("optimized_token_count", 0)
+                metadata["prose_tax_summary"] = {
+                    "raw_token_count": raw,
+                    "optimized_token_count": opt,
+                    "tokens_eliminated": raw - opt,
+                    "tax_savings_percentage": tax_receipt.get("tax_savings_percentage", 0.0),
+                    "total_tokens_saved": self._session.get("prose_tax_total_savings", 0),
+                }
 
         return self._key_manager.generate_receipt(payload, metadata=metadata)
 
@@ -418,8 +452,13 @@ class SovereignGateway:
             - ``.receipt``: the Ed25519-signed :class:`~sovereign_core.crypto.ForensicReceipt`
               dict covering ``content`` and the Prose Tax telemetry summary.
         """
-        content = await self.sieve(text_payload)
-        receipt = self.sign(content)
+        # Call process_prose_tax directly so the OptimizationReceipt is captured
+        # in this coroutine's local scope.  Passing it explicitly to sign() via
+        # prose_tax_receipt= ensures concurrent requests on the same gateway
+        # instance never read each other's metrics from shared session state.
+        clean, tax_receipt = await process_prose_tax(text_payload, self._session)
+        content = clean if isinstance(clean, str) else str(clean)
+        receipt = self.sign(content, prose_tax_receipt=tax_receipt)
         return SovereignBoundaryResponse(content=content, receipt=receipt)
 
     def export_public_key(self) -> str:
