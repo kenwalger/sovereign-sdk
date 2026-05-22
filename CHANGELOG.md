@@ -149,6 +149,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SovereignGateway` as the canonical integration pattern for downstream
   application code.
 
+### Fixed
+
+- **Documentation — Pydantic Attribute Access Alignment** (`PHILOSOPHY.md`,
+  `README.md`): All usage examples that referenced `sieve_and_sign()` output
+  via legacy dict subscripts (`result["content"]`, `result["receipt"]`,
+  `result["receipt"]["payload_hash"]`) have been updated to use Pydantic v2
+  attribute access (`result.content`, `result.receipt`,
+  `result.receipt["payload_hash"]`), matching the `SovereignBoundaryResponse`
+  model's actual interface and eliminating runtime `TypeError` risk for readers
+  who copy-paste the examples verbatim.
+
+- **Test Filesystem Isolation — Sieve-Only Key Path Hardening** (`test_gateway.py`):
+  Four sieve-only test methods (`test_sieve_returns_string`,
+  `test_sieve_strips_filler_tokens`, `test_sieve_normalizes_whitespace`,
+  `test_sieve_preserves_guarded_phrases`) were updated to accept pytest's
+  `tmp_path` fixture and pass an isolated temporary key path to
+  `SovereignGateway(signing_key=...)`.  The `os.makedirs` call introduced in
+  `SovereignGateway.__init__` previously caused these tests to create a stray
+  `.keys/` directory at the workspace root on every test sweep.  All key
+  material is now scoped exclusively to pytest's ephemeral temp directory and
+  is cleaned up automatically after each test run.
+
 ## [0.7.0] - 2026-05-21
 
 ### Added

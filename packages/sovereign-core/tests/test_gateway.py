@@ -492,18 +492,18 @@ def gateway_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> SovereignGate
 class TestSovereignGateway:
     """Functional tests for the SovereignGateway high-level developer interface."""
 
-    async def test_sieve_returns_string(self) -> None:
+    async def test_sieve_returns_string(self, tmp_path: Any) -> None:
         """sieve() always returns a plain string regardless of input content."""
-        gw = SovereignGateway()
+        gw = SovereignGateway(signing_key=str(tmp_path / ".keys" / "sovereign_identity.pem"))
         result = await gw.sieve("hello world")
 
         assert isinstance(result, str), (
             f"sieve() must return a str; got {type(result).__name__!r}"
         )
 
-    async def test_sieve_strips_filler_tokens(self) -> None:
+    async def test_sieve_strips_filler_tokens(self, tmp_path: Any) -> None:
         """sieve() removes greeting, hedging, and affirmation filler tokens."""
-        gw = SovereignGateway()
+        gw = SovereignGateway(signing_key=str(tmp_path / ".keys" / "sovereign_identity.pem"))
         result = await gw.sieve("hi please just help me now")
 
         assert result == "help me now", (
@@ -511,18 +511,18 @@ class TestSovereignGateway:
             f"got: {result!r}"
         )
 
-    async def test_sieve_normalizes_whitespace(self) -> None:
+    async def test_sieve_normalizes_whitespace(self, tmp_path: Any) -> None:
         """sieve() collapses multiple consecutive spaces to a single space."""
-        gw = SovereignGateway()
+        gw = SovereignGateway(signing_key=str(tmp_path / ".keys" / "sovereign_identity.pem"))
         result = await gw.sieve("word   word    word")
 
         assert result == "word word word", (
             f"sieve() must normalize multi-space runs; got: {result!r}"
         )
 
-    async def test_sieve_preserves_guarded_phrases(self) -> None:
+    async def test_sieve_preserves_guarded_phrases(self, tmp_path: Any) -> None:
         """sieve() must not mangle guarded instructional phrases like 'make sure to'."""
-        gw = SovereignGateway()
+        gw = SovereignGateway(signing_key=str(tmp_path / ".keys" / "sovereign_identity.pem"))
         result = await gw.sieve("make sure to validate the input before submitting")
 
         assert "make sure to" in result, (

@@ -44,16 +44,16 @@ gateway = SovereignGateway(signing_key=".keys/sovereign_identity.pem")
 @app.post("/api/v1/ingest")
 async def handle_agent_input(raw_payload: dict):
     result = await gateway.sieve_and_sign(raw_payload["text"])
-    # result["content"]  — purified string, Prose Tax stripped
-    # result["receipt"]  — ForensicReceipt with prose_tax_summary sealed inside
+    # result.content  — purified string, Prose Tax stripped
+    # result.receipt  — ForensicReceipt with prose_tax_summary sealed inside
 
     await reasoning_ledger.append(
-        payload=result["content"],
-        receipt=result["receipt"],
+        payload=result.content,
+        receipt=result.receipt,
     )
     return {
         "status": "sovereign_verified",
-        "receipt_id": result["receipt"]["payload_hash"],
+        "receipt_id": result.receipt["payload_hash"],
     }
 ```
 
