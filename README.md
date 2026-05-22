@@ -18,10 +18,14 @@ This repository is managed as an integrated workspace using `uv`. It cleanly sep
 │   │       ├── crypto.py     # Ed25519 key management & Forensic Receipt minting
 │   │       └── gateway.py    # Context Cleansing & Prose Tax ledger calculations
 │   │
-│   └── sovereign-runtime/    # Compute/Execution tier (Tool & Model isolation)
-│       └── src/sovereign_runtime/
-│           ├── router.py     # Intent-Based Pre-Flight Namespace Exposure
-│           └── __main__.py   # Execution runtime entrypoint
+│   ├── sovereign-runtime/    # Compute/Execution tier (Tool & Model isolation)
+│   │   └── src/sovereign_runtime/
+│   │       ├── router.py     # Intent-Based Pre-Flight Namespace Exposure
+│   │       └── __main__.py   # Execution runtime entrypoint
+│   │
+│   └── sovereign-fastapi/    # FastAPI/Starlette ASGI middleware adapter
+│       └── src/sovereign_fastapi/
+│           └── middleware.py # SovereignMiddleware — sieve-and-sign request interceptor
 │
 ├── main.py                   # High-level monorepo testing orchestrator
 ├── pyproject.toml            # Monorepo configuration & workspace links
@@ -30,7 +34,7 @@ This repository is managed as an integrated workspace using `uv`. It cleanly sep
 
 ## Primary Developer Interface: `SovereignGateway`
 
-The `SovereignGateway` class is the single entry point for application code interacting with the SDK. It wraps the full Sieve-and-Sign pipeline — stripping Prose Tax boilerplate, accumulating FinOps telemetry, and minting an Ed25519-sealed `ForensicReceipt` — behind a clean three-method API.
+The `SovereignGateway` class is the single entry point for application code interacting with the SDK. It wraps the full Sieve-and-Sign pipeline — stripping Prose Tax boilerplate, accumulating FinOps telemetry, and minting an Ed25519-sealed `ForensicReceipt` — behind a clean four-method API.
 
 ### One-shot macro (recommended)
 
@@ -44,8 +48,9 @@ gateway = SovereignGateway(signing_key=".keys/sovereign_identity.pem")
 @app.post("/api/v1/ingest")
 async def handle_agent_input(raw_payload: dict):
     result = await gateway.sieve_and_sign(raw_payload["text"])
-    # result.content  — purified string, Prose Tax stripped
-    # result.receipt  — ForensicReceipt with prose_tax_summary sealed inside
+    # result  —  SovereignBoundaryResponse (Pydantic model, fully typed)
+    # result.content  —  purified string, Prose Tax stripped
+    # result.receipt  —  ForensicReceipt with prose_tax_summary sealed inside
 
     await reasoning_ledger.append(
         payload=result.content,

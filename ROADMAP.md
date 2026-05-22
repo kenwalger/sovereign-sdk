@@ -40,10 +40,12 @@ and web frameworks, delivered as thin adapter packages under `packages/`.
 
 ### 5.1 FastAPI Middleware (`sovereign-fastapi`)
 
-A `SovereignMiddleware` ASGI class that intercepts every inbound request body, runs
-`sieve_and_sign()` on string payloads, and injects the resulting `SovereignBoundaryResponse`
-into the request state before the route handler fires.  The ForensicReceipt is appended to
-every JSON response under a configurable header (default: `X-Sovereign-Receipt`).
+A `SovereignMiddleware` ASGI class that intercepts every inbound JSON request body, runs
+`sieve_and_sign()` on the target payload field, and injects the resulting
+`SovereignBoundaryResponse` into the request state before the route handler fires.
+The sealed `ForensicReceipt` is surfaced on every outbound response via two dedicated
+headers: `X-Sovereign-Receipt-Signature` (the base64 Ed25519 signature) and
+`X-Sovereign-Tokens-Saved` (the cumulative FinOps savings counter).
 
 ```python
 from fastapi import FastAPI
@@ -54,9 +56,11 @@ app.add_middleware(SovereignMiddleware, signing_key=".keys/sovereign_identity.pe
 ```
 
 Key deliverables:
-- Request-body interception with `sieve()` pass before handler dispatch
-- `X-Sovereign-Receipt` response header carrying the base64-encoded `payload_hash`
-- Optional strict mode: reject requests whose receipt fails `verify_receipt` with HTTP 422
+- Request-body interception via transparent `_CachedRequest.wrapped_receive` body overwrite before handler dispatch
+- `X-Sovereign-Receipt-Signature` response header carrying the base64-encoded Ed25519 signature
+- `X-Sovereign-Tokens-Saved` response header carrying the cumulative FinOps savings counter
+- Automatic binding of the strict `SovereignBoundaryResponse` to `request.state.sovereign_receipt` for in-route auditability and IDE type preservation
+- Optional strict mode: returns HTTP 422 on any interception error (missing field, JSON parse failure)
 - Configurable field selector for non-root payload extraction (e.g. `payload_field="text"`)
 
 ### 5.2 Django Middleware (`sovereign-django`)

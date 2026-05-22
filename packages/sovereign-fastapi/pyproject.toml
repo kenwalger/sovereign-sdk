@@ -1,0 +1,24 @@
+[project]
+name = "sovereign-fastapi"
+version = "0.1.0"
+description = "FastAPI/Starlette ASGI middleware for the Sovereign Systems SDK"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [
+    { name = "kenwalger", email = "kenalger@comcast.net" }
+]
+
+dependencies = [
+    "sovereign-core",
+    "starlette>=0.27.0",
+]
+
+[tool.uv.sources]
+sovereign-core = { workspace = true }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[build-system]
+requires = ["setuptools>=61.0.0"]
+build-backend = "setuptools.build_meta"

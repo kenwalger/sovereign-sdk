@@ -318,8 +318,10 @@ class SovereignGateway:
     """High-level developer interface for the Sovereign Systems SDK.
 
     Wraps the Prose Tax sieve and cryptographic signing primitives behind a
-    clean two-method API so application code never touches the lower-level
-    ``process_prose_tax`` or ``SovereignKeyManager`` APIs directly.
+    clean four-method API so application code never touches the lower-level
+    ``process_prose_tax`` or ``SovereignKeyManager`` APIs directly:
+    :meth:`sieve`, :meth:`sign`, :meth:`sieve_and_sign`, and
+    :meth:`export_public_key`.
 
     Args:
         signing_key: Path to the private key PEM file used for signing.  The
@@ -500,8 +502,12 @@ class SovereignGateway:
         try:
             # If the key is already loaded, this will succeed and return immediately.
             return self._key_manager.public_key
-        except RuntimeError:
-            # If accessing the property raises a "Keypair not loaded" error,
-            # trigger lazy initialization safely, then return the loaded key.
-            self._key_manager.load_or_generate_keypair()
-            return self._key_manager.public_key
+        except RuntimeError as e:
+            # Only swallow the documented "Keypair not loaded" sentinel.  Any
+            # other RuntimeError (disk fault, permission failure, corrupted PEM)
+            # must propagate immediately so the SDK fails loudly rather than
+            # silently generating a rogue replacement identity.
+            if "Keypair not loaded" in str(e):
+                self._key_manager.load_or_generate_keypair()
+                return self._key_manager.public_key
+            raise

@@ -2,6 +2,7 @@
 
 import base64
 from typing import Any
+from unittest.mock import patch, PropertyMock
 
 import pytest
 
@@ -763,3 +764,33 @@ class TestSovereignGateway:
             "ForensicReceipt from sieve_and_sign() must pass full Ed25519 "
             "verify_receipt after telemetry alignment fix"
         )
+
+    def test_gateway_export_public_key_bubbles_unrelated_runtime_errors(
+        self, gateway_env: SovereignGateway
+    ) -> None:
+        """export_public_key() re-raises RuntimeErrors not matching 'Keypair not loaded'.
+
+        Patches public_key to raise RuntimeError("Unexpected database disk full error")
+        and asserts that:
+          (a) the exception propagates to the caller unchanged, and
+          (b) load_or_generate_keypair() is never invoked.
+
+        This confirms that the narrowed guard in export_public_key() prevents
+        silent identity drift: system faults must fail loudly, not trigger
+        transparent key regeneration that replaces the node's cryptographic identity.
+        """
+        error_msg = "Unexpected database disk full error"
+
+        with patch.object(
+            type(gateway_env._key_manager),
+            "public_key",
+            new_callable=PropertyMock,
+            side_effect=RuntimeError(error_msg),
+        ), patch.object(
+            gateway_env._key_manager,
+            "load_or_generate_keypair",
+        ) as mock_load:
+            with pytest.raises(RuntimeError, match=error_msg):
+                gateway_env.export_public_key()
+
+            mock_load.assert_not_called()

@@ -7,6 +7,118 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-05-22
+
+### Added
+
+- **`TestSovereignMiddleware.test_middleware_corrects_content_length_header`**
+  (`packages/sovereign-fastapi/tests/test_middleware.py`): Functional regression
+  test for the v0.8.1 `Content-Length` realignment fix.  A custom route handler
+  echoes back both the `content-length` header it observes on the inbound request
+  and the actual byte count of the body it reads via `await request.body()`.  A
+  filler-dense payload (`"hi please just certainly of course help me now"` → sieved
+  to `"help me now"`) ensures the body shrinks measurably, making a stale header
+  produce a clearly visible mismatch.  Asserts that both values are identical,
+  confirming that `request.scope["headers"]` was patched in-place by the middleware
+  so downstream ASGI consumers never hang waiting for bytes that no longer exist.
+
+- **`TestSovereignGateway.test_gateway_export_public_key_bubbles_unrelated_runtime_errors`**
+  (`packages/sovereign-core/tests/test_gateway.py`): Defensive regression test for
+  the v0.8.1 `export_public_key()` exception-narrowing fix.  Uses
+  `unittest.mock.patch.object` with `PropertyMock` to make the underlying
+  `SovereignKeyManager.public_key` property raise
+  `RuntimeError("Unexpected database disk full error")`.  Asserts that (a) the
+  exception propagates to the caller unchanged via `pytest.raises`, and (b)
+  `load_or_generate_keypair()` — mocked and tracked independently — is never
+  invoked.  This guarantees that system faults fail loudly rather than triggering
+  silent key regeneration that would replace the node's cryptographic identity.
+
+## [0.8.1] - 2026-05-22
+
+### Fixed
+
+- **`SovereignMiddleware` — `Content-Length` Header Realignment** (`middleware.py`):
+  After the Prose Tax sieve shrinks or rewrites the JSON body, the inbound
+  `Content-Length` header retained the original byte count.  Downstream ASGI
+  handlers, routers, and reverse proxies that validate header/body length parity
+  could therefore encounter a stale-length payload mismatch or a hanging read
+  timeout waiting for bytes that no longer exist.  Fixed by computing
+  ``len(new_body)`` immediately after ``request._body`` is overwritten and
+  patching ``request.scope["headers"]`` in place: existing ``content-length``
+  entries are replaced in a single list comprehension pass, and the header is
+  appended if it was absent.
+
+- **`SovereignGateway.export_public_key()` — RuntimeError Path Narrowing**
+  (`gateway.py`): The bare ``except RuntimeError:`` guard intercepted every
+  ``RuntimeError`` raised inside ``self._key_manager.public_key``, including
+  system-level failures such as disk faults and file permission errors.
+  Swallowing those errors silently triggered ``load_or_generate_keypair()``,
+  risking the generation of a rogue cryptographic identity on a node that
+  could not safely read its existing key material.  The handler is narrowed to
+  ``except RuntimeError as e:`` with an explicit
+  ``"Keypair not loaded" in str(e)`` guard; any ``RuntimeError`` whose message
+  does not match the documented sentinel is re-raised immediately so the SDK
+  fails loudly and defensively.
+
+## [0.8.0] - 2026-05-22
+
+### Added
+
+- **`sovereign-fastapi` — Phase 5 ASGI Middleware Package** (new workspace member
+  `packages/sovereign-fastapi/`): Implements Phase 5 of the Sovereign Systems
+  Specification by introducing a drop-in `SovereignMiddleware` class for
+  FastAPI and Starlette applications.  The class inherits from Starlette's
+  `BaseHTTPMiddleware` and intercepts every inbound JSON request in its
+  `dispatch` lifecycle:
+  (1) Extracts the target text from the configurable `payload_field` key (or
+  falls back to the serialised root body when no field is specified).
+  (2) Invokes `await self.gateway.sieve_and_sign(target_text)` to strip Prose
+  Tax filler, normalise whitespace, and mint a fully signed Ed25519
+  `ForensicReceipt` in coroutine-local scope — concurrent requests sharing the
+  same middleware instance never bleed per-request metrics into each other's
+  receipts.
+  (3) Overwrites `request._body` on the `_CachedRequest` instance so that
+  `_CachedRequest.wrapped_receive` serves the cleaned payload to every downstream
+  route handler transparently, without requiring any code changes in the application.
+  (4) Caches the sealed receipt at `request.state.sovereign_receipt` for
+  in-route auditability.
+  (5) Injects `X-Sovereign-Receipt-Signature` (Ed25519 base64 signature) and
+  `X-Sovereign-Tokens-Saved` (cumulative FinOps savings counter) headers on
+  the outbound response.
+  The constructor accepts `signing_key: str`, `strict_mode: bool = False`
+  (returns HTTP 422 on any interception error rather than falling through), and
+  `payload_field: Optional[str] = None`.  Importable as
+  `from sovereign_fastapi.middleware import SovereignMiddleware`.
+
+- **`sovereign-fastapi` Test Suite** (`packages/sovereign-fastapi/tests/test_middleware.py`):
+  Four functional test cases covering the middleware contract:
+  (1) `test_middleware_happy_path` — asserts that a filler-laden inbound
+  payload is sieved to `"help me now"` before the route handler sees it, and
+  that both `X-Sovereign-*` response headers are present and well-formed.
+  (2) `test_middleware_passthrough_for_non_json` — verifies that requests with
+  non-JSON content types bypass sieve processing entirely and produce no receipt
+  header.
+  (3) `test_middleware_strict_mode_missing_field` — confirms that `strict_mode=True`
+  returns HTTP 422 when the `payload_field` key is absent from the JSON body.
+  (4) `test_middleware_concurrency_isolation` — fires 20 simultaneous requests
+  (10 filler + 10 clean payloads) via `asyncio.gather` and asserts that every
+  response body reflects the correct minimized form of its own payload, proving
+  that the coroutine-local `OptimizationReceipt` capture in `sieve_and_sign`
+  prevents cross-request metric contamination under concurrent load.
+
+- **Workspace `--import-mode=importlib`** (`pyproject.toml`): Added
+  `addopts = "--import-mode=importlib"` to `[tool.pytest.ini_options]` so that
+  pytest resolves test module paths via the `importlib` import system.  This
+  prevents the `ModuleNotFoundError` collision that arises when multiple
+  workspace packages each contain a `tests/` directory with an `__init__.py`,
+  which the default `prepend` import mode treats as a single shared `tests`
+  package.
+
+- **Workspace dev-dependencies** (`pyproject.toml`): Added `fastapi>=0.100.0`,
+  `httpx>=0.24.0`, and `sovereign-fastapi` to the root workspace dev-dependencies
+  so that `uv run pytest` discovers and executes the new middleware test suite
+  without requiring per-package invocations.
+
 ## [0.7.2] - 2026-05-22
 
 ### Added
@@ -199,6 +311,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one-shot branch and continues reading the session accumulator in the two-step branch,
   guaranteeing identical cumulative semantics across both tracks.  Verified by the new
   `test_gateway_telemetry_semantic_consistency` test case.
+
+- **`SovereignGateway.export_public_key()` — Private Attribute Encapsulation**
+  (`gateway.py`): The original implementation guarded keypair loading with
+  `if not self._key_manager._private_key:`, directly piercing the private
+  `._private_key` slot and treating any falsy value as an unloaded keypair.  The fix
+  replaces this with a `try/except` wrapper around `self._key_manager.public_key`:
+  the property raises `RuntimeError('Keypair not loaded.')` when the keypair has
+  not been initialised, which is caught to trigger `load_or_generate_keypair()`
+  before the key is returned.  This eliminates the private attribute dependency and
+  uses only the documented public interface.
 
 ## [0.7.0] - 2026-05-21
 
