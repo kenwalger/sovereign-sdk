@@ -1,17 +1,20 @@
 from __future__ import annotations
 
+# stdlib
 import json
 import logging
 from typing import Any, Callable, Awaitable, Optional
 
-logger = logging.getLogger("sovereign_fastapi")
-
+# framework
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp
 
+# local
 from sovereign_core.gateway import SovereignGateway
+
+logger = logging.getLogger("sovereign_fastapi")
 
 
 class SovereignMiddleware(BaseHTTPMiddleware):
@@ -106,6 +109,11 @@ class SovereignMiddleware(BaseHTTPMiddleware):
 
             except Exception as exc:
                 if self.strict_mode:
+                    logger.critical(
+                        "Sovereign boundary processing failed under strict enforcement. "
+                        "Aborting request.",
+                        exc_info=True,
+                    )
                     return JSONResponse(
                         {"detail": f"Sovereign middleware validation error: {exc}"},
                         status_code=422,

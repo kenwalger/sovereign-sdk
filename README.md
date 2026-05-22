@@ -133,6 +133,86 @@ uv run pytest
 
 ---
 
+## Running the Workspace Examples
+
+### FastAPI Gateway Example
+
+The `examples/fastapi_gateway/` directory contains a self-contained demonstration
+of `SovereignMiddleware` applied to a FastAPI application.
+
+**1. Set your node secret** (required for Ed25519 key generation):
+
+```bash
+export SOVEREIGN_NODE_SECRET=your-local-secret   # Linux / macOS
+# Windows PowerShell:
+$env:SOVEREIGN_NODE_SECRET = "your-local-secret"
+```
+
+**2. Start the example application server:**
+
+```bash
+uv run uvicorn examples.fastapi_gateway.app:app --reload
+```
+
+The server starts on `http://127.0.0.1:8000`. On first boot it generates an
+ephemeral Ed25519 keypair at `.keys/example_identity.pem`.
+
+**3. In a second terminal, run the example client:**
+
+```bash
+uv run python examples/fastapi_gateway/client.py
+```
+
+The client transmits a high-density Prose Tax payload to `/api/v1/sanitize` and
+prints the optimized output alongside the `X-Sovereign-Receipt-Signature` and
+`X-Sovereign-Tokens-Saved` response headers.
+
+### Verifying a ForensicReceipt (CLI)
+
+The `sovereign-verify` CLI accepts a receipt JSON file and a base64 public key
+and exits `0` on verified, `1` on tampered.
+
+**Export a receipt and the gateway's public key:**
+
+```python
+import json
+from sovereign_core.gateway import SovereignGateway
+
+gateway = SovereignGateway()
+result = await gateway.sieve_and_sign("example payload")
+
+# Write the receipt to disk
+with open("receipt.json", "w") as f:
+    json.dump(result.receipt, f, indent=2)
+
+# Print the public key
+print(gateway.export_public_key())
+```
+
+**Verify the receipt:**
+
+```bash
+uv run sovereign-verify \
+    --receipt receipt.json \
+    --public-key <base64-encoded-public-key>
+```
+
+On success:
+
+```
+Verified  ✓  payload_hash: 4fec03e7...
+```
+
+On tampered receipt:
+
+```
+Tampered  ✗  Receipt failed cryptographic verification.
+  payload_hash : 4fec03e7...
+  timestamp    : 2026-05-22T...
+```
+
+---
+
 ## Verification & Deep-Dive Diagnostics
 
 This section documents how to exercise the local cryptographic runtime in

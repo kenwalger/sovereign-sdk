@@ -63,6 +63,15 @@ Key deliverables:
 - Optional strict mode: returns HTTP 422 on any interception error (missing field, JSON parse failure)
 - Configurable field selector for non-root payload extraction (e.g. `payload_field="text"`)
 
+### Phase 5.1 — FastAPI / Starlette ASGI Middleware
+- [x] Full-lifecycle ASGI body interception, local-silicon context sieving, and cryptographic signing.
+- [x] Inbound proxy alignment via dynamic `Content-Length` byte-length recalculation.
+- [x] Structured diagnostic observability logging for non-strict failure modes.
+
+### Phase 5.2 — Streaming Request & Response Boundaries (Extension Path)
+- [ ] Architectural specification for asynchronous generator token streams (`StreamingResponse`).
+- [ ] Out-of-band verification tracing: Designing an alternative background task worker or trailing chunk aggregator to handle Server-Sent Events (SSE) where HTTP headers cannot be mutated mid-stream.
+
 ### 5.2 Django Middleware (`sovereign-django`)
 
 A `SovereignDjangoMiddleware` class conforming to Django's `get_response` middleware contract.

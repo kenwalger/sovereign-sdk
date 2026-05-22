@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-05-22
+
+### Added
+
+- **`sovereign-verify` — Stateless ForensicReceipt Verification CLI**
+  (`packages/sovereign-core/src/sovereign_core/cli.py`,
+  `packages/sovereign-core/pyproject.toml`): New `argparse`-based CLI entry
+  point registered as `sovereign-verify`.  Accepts `--receipt FILE` (path to a
+  JSON ForensicReceipt) and `--public-key BASE64_KEY` (base64 raw Ed25519 public
+  key).  Performs key-pin assertion (receipt `"public_key"` field must match the
+  provided key) followed by Ed25519 signature verification over the canonical
+  manifest `{"metadata": …, "payload_hash": …, "timestamp": …}`.  Prints
+  `Verified  ✓  payload_hash: …` to stdout and exits `0` on success; prints a
+  descriptive tamper warning to stderr and exits `1` on any failure.  Requires
+  no private key or `SOVEREIGN_NODE_SECRET`, enabling fully stateless out-of-band
+  auditing.
+
+- **`examples/fastapi_gateway/app.py`** — Runnable FastAPI application wired with
+  `SovereignMiddleware` pointing to `.keys/example_identity.pem`.  Exposes a
+  single `POST /api/v1/sanitize` route that echoes the sieved `"text"` field and
+  the receipt `payload_hash` back to the caller.  Start with
+  `SOVEREIGN_NODE_SECRET=<secret> uv run uvicorn examples.fastapi_gateway.app:app --reload`.
+
+- **`examples/fastapi_gateway/client.py`** — Companion `httpx` client that
+  transmits a high-density Prose Tax payload to the example server, prints the
+  optimized low-entropy output, and pretty-prints the `X-Sovereign-Receipt-Signature`
+  and `X-Sovereign-Tokens-Saved` response headers.
+
+- **`CONTRIBUTING.md`** — Open-source community guidelines specifying the four
+  project invariants (local-first, tamper-evidence, zero regression, dependency
+  minimalism), pull request requirements, code style rules, and instructions for
+  running tests locally via `uv run pytest`.
+
+- **`SECURITY.md`** — Security policy documenting the coordinated private
+  disclosure process, in-scope vulnerability categories (key forgery, receipt
+  bypass, boundary injection, CLI acceptance of tampered receipts), response
+  timeline commitments, and contact address.
+
+- **`README.md` — "Running the Workspace Examples" section**: Documents the exact
+  `uv run` commands to start the example FastAPI server, execute the example
+  client, and invoke the `sovereign-verify` CLI with sample output.
+
+### Changed
+
+- **`SovereignMiddleware` — PEP 8 Import Grouping** (`middleware.py`): Stdlib
+  imports (`json`, `logging`, `typing`) are now grouped first, followed by a
+  blank-line-separated Starlette framework block, then a local block for
+  `sovereign_core.gateway`.  The module-level `logger` assignment is placed
+  after all import blocks rather than inline between stdlib and framework imports.
+
+- **`SovereignMiddleware.dispatch` — Strict-Mode Critical Log** (`middleware.py`):
+  When `strict_mode=True`, the exception handler now emits
+  `logger.critical("Sovereign boundary processing failed under strict enforcement. Aborting request.", exc_info=True)`
+  immediately before returning the HTTP 422 response.  Previously, strict-mode
+  failures were invisible to structured log consumers: only the 422 response
+  status was observable, with no log record emitted.
+
 ## [0.8.3] - 2026-05-22
 
 ### Added
