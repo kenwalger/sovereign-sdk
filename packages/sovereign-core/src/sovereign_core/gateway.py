@@ -311,7 +311,7 @@ class SovereignBoundaryResponse(BaseModel):
     """
 
     content: str
-    receipt: Dict[str, Any]
+    receipt: ForensicReceipt
 
 
 class SovereignGateway:
@@ -497,6 +497,11 @@ class SovereignGateway:
             RuntimeError: If ``SOVEREIGN_NODE_SECRET`` is not set in the
                 environment and no keypair has been pre-loaded.
         """
-        if not self._key_manager._private_key:
+        try:
+            # If the key is already loaded, this will succeed and return immediately.
+            return self._key_manager.public_key
+        except RuntimeError:
+            # If accessing the property raises a "Keypair not loaded" error,
+            # trigger lazy initialization safely, then return the loaded key.
             self._key_manager.load_or_generate_keypair()
-        return self._key_manager.public_key
+            return self._key_manager.public_key
