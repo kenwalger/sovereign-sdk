@@ -6,7 +6,6 @@ Start the server:
 Then exercise it with client.py in a second terminal.
 """
 import json
-import os
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse

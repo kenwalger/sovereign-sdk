@@ -175,18 +175,22 @@ and exits `0` on verified, `1` on tampered.
 **Export a receipt and the gateway's public key:**
 
 ```python
+import asyncio
 import json
 from sovereign_core.gateway import SovereignGateway
 
-gateway = SovereignGateway()
-result = await gateway.sieve_and_sign("example payload")
+async def main():
+    gateway = SovereignGateway()
+    result = await gateway.sieve_and_sign("example payload")
 
-# Write the receipt to disk
-with open("receipt.json", "w") as f:
-    json.dump(result.receipt, f, indent=2)
+    # Write the receipt to disk
+    with open("receipt.json", "w") as f:
+        json.dump(result.receipt, f, indent=2)
 
-# Print the public key
-print(gateway.export_public_key())
+    # Print the public key
+    print(gateway.export_public_key())
+
+asyncio.run(main())
 ```
 
 **Verify the receipt:**

@@ -418,7 +418,7 @@ wheels = [
 
 [[package]]
 name = "sovereign-core"
-version = "0.1.0"
+version = "1.0.0"
 source = { editable = "packages/sovereign-core" }
 dependencies = [
     { name = "cryptography" },
@@ -433,7 +433,7 @@ requires-dist = [
 
 [[package]]
 name = "sovereign-fastapi"
-version = "0.1.0"
+version = "1.0.0"
 source = { editable = "packages/sovereign-fastapi" }
 dependencies = [
     { name = "sovereign-core" },
@@ -465,7 +465,7 @@ requires-dist = [
 
 [[package]]
 name = "sovereign-sdk-workspace"
-version = "0.1.0"
+version = "1.0.0"
 source = { virtual = "." }
 
 [package.dev-dependencies]

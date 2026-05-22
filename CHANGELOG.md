@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-05-22
+
+### Added
+
+- **GitHub Actions CI/CD** (`.github/workflows/test.yml`, `.github/workflows/publish.yml`):
+  `test.yml` triggers on every push to `main` and all pull requests; runs
+  `uv sync --all-packages` then `uv run pytest` on `ubuntu-latest` with Python 3.12
+  via `astral-sh/setup-uv`.  `publish.yml` triggers on `v*` tags and provides a
+  skeleton PyPI publishing workflow using `pypa/gh-action-pypi-publish` with OIDC
+  Trusted Publishing (`id-token: write` permission).
+
+- **PEP 561 `py.typed` marker** (`packages/sovereign-fastapi/src/sovereign_fastapi/py.typed`):
+  Empty marker file declaring `sovereign-fastapi` as a typed package.  Included in
+  the built distribution via `[tool.setuptools.package-data]` in the package manifest,
+  enabling downstream type checkers to resolve `sovereign_fastapi` stubs without
+  additional configuration.
+
+### Changed
+
+- **Version promoted to `1.0.0`** across all package manifests
+  (`packages/sovereign-core/pyproject.toml`, `packages/sovereign-fastapi/pyproject.toml`,
+  root `pyproject.toml`, `sovereign_core.__version__`): Reflects stable, production-ready
+  API surface with no further breaking-change windows before a major bump.
+
+- **PyPI metadata injected** (`packages/sovereign-core/pyproject.toml`,
+  `packages/sovereign-fastapi/pyproject.toml`): Both package manifests now carry
+  `license = { text = "MIT" }`, `[project.classifiers]` (MIT, Python 3.12,
+  Intended Audience :: Developers, Topic :: Security, Topic :: Software Development :: Libraries),
+  and `[project.urls]` (Homepage, Repository, Changelog) targeting
+  `https://github.com/kenwalger/sovereign-sdk`.
+
+- **`sovereign-fastapi` inter-package dependency version-pinned**
+  (`packages/sovereign-fastapi/pyproject.toml`): `"sovereign-core"` dependency
+  tightened to `"sovereign-core>=1.0.0,<2.0.0"` to prevent accidental major-version
+  drift across the workspace.
+
+- **`sovereign-verify` CLI — narrowed exception handling**
+  (`packages/sovereign-core/src/sovereign_core/cli.py`): `_verify()` now catches
+  `except Exception` (fail-closed fallback comment added) instead of the
+  previously redundant `except (InvalidSignature, KeyError, ValueError, Exception)`.
+  The now-unused `from cryptography.exceptions import InvalidSignature` import removed.
+
+- **`README.md` — async example wrapped in `asyncio.run(main())` harness**:
+  The "Verifying a ForensicReceipt" code snippet is now a complete, runnable
+  script with `async def main()` and `asyncio.run(main())` so readers can
+  execute it directly without a surrounding async framework.
+
 ## [0.8.4] - 2026-05-22
 
 ### Added

@@ -12,7 +12,6 @@ import json
 import sys
 from pathlib import Path
 
-from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 
@@ -54,7 +53,8 @@ def _verify(receipt: dict, expected_public_key: str) -> bool:
         canonical = json.dumps(manifest, sort_keys=True, default=str)
         pub_key.verify(sig_bytes, canonical.encode("utf-8"))
         return True
-    except (InvalidSignature, KeyError, ValueError, Exception):
+    except Exception:
+        # Fail-closed: any structural, encoding, or cryptographic error means unverified.
         return False
 
 
