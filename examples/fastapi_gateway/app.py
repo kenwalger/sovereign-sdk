@@ -43,5 +43,5 @@ async def sanitize(request: Request) -> JSONResponse:
     return JSONResponse({
         "sanitized": sanitized_text,
         "sovereign_verified": receipt is not None,
-        "payload_hash": receipt["payload_hash"] if receipt else None,
+        "payload_hash": receipt.get("payload_hash") if receipt is not None else None,
     })
