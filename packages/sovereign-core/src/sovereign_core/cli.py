@@ -92,6 +92,10 @@ def main() -> None:
         print(f"Error: receipt file is not valid JSON: {exc}", file=sys.stderr)
         sys.exit(1)
 
+    if not isinstance(receipt, dict):
+        sys.stderr.write("🚨 Error: Invalid manifest format. The receipt file must contain a valid JSON object.\n")
+        sys.exit(1)
+
     if _verify(receipt, args.public_key):
         print(f"Verified  ✓  payload_hash: {receipt.get('payload_hash', 'unknown')}")
         sys.exit(0)

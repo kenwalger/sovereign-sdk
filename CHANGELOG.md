@@ -14,9 +14,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **GitHub Actions CI/CD** (`.github/workflows/test.yml`, `.github/workflows/publish.yml`):
   `test.yml` triggers on every push to `main` and all pull requests; runs
   `uv sync --all-packages` then `uv run pytest` on `ubuntu-latest` with Python 3.12
-  via `astral-sh/setup-uv`.  `publish.yml` triggers on `v*` tags and provides a
-  skeleton PyPI publishing workflow using `pypa/gh-action-pypi-publish` with OIDC
-  Trusted Publishing (`id-token: write` permission).
+  via `astral-sh/setup-uv`.  `publish.yml` triggers on `v*` tags; a dedicated `test`
+  job mirrors the full CI suite inline and the `publish` job declares `needs: [test]`,
+  guaranteeing the pipeline fails closed and blocks PyPI deployment when a tag is
+  pushed against a broken or untested commit.  Uses `pypa/gh-action-pypi-publish`
+  with OIDC Trusted Publishing (`id-token: write` permission).
+
+- **`sovereign-verify` CLI — JSON object type guard**
+  (`packages/sovereign-core/src/sovereign_core/cli.py`): After `json.loads` parses
+  the receipt file, an explicit `isinstance(receipt, dict)` check is now enforced.
+  If the top-level JSON value is not an object (e.g. an array, string, or bare
+  number), the CLI writes a descriptive error to `stderr` and exits `1` before any
+  field access is attempted, preventing raw `AttributeError` tracebacks when
+  auditors supply malformed or non-object documents.
+
+- **`README.md` — Security provenance repositioning**: Reframed the project as a
+  local-first AI WAF and compliance gate.  New introductory section leads with the
+  non-repudiation and chain-of-custody value proposition.  Added a "The ForensicReceipt:
+  Sealed Transformation Accounting" technical subsection documenting how the Ed25519
+  signature binds both `payload_hash` (SHA-256 of the sieved output) and the
+  `prose_tax_summary` token-delta metrics inside the same canonical manifest — giving
+  auditors mathematical proof that neither the boundary output nor the transformation
+  accounting can be altered after issuance.  Prose Tax optimization demoted to an
+  optional feature subsection inside the audit envelope narrative.  All standalone
+  code snippets wrapped in `asyncio.run()` harnesses for direct executability.
 
 - **PEP 561 `py.typed` marker** (`packages/sovereign-fastapi/src/sovereign_fastapi/py.typed`):
   Empty marker file declaring `sovereign-fastapi` as a typed package.  Included in

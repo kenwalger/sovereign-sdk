@@ -4,8 +4,8 @@
 
 | Version | Supported |
 |---------|-----------|
-| 0.8.x   | Yes       |
-| < 0.8   | No        |
+| 1.0.0   | Yes       |
+| < 1.0   | No        |
 
 Only the latest minor release series receives security fixes. Upgrade to the
 current version before reporting an issue.
