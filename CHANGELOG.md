@@ -28,6 +28,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   field access is attempted, preventing raw `AttributeError` tracebacks when
   auditors supply malformed or non-object documents.
 
+- **Post-launch documentation polish** (`ROADMAP.md`,
+  `examples/fastapi_gateway/app.py`): Fixed duplicate Phase 5.1/5.2 section labels in
+  `ROADMAP.md` — the shipped FastAPI middleware checklist is now consolidated under the
+  single `5.1` heading, and the streaming extension path is correctly numbered `5.5`
+  rather than colliding with the `5.2` Django entry.  Section 6.2 updated to reflect
+  the shipped CLI: package corrected from `sovereign-runtime` to `sovereign-core`,
+  flag corrected from `--key` to `--public-key`, and description updated to match the
+  base64 key string interface rather than a bundle file.  In the FastAPI example app,
+  the raw `receipt["payload_hash"]` subscript replaced with the safe `receipt.get()`
+  accessor, eliminating the potential `KeyError` on an incomplete receipt dict.
+
 - **`README.md` — Security provenance repositioning**: Reframed the project as a
   local-first AI WAF and compliance gate.  New introductory section leads with the
   non-repudiation and chain-of-custody value proposition.  Added a "The ForensicReceipt:

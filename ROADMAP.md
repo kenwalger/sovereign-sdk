@@ -38,7 +38,7 @@ established by the previous phase.
 **Target:** Zero-configuration `SovereignGateway` integration for the four dominant Python AI
 and web frameworks, delivered as thin adapter packages under `packages/`.
 
-### 5.1 FastAPI Middleware (`sovereign-fastapi`)
+### 5.1 FastAPI Middleware (`sovereign-fastapi`) — Shipped ✓
 
 A `SovereignMiddleware` ASGI class that intercepts every inbound JSON request body, runs
 `sieve_and_sign()` on the target payload field, and injects the resulting
@@ -59,18 +59,14 @@ Key deliverables:
 - Request-body interception via transparent `_CachedRequest.wrapped_receive` body overwrite before handler dispatch
 - `X-Sovereign-Receipt-Signature` response header carrying the base64-encoded Ed25519 signature
 - `X-Sovereign-Tokens-Saved` response header carrying the cumulative FinOps savings counter
-- Automatic binding of the strict `SovereignBoundaryResponse` to `request.state.sovereign_receipt` for in-route auditability and IDE type preservation
+- Automatic binding of the sealed receipt to `request.state.sovereign_receipt` for in-route auditability
 - Optional strict mode: returns HTTP 422 on any interception error (missing field, JSON parse failure)
 - Configurable field selector for non-root payload extraction (e.g. `payload_field="text"`)
 
-### Phase 5.1 — FastAPI / Starlette ASGI Middleware
+**Delivered:**
 - [x] Full-lifecycle ASGI body interception, local-silicon context sieving, and cryptographic signing.
 - [x] Inbound proxy alignment via dynamic `Content-Length` byte-length recalculation.
 - [x] Structured diagnostic observability logging for non-strict failure modes.
-
-### Phase 5.2 — Streaming Request & Response Boundaries (Extension Path)
-- [ ] Architectural specification for asynchronous generator token streams (`StreamingResponse`).
-- [ ] Out-of-band verification tracing: Designing an alternative background task worker or trailing chunk aggregator to handle Server-Sent Events (SSE) where HTTP headers cannot be mutated mid-stream.
 
 ### 5.2 Django Middleware (`sovereign-django`)
 
@@ -131,6 +127,11 @@ Key deliverables:
 - Prose Tax savings metrics surfaced in the LlamaIndex response metadata
 - Compatible with `VectorStoreIndex`, `SummaryIndex`, and custom retrievers
 
+### 5.5 Streaming Request & Response Boundaries (Extension Path)
+
+- [ ] Architectural specification for asynchronous generator token streams (`StreamingResponse`).
+- [ ] Out-of-band verification tracing: alternative background task worker or trailing chunk aggregator to handle Server-Sent Events (SSE) where HTTP headers cannot be mutated mid-stream.
+
 ---
 
 ## Phase 6 — Verification Key Protocol
@@ -158,14 +159,15 @@ Key deliverables:
 - `SovereignGateway.export_public_key_bundle()` method
 - `SovereignGateway.save_public_key_bundle(path)` for writing to disk as JSON
 
-### 6.2 Stateless Receipt Verification CLI
+### 6.2 Stateless Receipt Verification CLI — Shipped ✓
 
-A `sovereign-verify` CLI entrypoint (added to `packages/sovereign-runtime`) that
-accepts a receipt JSON file and a public key bundle file and exits `0` on verified,
-`1` on tampered, without requiring access to any private key or node secret.
+A `sovereign-verify` CLI entrypoint (shipped as part of `sovereign-core`) that
+accepts a receipt JSON file and a base64-encoded Ed25519 public key string and exits
+`0` on verified, `1` on tampered, without requiring access to any private key or
+node secret.
 
 ```bash
-sovereign-verify --receipt receipt.json --key node.pub.json
+sovereign-verify --receipt receipt.json --public-key <base64-encoded-public-key>
 # Verified  ✓  payload_hash: 4fec03e7...
 ```
 
