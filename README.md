@@ -1,44 +1,146 @@
-# Sovereign Systems Architecture Workspace
+# Sovereign Systems SDK
 
-A high-integrity, local-first monorepo platform enforcing the architectural boundaries of the **Sovereign Systems Specification**. This workspace contains the development frameworks, primitive tools, and local execution barriers designed to eliminate the Prose Tax, guarantee cryptographic provenance, and establish append-only chains of custody for agentic workflows entirely on local silicon.
+**High-Integrity Cryptographic Provenance and Inbound Protection Boundaries for Agentic Workflows.**
 
-To learn more about the philosophy and reasoning behind the project's origins, please check out [this doc](PHILOSOPHY.md).
+Sovereign Systems is a local-first AI WAF and compliance gate. It intercepts every inbound payload before it reaches a model or agentic loop, strips high-entropy boilerplate, and seals the result with an Ed25519-signed `ForensicReceipt` that gives enterprise auditors mathematical proof of un-tampered boundary transformation — all running on local silicon with no external service dependency.
+
+Every boundary crossing produces a non-repudiable chain of custody: the receipt binds the sieved payload hash and the full transformation accounting inside a single cryptographic envelope. No post-hoc mutation of the output or its metrics can go undetected.
+
+To learn more about the philosophy and reasoning behind this project, see [PHILOSOPHY.md](PHILOSOPHY.md).
+
+---
+
+## Why an AI WAF?
+
+Modern agentic pipelines ingest user intent through prompt text. That text is routinely bloated with conversational filler — greetings, hedging adverbs, redundant preambles — that inflates token budgets and introduces non-deterministic reasoning noise without contributing semantic content. At the same time, enterprises operating LLM workloads need the same compliance guarantees they expect from a network WAF: proof that payloads were inspected, proof that the inspection was faithful, and an append-only audit log that is tamper-evident after the fact.
+
+Sovereign Systems provides both:
+
+- **Inbound boundary enforcement** — every payload is sieved before a model or tool sees it.
+- **Cryptographic chain of custody** — every sieved payload is sealed with a node-local Ed25519 private key into a `ForensicReceipt` that persists forever.
+- **Non-repudiation** — the receipt covers the output hash and the transformation accounting under the same signature, so neither the result nor the metrics can be altered without breaking verification.
+- **Local-only execution** — no telemetry leaves the host; key material never leaves the node.
 
 ---
 
 ## Workspace Topography
 
-This repository is managed as an integrated workspace using `uv`. It cleanly separates pure data/cryptographic boundaries from actual tool execution runtimes:
+This repository is managed as an integrated `uv` workspace separating the cryptographic data tier from the execution runtime:
 
 ```text
 .
 ├── packages/
-│   ├── sovereign-core/       # Pure data tier (Zero high-compute dependencies)
+│   ├── sovereign-core/       # Pure data tier (zero high-compute dependencies)
 │   │   └── src/sovereign_core/
-│   │       ├── crypto.py     # Ed25519 key management & Forensic Receipt minting
-│   │       └── gateway.py    # Context Cleansing & Prose Tax ledger calculations
+│   │       ├── crypto.py     # Ed25519 key management & ForensicReceipt minting
+│   │       └── gateway.py    # Prose Tax sieve & SovereignGateway high-level API
 │   │
-│   ├── sovereign-runtime/    # Compute/Execution tier (Tool & Model isolation)
+│   ├── sovereign-runtime/    # Compute/Execution tier (tool & model isolation)
 │   │   └── src/sovereign_runtime/
-│   │       ├── router.py     # Intent-Based Pre-Flight Namespace Exposure
-│   │       └── __main__.py   # Execution runtime entrypoint
+│   │       ├── router.py     # Intent-based pre-flight namespace exposure
+│   │       └── __main__.py   # Execution runtime entry point
 │   │
 │   └── sovereign-fastapi/    # FastAPI/Starlette ASGI middleware adapter
 │       └── src/sovereign_fastapi/
 │           └── middleware.py # SovereignMiddleware — sieve-and-sign request interceptor
 │
-├── main.py                   # High-level monorepo testing orchestrator
 ├── pyproject.toml            # Monorepo configuration & workspace links
 └── uv.lock                   # Deterministic dependency lockfile
 ```
 
+---
+
+## The ForensicReceipt: Sealed Transformation Accounting
+
+Every boundary crossing produces a `ForensicReceipt`. Understanding its structure explains exactly what an enterprise auditor can prove from the output alone.
+
+### What is sealed
+
+The Ed25519 signature inside every receipt covers a single canonical manifest:
+
+```json
+{
+  "metadata": { ... },
+  "payload_hash": "<sha256-of-sieved-content>",
+  "timestamp": "<utc-iso8601>"
+}
+```
+
+`payload_hash` is the SHA-256 digest of the exact sieved string delivered to the model or tool. When the Prose Tax sieve is active, `metadata` always contains a `prose_tax_summary` sub-object:
+
+```json
+"prose_tax_summary": {
+  "raw_token_count": 12,
+  "optimized_token_count": 4,
+  "tokens_eliminated": 8,
+  "tax_savings_percentage": 66.6667,
+  "total_tokens_saved": 8
+}
+```
+
+Because `metadata` is bound inside the signed manifest, these token counts are just as tamper-evident as `payload_hash` itself. An auditor who holds only the node's public key can independently verify:
+
+1. **Output integrity** — the sieved content hasn't been altered after signing (`payload_hash`).
+2. **Transformation accounting** — the before/after token delta recorded at signing time hasn't been fabricated (`prose_tax_summary` is sealed under the same signature).
+3. **Identity provenance** — the receipt was minted by the expected node, not a rogue keypair (`public_key` key-pin assertion).
+
+Together these three checks give mathematical proof that the boundary transformation was faithful and un-tampered — equivalent to a signed audit log with built-in integrity verification.
+
+### Verification workflow
+
+```python
+import asyncio
+import json
+from sovereign_core.gateway import SovereignGateway
+from sovereign_core.crypto import SovereignKeyManager
+
+async def main():
+    gateway = SovereignGateway(signing_key=".keys/sovereign_identity.pem")
+    result = await gateway.sieve_and_sign("Hi! Please just help me now.")
+
+    # result.content == "help me now"
+    # result.receipt["metadata"]["prose_tax_summary"]["tokens_eliminated"] == 4
+
+    # Verify later — requires only the public key and the original sieved payload
+    is_valid = SovereignKeyManager.verify_receipt(
+        result.receipt,
+        {"content": result.content},
+        expected_public_key=gateway.export_public_key(),
+    )
+    assert is_valid  # fails if any field was mutated after signing
+
+asyncio.run(main())
+```
+
+---
+
 ## Primary Developer Interface: `SovereignGateway`
 
-The `SovereignGateway` class is the single entry point for application code interacting with the SDK. It wraps the full Sieve-and-Sign pipeline — stripping Prose Tax boilerplate, accumulating FinOps telemetry, and minting an Ed25519-sealed `ForensicReceipt` — behind a clean four-method API.
+`SovereignGateway` is the single entry point for application code. It wraps the full sieve-and-sign pipeline behind a clean four-method API.
 
 ### One-shot macro (recommended)
 
-`sieve_and_sign()` cleans the payload, fuses the Prose Tax telemetry summary into the receipt metadata, and seals it in a single awaitable call:
+`sieve_and_sign()` strips Prose Tax boilerplate, fuses the transformation telemetry into the receipt metadata, and seals everything in a single awaitable call:
+
+```python
+import asyncio
+from sovereign_core.gateway import SovereignGateway
+
+async def main():
+    gateway = SovereignGateway(signing_key=".keys/sovereign_identity.pem")
+    result = await gateway.sieve_and_sign("Hi! Please just help me now.")
+
+    # result  — SovereignBoundaryResponse (Pydantic model, fully typed)
+    # result.content  — purified string, Prose Tax stripped ("help me now")
+    # result.receipt  — ForensicReceipt with prose_tax_summary sealed inside
+
+    print(result.content)
+    print(result.receipt["payload_hash"])
+
+asyncio.run(main())
+```
+
+Inside a FastAPI route the gateway instance lives on the application object; the route itself is already async:
 
 ```python
 from sovereign_core.gateway import SovereignGateway
@@ -48,9 +150,6 @@ gateway = SovereignGateway(signing_key=".keys/sovereign_identity.pem")
 @app.post("/api/v1/ingest")
 async def handle_agent_input(raw_payload: dict):
     result = await gateway.sieve_and_sign(raw_payload["text"])
-    # result  —  SovereignBoundaryResponse (Pydantic model, fully typed)
-    # result.content  —  purified string, Prose Tax stripped
-    # result.receipt  —  ForensicReceipt with prose_tax_summary sealed inside
 
     await reasoning_ledger.append(
         payload=result.content,
@@ -64,120 +163,196 @@ async def handle_agent_input(raw_payload: dict):
 
 ### Granular two-step workflow
 
-When the clean context is needed independently before signing (e.g. for intermediate validation), call the methods separately:
+When the clean context is needed before signing (e.g. for intermediate validation or logging):
 
 ```python
+import asyncio
 from sovereign_core.gateway import SovereignGateway
 
-gateway = SovereignGateway(signing_key=".keys/sovereign_identity.pem")
+async def main():
+    gateway = SovereignGateway(signing_key=".keys/sovereign_identity.pem")
 
-@app.post("/api/v1/ingest")
-async def handle_agent_input(raw_payload: dict):
-    # 1. Strip the Prose Tax — remove boilerplate, normalize whitespace
-    clean_context = await gateway.sieve(raw_payload["text"])
+    # 1. Strip Prose Tax — remove boilerplate, normalize whitespace
+    clean_context = await gateway.sieve("Hi! Please just help me now.")
 
-    # 2. Cryptographically seal — Prose Tax telemetry fused into metadata
+    # 2. Cryptographically seal — transformation telemetry fused into metadata
     receipt = gateway.sign(clean_context)
 
-    # 3. Commit to the Chain of Custody Ledger
-    await reasoning_ledger.append(payload=clean_context, receipt=receipt)
+    print(clean_context)            # "help me now"
+    print(receipt["payload_hash"])  # SHA-256 of {"content": "help me now"}
 
-    return {"status": "sovereign_verified", "receipt_id": receipt["payload_hash"]}
+asyncio.run(main())
 ```
 
 ### Independent receipt verification
 
-Receipts produced by either workflow can be verified at any time:
+Receipts produced by either workflow can be verified at any time using only the public key:
 
 ```python
 from sovereign_core.crypto import SovereignKeyManager
 
-is_valid = SovereignKeyManager.verify_receipt(receipt, {"content": clean_context})
+is_valid = SovereignKeyManager.verify_receipt(
+    receipt,
+    {"content": clean_context},
+    expected_public_key=gateway.export_public_key(),
+)
 ```
 
 ---
 
-## Core Systems Implementation Target
-1. The Ingestion Boundary (`sovereign-core`)
-Implements strict token and structural filters to execute Context Cleansing. It aggressively evaluates inbound traffic strings, strips conversational boilerplates or markdown filler, and calculates the exact byte/token delta returned to the host environment as a Prose Tax balance profile.
+## ASGI Middleware for FastAPI / Starlette
 
-2. The Sieve-and-Sign Pattern (`sovereign-core`)
-Wraps bare-metal cryptographic signing primitives. Every piece of cleansed low-entropy data passing through the ingestion gateway is hashed, stamped with an immutable millisecond timestamp, and sealed with a local `Ed25519` keypair to generate a structured Forensic Receipt—forming the foundation of a local Chain of Custody Ledger.
+`SovereignMiddleware` applies the sieve-and-sign boundary to every inbound JSON request transparently, without changes to route handlers:
 
-3. Intent-Based Namespace Exposure (`sovereign-runtime`)
-Handles local pre-flight intent routing. Before an application prompt or agent loop communicates with resource-heavy external APIs or executable local tools, a lightweight local tokenizer and model wrapper evaluates the context block, pruning tool access entirely on local silicon to isolate the computation domain.
+```python
+from fastapi import FastAPI
+from sovereign_fastapi.middleware import SovereignMiddleware
 
-## Local Development Lifecycle
-This workspace utilizes `uv` for seamless, lightning-fast cross-package dependency resolution.
+app = FastAPI()
+app.add_middleware(
+    SovereignMiddleware,
+    signing_key=".keys/sovereign_identity.pem",
+    payload_field="text",   # JSON key to sieve; omit to sieve the whole body
+    strict_mode=False,      # True → return HTTP 422 on any interception error
+)
+```
 
-### Bootstrap Workspace
-Initialize the environment and synchronize all editable workspace packages in a single step:
+The middleware:
+1. Extracts the target field from the JSON body.
+2. Calls `sieve_and_sign()` on the gateway.
+3. Overwrites `request._body` so every downstream route handler sees the sieved payload.
+4. Caches the sealed receipt at `request.state.sovereign_receipt`.
+5. Injects `X-Sovereign-Receipt-Signature` and `X-Sovereign-Tokens-Saved` on the outbound response.
+
+---
+
+## Prose Tax Optimization
+
+> **This feature is optional.** The cryptographic boundary and ForensicReceipt are produced whether or not any text is eliminated. Prose Tax optimization runs inside the audit envelope — every token count and savings metric is sealed alongside the output hash.
+
+The sieve removes conversational boilerplate that inflates token budgets without contributing semantic content:
+
+| Category | Examples stripped |
+|---|---|
+| Greeting tokens | `hi`, `hello`, `hey`, `greetings` |
+| Hedging adverbs | `just`, `simply`, `actually`, `basically`, `probably` |
+| Affirmation filler | `of course`, `certainly`, `absolutely`, `sure` |
+| Preamble phrases | `I hope this`, `I hope that`, `I hope you` |
+| Politeness tokens | `please`, `kindly` |
+
+All patterns carry negative lookahead guards (e.g. `(?![-\w])`) so technical compound words (`hi-fi`, `just-in-time`, `certainly-not`) pass through unmarred.
+
+---
+
+## Local Development
+
+### Bootstrap
 
 ```bash
 uv sync
 ```
 
-### Execution Interface
-Run the main runtime entry point via the workspace wrapper:
-```bash
-uv run sovereign-runtime
-# Or execute the high-level root monitor orchestrator
-uv run main.py
-```
+### Run tests
 
-### Testing Strategy
-To execute test suites globally across all isolated workspace members:
 ```bash
 uv run pytest
+```
+
+### Run the sovereign-node runtime
+
+```bash
+uv run sovereign-node
+```
+
+---
+
+## Running the Workspace Examples
+
+### FastAPI Gateway Example
+
+**1. Set your node secret** (required for Ed25519 key generation):
+
+```bash
+export SOVEREIGN_NODE_SECRET=your-local-secret   # Linux / macOS
+$env:SOVEREIGN_NODE_SECRET = "your-local-secret"  # Windows PowerShell
+```
+
+**2. Start the example server:**
+
+```bash
+uv run uvicorn examples.fastapi_gateway.app:app --reload
+```
+
+The server starts on `http://127.0.0.1:8000`. On first boot it generates an Ed25519 keypair at `.keys/example_identity.pem`.
+
+**3. In a second terminal, run the example client:**
+
+```bash
+uv run python examples/fastapi_gateway/client.py
+```
+
+### Verifying a ForensicReceipt (CLI)
+
+Export a receipt and the gateway's public key:
+
+```python
+import asyncio
+import json
+from sovereign_core.gateway import SovereignGateway
+
+async def main():
+    gateway = SovereignGateway()
+    result = await gateway.sieve_and_sign("example payload")
+
+    with open("receipt.json", "w") as f:
+        json.dump(result.receipt, f, indent=2)
+
+    print(gateway.export_public_key())
+
+asyncio.run(main())
+```
+
+Verify the receipt:
+
+```bash
+uv run sovereign-verify \
+    --receipt receipt.json \
+    --public-key <base64-encoded-public-key>
+```
+
+On success:
+
+```
+Verified  ✓  payload_hash: 4fec03e7...
+```
+
+On tampered receipt:
+
+```
+Tampered  ✗  Receipt failed cryptographic verification.
+  payload_hash : 4fec03e7...
+  timestamp    : 2026-05-22T...
 ```
 
 ---
 
 ## Verification & Deep-Dive Diagnostics
 
-This section documents how to exercise the local cryptographic runtime in
-isolation and interpret the output produced at each layer of the stack.
-
 ### Local Environment Configuration
 
-`SOVEREIGN_NODE_SECRET` can be specified in a `.env` file at the repository
-root instead of being exported manually before each invocation.  The node
-entrypoint loads this file automatically on startup via `python-dotenv`.
-
-Create `.env` once (it is gitignored and never committed):
+`SOVEREIGN_NODE_SECRET` can be specified in a `.env` file at the repository root. The node entrypoint loads it automatically via `python-dotenv`:
 
 ```bash
 echo 'SOVEREIGN_NODE_SECRET=your-local-secret' > .env
 ```
 
-All subsequent `uv run sovereign-node` invocations will pick up the value
-automatically without any additional shell configuration.
-
 ### Standalone Tool Analysis Mode
 
-To initialize the node in standalone tool analysis mode — bypassing the full
-download → analyze pipeline and exercising only the `analyze` tool directly
-against an empty session context — run:
-
 ```bash
 uv run sovereign-node --tool analyze
-```
-
-On Windows (PowerShell):
-
-```powershell
-uv run sovereign-node --tool analyze
-```
-
-If you prefer to pass the secret inline rather than via `.env`:
-
-```bash
-SOVEREIGN_NODE_SECRET=<your-secret> uv run sovereign-node --tool analyze
 ```
 
 ### Expected Console Output
-
-A successful standalone invocation produces the following sequence:
 
 ```
 ====================================================
@@ -188,7 +363,7 @@ A successful standalone invocation produces the following sequence:
 
 🔒 Authenticated Forensic Receipt Proof:
 {
-  "timestamp": "2026-05-21T15:00:00.000000+00:00",
+  "timestamp": "2026-05-22T15:00:00.000000+00:00",
   "payload_hash": "4fec03e7083cca73cfb1152ae1d941b5a5a581fc725a43b3ee7df1d9ce697954",
   "public_key": "<base64-encoded Ed25519 public key>",
   "signature": "<base64-encoded Ed25519 signature>",
@@ -204,31 +379,9 @@ A successful standalone invocation produces the following sequence:
 
 | Output line | What it proves |
 |---|---|
-| `🟢 Sovereign Node initialization sequence successful.` | Ed25519 keypair loaded or generated; `SOVEREIGN_NODE_SECRET` resolved; router and session context initialised without error. |
-| `⚠️ Standalone mode detected: Context empty. Hydrating baseline diagnostic state...` | The `analyze` tool detected no upstream `download` result in `context.variables` and self-hydrated a baseline telemetry stream — expected behaviour in single-tool invocations. |
-| `"payload_hash": "4fec03e7..."` | SHA-256 digest of the deterministically serialised execution payload.  Identical across repeated invocations of the same tool with the same arguments, proving process-stable hash alignment. |
-| `"public_key": "<base64>"` | Base64-encoded raw Ed25519 public key.  Matches `router.key_manager.public_key` exactly; verified by `_audit_receipt` before the process exits, proving zero-indexed ledger tracking. |
-| `"signature": "<base64>"` | Ed25519 signature over the canonical manifest `{"metadata": …, "payload_hash": …, "timestamp": …}`.  Any mutation of `metadata`, `payload_hash`, or `timestamp` after issuance causes `verify_receipt` to return `False`, proving active cryptographic envelope sealing. |
+| `🟢 Sovereign Node initialization sequence successful.` | Ed25519 keypair loaded or generated; `SOVEREIGN_NODE_SECRET` resolved; router and session context initialised. |
+| `⚠️ Standalone mode detected …` | The `analyze` tool detected no upstream context and self-hydrated a baseline telemetry stream — expected behaviour in single-tool invocations. |
+| `"payload_hash": "4fec03e7…"` | SHA-256 digest of the deterministically serialised execution payload. |
+| `"public_key": "<base64>"` | Base64-encoded raw Ed25519 public key; verified by `_audit_receipt` before process exit. |
+| `"signature": "<base64>"` | Ed25519 signature over `{"metadata": …, "payload_hash": …, "timestamp": …}`. Any mutation of these fields after issuance causes `verify_receipt` to return `False`. |
 | `"execution_success": true` | The tool completed without raising an exception; the receipt is audit-clean. |
-
-### What This Validation Suite Proves
-
-Running `uv run sovereign-node --tool analyze` in isolation confirms three
-invariants of the local cryptographic runtime:
-
-1. **Process-stable SHA-256 signature alignment** — the `payload_hash` is
-   derived from a deterministically serialised payload dict
-   (`json.dumps(sort_keys=True, default=str)`), so the same tool invocation
-   always produces the same hash regardless of Python dict insertion order or
-   execution environment.
-
-2. **Zero-indexed ledger tracking** — the `execution_depth` counter starts at
-   `0` for a fresh `SessionContext` and is incremented unconditionally before
-   each tool dispatch, guaranteeing that every receipt — including failed or
-   retried ones — occupies a unique ledger slot with no collisions.
-
-3. **Active cryptographic envelope sealing** — the Ed25519 signature covers
-   `timestamp`, `payload_hash`, and `metadata` atomically.  The `_audit_receipt`
-   helper verifies the key pin, re-derives the payload hash, and checks the
-   signature before the process exits.  A tampered or rogue-keypair receipt
-   causes a non-zero exit code and a `🚨` fraud alert on `stderr`.

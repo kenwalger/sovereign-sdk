@@ -1,22 +1,37 @@
 [project]
 name = "sovereign-core"
-version = "0.1.0"
+version = "1.0.0"
 description = "Core schemas and protocols for Sovereign Systems"
 readme = "README.md"
 requires-python = ">=3.12"
+license = { text = "MIT" }
 authors = [
     { name = "kenwalger", email = "kenalger@comcast.net" }
 ]
-
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Intended Audience :: Developers",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries",
+]
 dependencies = [
     "cryptography>=48.0.0",
     "pydantic>=2.7.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/kenwalger/sovereign-sdk"
+Repository = "https://github.com/kenwalger/sovereign-sdk"
+Changelog = "https://github.com/kenwalger/sovereign-sdk/blob/main/CHANGELOG.md"
+
+[project.scripts]
+sovereign-verify = "sovereign_core.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
-# Change this from hatchling to setuptools
 [build-system]
 requires = ["setuptools>=61.0.0"]
 build-backend = "setuptools.build_meta"

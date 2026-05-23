@@ -7,6 +7,131 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-05-22
+
+### Added
+
+- **GitHub Actions CI/CD** (`.github/workflows/test.yml`, `.github/workflows/publish.yml`):
+  `test.yml` triggers on every push to `main` and all pull requests; runs
+  `uv sync --all-packages` then `uv run pytest` on `ubuntu-latest` with Python 3.12
+  via `astral-sh/setup-uv`.  `publish.yml` triggers on `v*` tags; a dedicated `test`
+  job mirrors the full CI suite inline and the `publish` job declares `needs: [test]`,
+  guaranteeing the pipeline fails closed and blocks PyPI deployment when a tag is
+  pushed against a broken or untested commit.  Uses `pypa/gh-action-pypi-publish`
+  with OIDC Trusted Publishing (`id-token: write` permission).
+
+- **`sovereign-verify` CLI — JSON object type guard**
+  (`packages/sovereign-core/src/sovereign_core/cli.py`): After `json.loads` parses
+  the receipt file, an explicit `isinstance(receipt, dict)` check is now enforced.
+  If the top-level JSON value is not an object (e.g. an array, string, or bare
+  number), the CLI writes a descriptive error to `stderr` and exits `1` before any
+  field access is attempted, preventing raw `AttributeError` tracebacks when
+  auditors supply malformed or non-object documents.
+
+- **`README.md` — Security provenance repositioning**: Reframed the project as a
+  local-first AI WAF and compliance gate.  New introductory section leads with the
+  non-repudiation and chain-of-custody value proposition.  Added a "The ForensicReceipt:
+  Sealed Transformation Accounting" technical subsection documenting how the Ed25519
+  signature binds both `payload_hash` (SHA-256 of the sieved output) and the
+  `prose_tax_summary` token-delta metrics inside the same canonical manifest — giving
+  auditors mathematical proof that neither the boundary output nor the transformation
+  accounting can be altered after issuance.  Prose Tax optimization demoted to an
+  optional feature subsection inside the audit envelope narrative.  All standalone
+  code snippets wrapped in `asyncio.run()` harnesses for direct executability.
+
+- **PEP 561 `py.typed` marker** (`packages/sovereign-fastapi/src/sovereign_fastapi/py.typed`):
+  Empty marker file declaring `sovereign-fastapi` as a typed package.  Included in
+  the built distribution via `[tool.setuptools.package-data]` in the package manifest,
+  enabling downstream type checkers to resolve `sovereign_fastapi` stubs without
+  additional configuration.
+
+### Changed
+
+- **Version promoted to `1.0.0`** across all package manifests
+  (`packages/sovereign-core/pyproject.toml`, `packages/sovereign-fastapi/pyproject.toml`,
+  root `pyproject.toml`, `sovereign_core.__version__`): Reflects stable, production-ready
+  API surface with no further breaking-change windows before a major bump.
+
+- **PyPI metadata injected** (`packages/sovereign-core/pyproject.toml`,
+  `packages/sovereign-fastapi/pyproject.toml`): Both package manifests now carry
+  `license = { text = "MIT" }`, `[project.classifiers]` (MIT, Python 3.12,
+  Intended Audience :: Developers, Topic :: Security, Topic :: Software Development :: Libraries),
+  and `[project.urls]` (Homepage, Repository, Changelog) targeting
+  `https://github.com/kenwalger/sovereign-sdk`.
+
+- **`sovereign-fastapi` inter-package dependency version-pinned**
+  (`packages/sovereign-fastapi/pyproject.toml`): `"sovereign-core"` dependency
+  tightened to `"sovereign-core>=1.0.0,<2.0.0"` to prevent accidental major-version
+  drift across the workspace.
+
+- **`sovereign-verify` CLI — narrowed exception handling**
+  (`packages/sovereign-core/src/sovereign_core/cli.py`): `_verify()` now catches
+  `except Exception` (fail-closed fallback comment added) instead of the
+  previously redundant `except (InvalidSignature, KeyError, ValueError, Exception)`.
+  The now-unused `from cryptography.exceptions import InvalidSignature` import removed.
+
+- **`README.md` — async example wrapped in `asyncio.run(main())` harness**:
+  The "Verifying a ForensicReceipt" code snippet is now a complete, runnable
+  script with `async def main()` and `asyncio.run(main())` so readers can
+  execute it directly without a surrounding async framework.
+
+## [0.8.4] - 2026-05-22
+
+### Added
+
+- **`sovereign-verify` — Stateless ForensicReceipt Verification CLI**
+  (`packages/sovereign-core/src/sovereign_core/cli.py`,
+  `packages/sovereign-core/pyproject.toml`): New `argparse`-based CLI entry
+  point registered as `sovereign-verify`.  Accepts `--receipt FILE` (path to a
+  JSON ForensicReceipt) and `--public-key BASE64_KEY` (base64 raw Ed25519 public
+  key).  Performs key-pin assertion (receipt `"public_key"` field must match the
+  provided key) followed by Ed25519 signature verification over the canonical
+  manifest `{"metadata": …, "payload_hash": …, "timestamp": …}`.  Prints
+  `Verified  ✓  payload_hash: …` to stdout and exits `0` on success; prints a
+  descriptive tamper warning to stderr and exits `1` on any failure.  Requires
+  no private key or `SOVEREIGN_NODE_SECRET`, enabling fully stateless out-of-band
+  auditing.
+
+- **`examples/fastapi_gateway/app.py`** — Runnable FastAPI application wired with
+  `SovereignMiddleware` pointing to `.keys/example_identity.pem`.  Exposes a
+  single `POST /api/v1/sanitize` route that echoes the sieved `"text"` field and
+  the receipt `payload_hash` back to the caller.  Start with
+  `SOVEREIGN_NODE_SECRET=<secret> uv run uvicorn examples.fastapi_gateway.app:app --reload`.
+
+- **`examples/fastapi_gateway/client.py`** — Companion `httpx` client that
+  transmits a high-density Prose Tax payload to the example server, prints the
+  optimized low-entropy output, and pretty-prints the `X-Sovereign-Receipt-Signature`
+  and `X-Sovereign-Tokens-Saved` response headers.
+
+- **`CONTRIBUTING.md`** — Open-source community guidelines specifying the four
+  project invariants (local-first, tamper-evidence, zero regression, dependency
+  minimalism), pull request requirements, code style rules, and instructions for
+  running tests locally via `uv run pytest`.
+
+- **`SECURITY.md`** — Security policy documenting the coordinated private
+  disclosure process, in-scope vulnerability categories (key forgery, receipt
+  bypass, boundary injection, CLI acceptance of tampered receipts), response
+  timeline commitments, and contact address.
+
+- **`README.md` — "Running the Workspace Examples" section**: Documents the exact
+  `uv run` commands to start the example FastAPI server, execute the example
+  client, and invoke the `sovereign-verify` CLI with sample output.
+
+### Changed
+
+- **`SovereignMiddleware` — PEP 8 Import Grouping** (`middleware.py`): Stdlib
+  imports (`json`, `logging`, `typing`) are now grouped first, followed by a
+  blank-line-separated Starlette framework block, then a local block for
+  `sovereign_core.gateway`.  The module-level `logger` assignment is placed
+  after all import blocks rather than inline between stdlib and framework imports.
+
+- **`SovereignMiddleware.dispatch` — Strict-Mode Critical Log** (`middleware.py`):
+  When `strict_mode=True`, the exception handler now emits
+  `logger.critical("Sovereign boundary processing failed under strict enforcement. Aborting request.", exc_info=True)`
+  immediately before returning the HTTP 422 response.  Previously, strict-mode
+  failures were invisible to structured log consumers: only the 422 response
+  status was observable, with no log record emitted.
+
 ## [0.8.3] - 2026-05-22
 
 ### Added
