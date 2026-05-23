@@ -4,12 +4,11 @@ version = "1.0.0"
 description = "FastAPI/Starlette ASGI middleware for the Sovereign Systems SDK"
 readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "MIT" }
+license = "MIT"
 authors = [
     { name = "kenwalger", email = "kenalger@comcast.net" }
 ]
 classifiers = [
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
     "Intended Audience :: Developers",
