@@ -1,6 +1,6 @@
 [project]
 name = "sovereign-runtime"
-version = "0.1.0"
+version = "1.0.2"
 description = "Local runtime worker for Sovereign execution"
 readme = "README.md"
 requires-python = ">=3.12"
