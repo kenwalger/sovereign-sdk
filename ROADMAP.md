@@ -134,6 +134,10 @@ Key deliverables:
 
 ---
 
+### PyPi
+- [x] `sovereign-core` package
+- [x] `sovereign-fastapi` package
+
 ## Phase 6 — Verification Key Protocol
 
 **Target:** A first-class public key distribution and multi-party receipt verification

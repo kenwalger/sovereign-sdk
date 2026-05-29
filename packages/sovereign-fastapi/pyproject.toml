@@ -1,6 +1,6 @@
 [project]
 name = "sovereign-fastapi"
-version = "1.0.0"
+version = "1.0.2"
 description = "FastAPI/Starlette ASGI middleware for the Sovereign Systems SDK"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -35,5 +35,5 @@ where = ["src"]
 sovereign_fastapi = ["py.typed"]
 
 [build-system]
-requires = ["setuptools>=61.0.0"]
+requires = ["setuptools>=77.0.0"]
 build-backend = "setuptools.build_meta"
