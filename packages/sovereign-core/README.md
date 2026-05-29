@@ -29,23 +29,44 @@ This repository is managed as an integrated `uv` workspace separating the crypto
 
 ```text
 .
-├── packages/
-│   ├── sovereign-core/       # Pure data tier (zero high-compute dependencies)
-│   │   └── src/sovereign_core/
-│   │       ├── crypto.py     # Ed25519 key management & ForensicReceipt minting
-│   │       └── gateway.py    # Prose Tax sieve & SovereignGateway high-level API
-│   │
-│   ├── sovereign-runtime/    # Compute/Execution tier (tool & model isolation)
-│   │   └── src/sovereign_runtime/
-│   │       ├── router.py     # Intent-based pre-flight namespace exposure
-│   │       └── __main__.py   # Execution runtime entry point
-│   │
-│   └── sovereign-fastapi/    # FastAPI/Starlette ASGI middleware adapter
-│       └── src/sovereign_fastapi/
-│           └── middleware.py # SovereignMiddleware — sieve-and-sign request interceptor
+├── .github/
+│   └── workflows/
+│       ├── publish.yml                   # PyPI release pipeline
+│       └── test.yml                      # CI test matrix
 │
-├── pyproject.toml            # Monorepo configuration & workspace links
-└── uv.lock                   # Deterministic dependency lockfile
+├── examples/
+│   └── fastapi_gateway/
+│       ├── app.py                        # Example FastAPI server with SovereignMiddleware
+│       └── client.py                     # Example HTTP client
+│
+├── packages/
+│   ├── sovereign-core/                   # Pure data tier (zero high-compute dependencies)
+│   │   ├── src/sovereign_core/
+│   │   │   ├── cli.py                    # CLI entry points (sovereign-verify)
+│   │   │   ├── crypto.py                 # Ed25519 key management & ForensicReceipt minting
+│   │   │   ├── gateway.py                # Prose Tax sieve & SovereignGateway high-level API
+│   │   │   └── py.typed
+│   │   └── tests/
+│   │       ├── test_crypto.py
+│   │       └── test_gateway.py
+│   │
+│   ├── sovereign-runtime/                # Compute/Execution tier (tool & model isolation)
+│   │   └── src/sovereign_runtime/
+│   │       ├── router.py                 # Intent-based pre-flight namespace exposure
+│   │       ├── __main__.py               # sovereign-node entry point
+│   │       └── py.typed
+│   │
+│   └── sovereign-fastapi/                # FastAPI/Starlette ASGI middleware adapter
+│       ├── src/sovereign_fastapi/
+│       │   ├── middleware.py             # SovereignMiddleware — sieve-and-sign request interceptor
+│       │   └── py.typed
+│       └── tests/
+│           └── test_middleware.py
+│
+├── example.env                           # Environment variable reference
+├── main.py                               # Workspace-level development entry point
+├── pyproject.toml                        # Monorepo configuration & workspace links
+└── uv.lock                               # Deterministic dependency lockfile
 ```
 
 ---
