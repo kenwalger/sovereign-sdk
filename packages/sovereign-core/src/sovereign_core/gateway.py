@@ -505,15 +505,21 @@ class SovereignGateway:
         if not self._key_manager.has_identity:
             self._key_manager.load_or_generate_keypair()
         pub_key = self._key_manager.public_key
+        # issued_at is captured before generate_receipt() so it is included in
+        # the signed metadata manifest and fully covered by the Ed25519 signature.
+        issued_at = datetime.now(timezone.utc).isoformat()
         attestation_payload: Dict[str, Any] = {
             "public_key": pub_key,
             "type": "key_attestation",
         }
         attestation = self._key_manager.generate_receipt(
             payload=attestation_payload,
-            metadata={"purpose": "key_attestation", "source": "PublicKeyBundle"},
+            metadata={
+                "issued_at": issued_at,
+                "purpose": "key_attestation",
+                "source": "PublicKeyBundle",
+            },
         )
-        issued_at = datetime.now(timezone.utc).isoformat()
         return PublicKeyBundle(
             public_key=pub_key,
             attestation=dict(attestation),

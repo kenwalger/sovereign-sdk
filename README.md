@@ -48,7 +48,8 @@ This repository is managed as an integrated `uv` workspace separating the crypto
 │   │   │   └── py.typed
 │   │   └── tests/
 │   │       ├── test_crypto.py
-│   │       └── test_gateway.py
+│   │       ├── test_gateway.py
+│   │       └── test_verification_protocol.py
 │   │
 │   ├── sovereign-runtime/                # Compute/Execution tier (tool & model isolation)
 │   │   └── src/sovereign_runtime/
@@ -217,6 +218,58 @@ is_valid = SovereignKeyManager.verify_receipt(
     {"content": clean_context},
     expected_public_key=gateway.export_public_key(),
 )
+```
+
+### Public key distribution & key rotation
+
+#### Exporting a signed public key bundle
+
+`export_public_key_bundle()` mints a self-signed `PublicKeyBundle` that proves private-key ownership at a specific point in time. The `issued_at` timestamp is sealed inside the Ed25519 attestation signature — it cannot be back-dated after the fact.
+
+```python
+from sovereign_core.gateway import SovereignGateway
+
+gateway = SovereignGateway(signing_key=".keys/sovereign_identity.pem")
+bundle = gateway.export_public_key_bundle(node_id="node-alpha")
+
+# bundle.public_key   — base64 Ed25519 public key
+# bundle.attestation  — self-signed ForensicReceipt proving key ownership
+# bundle.issued_at    — UTC ISO 8601 timestamp (sealed inside the signature)
+# bundle.node_id      — human-readable node label
+
+gateway.save_public_key_bundle(".keys/bundle.json", node_id="node-alpha")
+```
+
+Downstream auditors and consumers can verify the bundle's attestation receipt using only `bundle.public_key` and `SovereignKeyManager.verify_receipt()` — no private key material required.
+
+#### Key rotation with auditable succession
+
+`rotate_keypair()` generates a fresh Ed25519 keypair, signs a canonical rotation payload with the **outgoing** private key, and atomically promotes both the new `.pem` and `.pub` files on disk. The returned `SuccessionReceipt` provides a cryptographically auditable handoff chain.
+
+```python
+from sovereign_core.crypto import SovereignKeyManager
+
+manager = SovereignKeyManager(key_path=".keys/sovereign_identity.pem")
+manager.load_or_generate_keypair()
+
+# Capture the pre-rotation key from a trusted out-of-band source before rotating
+trusted_previous_key = manager.public_key
+
+receipt = manager.rotate_keypair()
+# receipt["previous_public_key"]  — base64 key active before rotation
+# receipt["new_public_key"]       — base64 key active after rotation
+# receipt["rotation_timestamp"]   — UTC ISO 8601 timestamp
+# receipt["succession_signature"] — Ed25519 signature by the outgoing key
+```
+
+Verify the succession event using the out-of-band trusted copy of the previous public key. The `trusted_previous_public_key` anchor must come from a source independent of the receipt being verified — passing a key extracted from the receipt itself would be self-referential and cryptographically meaningless:
+
+```python
+is_valid = SovereignKeyManager.verify_succession(
+    receipt,
+    trusted_previous_public_key=trusted_previous_key,
+)
+assert is_valid  # False if any rotation field was tampered
 ```
 
 ---

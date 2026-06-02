@@ -527,13 +527,29 @@ class SovereignKeyManager:
                     pass
             raise
 
-        with open(self.public_key_path, "wb") as f:
-            f.write(
-                new_public_key.public_bytes(
-                    encoding=serialization.Encoding.PEM,
-                    format=serialization.PublicFormat.SubjectPublicKeyInfo,
-                )
-            )
+        pub_pem = new_public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        tmp_pub_path: str = ""
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=os.path.dirname(self.public_key_path),
+                delete=False,
+            ) as tmp_pub:
+                tmp_pub_path = tmp_pub.name
+                tmp_pub.write(pub_pem)
+                tmp_pub.flush()
+                os.fsync(tmp_pub.fileno())
+            os.replace(tmp_pub_path, self.public_key_path)
+            tmp_pub_path = ""
+        except Exception:
+            if tmp_pub_path:
+                try:
+                    os.remove(tmp_pub_path)
+                except FileNotFoundError:
+                    pass
+            raise
 
         self._private_key = new_private_key
         self._public_key = new_public_key
@@ -546,27 +562,47 @@ class SovereignKeyManager:
         )
 
     @staticmethod
-    def verify_succession(receipt: SuccessionReceipt) -> bool:
+    def verify_succession(
+        receipt: SuccessionReceipt,
+        trusted_previous_public_key: str,
+    ) -> bool:
         """Validates that a key rotation event is cryptographically genuine.
 
-        Reconstructs the canonical rotation payload from the three non-signature
-        fields of ``receipt`` and verifies the ``succession_signature`` against
-        the ``previous_public_key`` embedded in the receipt.  Because the
-        previous public key is encoded in the receipt itself, a standalone
-        auditor with no access to any private key material or live node can
-        call this method.
+        Verification proceeds in two sequential steps:
+
+        1. **Anchor assertion**: ``receipt["previous_public_key"]`` is compared
+           byte-for-byte against ``trusted_previous_public_key``, which the
+           caller must supply from an out-of-band trusted source (e.g. a prior
+           receipt's ``new_public_key``, or the key stored before rotation was
+           initiated).  A mismatch returns ``False`` immediately, before any
+           cryptographic operation is attempted.  This guard breaks the
+           *self-referential loop* where an attacker could craft a receipt
+           signed by an arbitrary rogue keypair and include that keypair's
+           own public key in ``previous_public_key`` — causing the receipt to
+           verify against itself.
+
+        2. **Signature verification**: The canonical rotation payload
+           ``{"new_public_key": …, "previous_public_key": …,
+           "rotation_timestamp": …}`` is reconstructed and verified against
+           ``succession_signature`` using the key confirmed in step 1.
 
         Args:
             receipt: A :class:`SuccessionReceipt` produced by
                 :meth:`rotate_keypair`.
+            trusted_previous_public_key: The base64-encoded Ed25519 public key
+                that the caller independently knows was active *before* the
+                rotation event.  Must be sourced from a trusted record — not
+                from ``receipt`` itself.
 
         Returns:
-            ``True`` if the ``succession_signature`` is a valid Ed25519
-            signature over the canonical rotation payload produced by the
-            private key corresponding to ``previous_public_key``.  ``False``
-            for any decoding error, signature failure, or structural anomaly.
+            ``True`` if and only if the anchor assertion passes and the
+            Ed25519 signature is valid.  ``False`` for any anchor mismatch,
+            decoding error, signature failure, or structural anomaly.
         """
         try:
+            if receipt["previous_public_key"] != trusted_previous_public_key:
+                return False
+
             old_pub_bytes = base64.b64decode(receipt["previous_public_key"])
             sig_bytes = base64.b64decode(receipt["succession_signature"])
             old_public_key = ed25519.Ed25519PublicKey.from_public_bytes(old_pub_bytes)

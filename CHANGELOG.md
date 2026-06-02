@@ -7,6 +7,107 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-06-01
+
+### Added
+
+- **Phase 6.1 — `PublicKeyBundle` export format** (`crypto.py`, `gateway.py`):
+  New `PublicKeyBundle` Pydantic v2 model in `sovereign_core.crypto` carrying four
+  fields: `public_key` (base64-encoded raw Ed25519 key), `attestation` (a
+  self-signed `ForensicReceipt` dict proving private-key ownership), `issued_at`
+  (UTC ISO 8601 timestamp sealed inside the attestation signature — see Security),
+  and optional `node_id` (human-readable label, default `None`).  Serialisable to
+  JSON via Pydantic v2 `model_dump_json()`.
+
+- **`SovereignGateway.export_public_key_bundle(node_id=None) -> PublicKeyBundle`**
+  (`gateway.py`): New gateway method that mints a self-signed `ForensicReceipt`
+  attestation over the payload `{"public_key": …, "type": "key_attestation"}`, then
+  assembles and returns a `PublicKeyBundle`.  Triggers lazy keypair loading if the
+  identity has not yet been initialised, consistent with `export_public_key()`.
+  The `issued_at` timestamp is computed before `generate_receipt()` is called so it
+  is covered by the Ed25519 signature.
+
+- **`SovereignGateway.save_public_key_bundle(path, node_id=None) -> None`**
+  (`gateway.py`): Convenience method that calls `export_public_key_bundle()` and
+  writes the Pydantic v2 `model_dump_json()` output to `path` as UTF-8 JSON.  The
+  parent directory must pre-exist; no `makedirs` is performed.
+
+- **Phase 6.3 — `SuccessionReceipt` TypedDict** (`crypto.py`): New TypedDict with
+  four fields: `previous_public_key` and `new_public_key` (base64-encoded Ed25519
+  keys), `rotation_timestamp` (UTC ISO 8601), and `succession_signature`
+  (base64-encoded Ed25519 signature of the canonical rotation payload produced by
+  the *outgoing* private key).
+
+- **`SovereignKeyManager.rotate_keypair() -> SuccessionReceipt`** (`crypto.py`):
+  Generates a brand-new Ed25519 keypair, builds a canonical JSON rotation payload
+  binding `previous_public_key`, `new_public_key`, and `rotation_timestamp`, signs
+  it with the *outgoing* private key, then atomically promotes both the new private
+  key `.pem` and the public key `.pub` to disk via the workspace's existing
+  `tempfile.NamedTemporaryFile` → `os.fsync` → `os.replace` pattern.  In-memory
+  identity slots are updated only after both disk writes succeed, ensuring the node
+  is never left with a split identity state.
+
+- **`SovereignKeyManager.verify_succession(receipt, trusted_previous_public_key) -> bool`**
+  (`crypto.py`): Static method for standalone auditor-side verification of any
+  rotation event.  Requires no live key material.  Performs an anchor assertion
+  (see Security) before any cryptographic operation, then verifies the
+  `succession_signature` against the canonical rotation payload using the
+  `previous_public_key` confirmed by the anchor — see Security for why the
+  explicit `trusted_previous_public_key` argument is mandatory.
+
+- **`test_verification_protocol.py`** — 48 new test cases across six classes:
+  `TestPublicKeyBundleModel` (4), `TestPublicKeyBundleExport` (14),
+  `TestPublicKeyBundleSave` (6), `TestKeyRotationBasic` (9),
+  `TestSuccessionVerification` (4), `TestSuccessionAdversarial` (8) and two
+  dedicated security-property tests (`test_bundle_issued_at_is_sealed_in_attestation_signature`,
+  `test_verify_succession_anchor_check_rejects_wrong_trusted_key`).  Full workspace
+  suite: **108 passed, 1 skipped** (POSIX `fchmod`, correct on Windows).
+
+- **`PublicKeyBundle` and `SuccessionReceipt` exported from `sovereign_core.__init__`**:
+  Both new types added to `__all__` for direct importability from the top-level
+  package namespace.
+
+### Changed
+
+- **Version promoted to `1.1.0`** across all workspace package manifests
+  (`packages/sovereign-core/pyproject.toml`, `packages/sovereign-fastapi/pyproject.toml`,
+  `packages/sovereign-runtime/pyproject.toml`, root `pyproject.toml`) and
+  `sovereign_core.__version__`.
+
+### Security
+
+- **Fix 1 — Atomic `.pub` file promotion in `rotate_keypair()`** (`crypto.py`):
+  The public key `.pub` file was previously written with a plain `open()` call,
+  creating a split-state window between the atomic `.pem` promotion and the `.pub`
+  write — a crash in that window would leave the two files mismatched.  The write
+  is now performed via the same `tempfile.NamedTemporaryFile` → `os.fsync` →
+  `os.replace` pattern used for the `.pem`, so both files land atomically and
+  cannot diverge.
+
+- **Fix 2 — Self-referential succession verification loop broken** (`crypto.py`):
+  `verify_succession()` previously derived the verification public key entirely
+  from the receipt's own `previous_public_key` field.  An attacker could mint a
+  `SuccessionReceipt` with a rogue keypair, embed that keypair's own public key as
+  `previous_public_key`, and have the receipt verify correctly against itself.
+  The method signature is changed to
+  `verify_succession(receipt, trusted_previous_public_key: str) -> bool`.  A strict
+  anchor guard clause `if receipt["previous_public_key"] != trusted_previous_public_key: return False`
+  executes before any base64 decoding or Ed25519 operation.  The trusted anchor
+  must be supplied by the caller from an out-of-band source — e.g. the
+  `new_public_key` of the preceding receipt, or the key recorded before the
+  rotation was initiated — not from the receipt under audit.
+
+- **Fix 3 — `issued_at` timestamp sealed inside the attestation signature** (`gateway.py`):
+  In `export_public_key_bundle()`, `issued_at` was previously computed after
+  `generate_receipt()` returned, leaving the bundle's issuance timestamp
+  uncovered by the Ed25519 signature.  An attacker could modify `issued_at` on
+  the bundle object or in a saved JSON file without breaking attestation
+  verification.  `issued_at` is now captured before `generate_receipt()` is
+  called and included in the metadata dict that becomes part of the signed
+  canonical manifest.  `bundle.issued_at` and
+  `bundle.attestation["metadata"]["issued_at"]` are now provably identical strings
+  covered by the same signature.
+
 ## [1.0.0] - 2026-05-22
 
 ### Added

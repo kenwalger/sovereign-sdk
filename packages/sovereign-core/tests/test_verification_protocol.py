@@ -150,7 +150,6 @@ class TestPublicKeyBundleExport:
     ) -> None:
         """The self-signed attestation receipt passes full Ed25519 verification."""
         bundle = gateway.export_public_key_bundle()
-        # Reconstruct the attestation payload that was signed internally
         attestation_payload: dict[str, Any] = {
             "public_key": bundle.public_key,
             "type": "key_attestation",
@@ -211,7 +210,7 @@ class TestPublicKeyBundleExport:
         bundle = gateway.export_public_key_bundle()
         tampered_attestation = {
             **bundle.attestation,
-            "metadata": {"purpose": "INJECTED", "source": "PublicKeyBundle"},
+            "metadata": {"issued_at": "1970-01-01T00:00:00+00:00", "purpose": "INJECTED", "source": "PublicKeyBundle"},
         }
         attestation_payload: dict[str, Any] = {
             "public_key": bundle.public_key,
@@ -240,6 +239,55 @@ class TestPublicKeyBundleExport:
             expected_public_key=rogue_key,
         )
         assert not valid, "Attestation with a mismatched key pin must fail verification"
+
+    def test_bundle_issued_at_is_sealed_in_attestation_signature(
+        self, gateway: SovereignGateway
+    ) -> None:
+        """Mutating issued_at inside the attestation metadata invalidates the Ed25519 signature.
+
+        Fix 3 ensures issued_at is recorded in the signed metadata *before* the
+        receipt is minted, so any downstream modification of that field is
+        detectable via verify_receipt.
+        """
+        bundle = gateway.export_public_key_bundle()
+        # issued_at must appear in the attestation metadata (not only as a top-level field)
+        assert "issued_at" in bundle.attestation["metadata"], (
+            "issued_at must be sealed inside the attestation metadata by the Ed25519 signature"
+        )
+        # Mutating issued_at inside the metadata must break the signature
+        tampered = {
+            **bundle.attestation,
+            "metadata": {
+                **bundle.attestation["metadata"],
+                "issued_at": "1970-01-01T00:00:00+00:00",
+            },
+        }
+        attestation_payload: dict[str, Any] = {
+            "public_key": bundle.public_key,
+            "type": "key_attestation",
+        }
+        valid = SovereignKeyManager.verify_receipt(
+            tampered,  # type: ignore[arg-type]
+            attestation_payload,
+            expected_public_key=bundle.public_key,
+        )
+        assert not valid, (
+            "Modifying issued_at inside the attestation metadata must invalidate the signature"
+        )
+
+    def test_bundle_issued_at_matches_attestation_metadata_issued_at(
+        self, gateway: SovereignGateway
+    ) -> None:
+        """bundle.issued_at equals the issued_at value sealed inside the attestation metadata.
+
+        Both values must be identical — the top-level field is a convenience
+        accessor for the same timestamp that is cryptographically bound by the
+        attestation signature.
+        """
+        bundle = gateway.export_public_key_bundle()
+        assert bundle.issued_at == bundle.attestation["metadata"]["issued_at"], (
+            "bundle.issued_at must equal attestation.metadata['issued_at']"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -281,12 +329,12 @@ class TestPublicKeyBundleSave:
     def test_saved_bundle_public_key_matches_export(
         self, gateway: SovereignGateway, tmp_path: Path
     ) -> None:
-        """The public_key in the saved JSON matches the in-memory export."""
-        bundle = gateway.export_public_key_bundle(node_id="saved-node")
+        """The public_key in the saved JSON matches the gateway's active identity."""
+        expected_key = gateway.export_public_key()
         bundle_path = tmp_path / "bundle.json"
-        gateway.save_public_key_bundle(str(bundle_path), node_id="saved-node")
+        gateway.save_public_key_bundle(str(bundle_path))
         parsed = json.loads(bundle_path.read_text(encoding="utf-8"))
-        assert parsed["public_key"] == bundle.public_key
+        assert parsed["public_key"] == expected_key
 
     def test_save_with_node_id_persists_node_id(
         self, gateway: SovereignGateway, tmp_path: Path
@@ -391,16 +439,18 @@ class TestKeyRotationBasic:
         self, loaded_manager: SovereignKeyManager
     ) -> None:
         """Two sequential rotations each produce independently verifiable succession receipts."""
+        key_before_first = loaded_manager.public_key
         receipt_1 = loaded_manager.rotate_keypair()
+        key_before_second = loaded_manager.public_key
         receipt_2 = loaded_manager.rotate_keypair()
 
-        assert SovereignKeyManager.verify_succession(receipt_1), (
-            "First succession receipt must independently verify"
+        assert SovereignKeyManager.verify_succession(receipt_1, key_before_first), (
+            "First succession receipt must independently verify against its trusted anchor"
         )
-        assert SovereignKeyManager.verify_succession(receipt_2), (
-            "Second succession receipt must independently verify"
+        assert SovereignKeyManager.verify_succession(receipt_2, key_before_second), (
+            "Second succession receipt must independently verify against its trusted anchor"
         )
-        # The chain: receipt_2.previous == receipt_1.new
+        # Chain continuity: receipt_2.previous == receipt_1.new
         assert receipt_2["previous_public_key"] == receipt_1["new_public_key"], (
             "Second receipt's previous_public_key must equal the first receipt's new_public_key"
         )
@@ -428,17 +478,20 @@ class TestSuccessionVerification:
         self, loaded_manager: SovereignKeyManager
     ) -> None:
         """verify_succession() returns True for a receipt produced by rotate_keypair()."""
+        pre_rotation_key = loaded_manager.public_key
         receipt = loaded_manager.rotate_keypair()
-        assert SovereignKeyManager.verify_succession(receipt) is True
+        assert SovereignKeyManager.verify_succession(receipt, pre_rotation_key) is True
 
     def test_verify_succession_true_after_double_rotation(
         self, loaded_manager: SovereignKeyManager
     ) -> None:
         """Both receipts from two sequential rotations pass verify_succession independently."""
+        key_before_first = loaded_manager.public_key
         receipt_1 = loaded_manager.rotate_keypair()
+        key_before_second = loaded_manager.public_key
         receipt_2 = loaded_manager.rotate_keypair()
-        assert SovereignKeyManager.verify_succession(receipt_1)
-        assert SovereignKeyManager.verify_succession(receipt_2)
+        assert SovereignKeyManager.verify_succession(receipt_1, key_before_first)
+        assert SovereignKeyManager.verify_succession(receipt_2, key_before_second)
 
     def test_verify_succession_true_for_receipt_from_different_manager_instance(
         self, tmp_key_dir: Path, env_secret: str
@@ -446,12 +499,29 @@ class TestSuccessionVerification:
         """A succession receipt verifies correctly when called from a fresh manager instance."""
         writer = SovereignKeyManager(key_dir=tmp_key_dir)
         writer.load_or_generate_keypair()
+        pre_rotation_key = writer.public_key
         receipt = writer.rotate_keypair()
 
-        # New instance — verify is a static method, no identity needed
-        assert SovereignKeyManager.verify_succession(receipt), (
+        assert SovereignKeyManager.verify_succession(receipt, pre_rotation_key), (
             "verify_succession must work without any live key material"
         )
+
+    def test_verify_succession_anchor_check_rejects_wrong_trusted_key(
+        self, loaded_manager: SovereignKeyManager
+    ) -> None:
+        """Passing the wrong trusted_previous_public_key returns False before any crypto.
+
+        This directly tests Fix 2: even a cryptographically valid receipt is
+        rejected when the caller's trusted anchor does not match.
+        """
+        pre_rotation_key = loaded_manager.public_key
+        receipt = loaded_manager.rotate_keypair()
+        wrong_anchor = base64.b64encode(b"\x00" * 32).decode()
+        assert SovereignKeyManager.verify_succession(receipt, wrong_anchor) is False, (
+            "A mismatched trusted_previous_public_key must reject the receipt immediately"
+        )
+        # Confirm the same receipt passes when the correct anchor is supplied
+        assert SovereignKeyManager.verify_succession(receipt, pre_rotation_key) is True
 
 
 # ---------------------------------------------------------------------------
@@ -466,6 +536,7 @@ class TestSuccessionAdversarial:
         self, loaded_manager: SovereignKeyManager
     ) -> None:
         """Replacing new_public_key with a rogue key invalidates the succession signature."""
+        pre_rotation_key = loaded_manager.public_key
         receipt = loaded_manager.rotate_keypair()
         rogue_key = base64.b64encode(b"\xab" * 32).decode()
         tampered = SuccessionReceipt(
@@ -474,14 +545,15 @@ class TestSuccessionAdversarial:
             rotation_timestamp=receipt["rotation_timestamp"],
             succession_signature=receipt["succession_signature"],
         )
-        assert not SovereignKeyManager.verify_succession(tampered), (
+        assert not SovereignKeyManager.verify_succession(tampered, pre_rotation_key), (
             "Tampered new_public_key must invalidate the succession signature"
         )
 
     def test_tampered_previous_public_key_fails_verification(
         self, loaded_manager: SovereignKeyManager
     ) -> None:
-        """Replacing previous_public_key with a rogue value fails verification."""
+        """Replacing previous_public_key with a rogue value fails the anchor check."""
+        pre_rotation_key = loaded_manager.public_key
         receipt = loaded_manager.rotate_keypair()
         rogue_key = base64.b64encode(b"\xcd" * 32).decode()
         tampered = SuccessionReceipt(
@@ -490,14 +562,15 @@ class TestSuccessionAdversarial:
             rotation_timestamp=receipt["rotation_timestamp"],
             succession_signature=receipt["succession_signature"],
         )
-        assert not SovereignKeyManager.verify_succession(tampered), (
-            "Tampered previous_public_key must invalidate the succession signature"
+        assert not SovereignKeyManager.verify_succession(tampered, pre_rotation_key), (
+            "Tampered previous_public_key must fail the anchor equality check"
         )
 
     def test_tampered_rotation_timestamp_fails_verification(
         self, loaded_manager: SovereignKeyManager
     ) -> None:
         """Altering rotation_timestamp after signing causes verify_succession to return False."""
+        pre_rotation_key = loaded_manager.public_key
         receipt = loaded_manager.rotate_keypair()
         tampered = SuccessionReceipt(
             previous_public_key=receipt["previous_public_key"],
@@ -505,7 +578,7 @@ class TestSuccessionAdversarial:
             rotation_timestamp="1970-01-01T00:00:00+00:00",
             succession_signature=receipt["succession_signature"],
         )
-        assert not SovereignKeyManager.verify_succession(tampered), (
+        assert not SovereignKeyManager.verify_succession(tampered, pre_rotation_key), (
             "Tampered rotation_timestamp must invalidate the succession signature"
         )
 
@@ -513,6 +586,7 @@ class TestSuccessionAdversarial:
         self, loaded_manager: SovereignKeyManager
     ) -> None:
         """A bit-flipped succession_signature causes verify_succession to return False."""
+        pre_rotation_key = loaded_manager.public_key
         receipt = loaded_manager.rotate_keypair()
         raw_sig = bytearray(base64.b64decode(receipt["succession_signature"]))
         raw_sig[0] ^= 0xFF  # flip the first byte
@@ -523,7 +597,7 @@ class TestSuccessionAdversarial:
             rotation_timestamp=receipt["rotation_timestamp"],
             succession_signature=bad_sig,
         )
-        assert not SovereignKeyManager.verify_succession(tampered), (
+        assert not SovereignKeyManager.verify_succession(tampered, pre_rotation_key), (
             "A corrupted succession_signature must fail verification"
         )
 
@@ -531,6 +605,7 @@ class TestSuccessionAdversarial:
         self, loaded_manager: SovereignKeyManager
     ) -> None:
         """Garbage base64 in succession_signature returns False without raising an exception."""
+        pre_rotation_key = loaded_manager.public_key
         receipt = loaded_manager.rotate_keypair()
         tampered = SuccessionReceipt(
             previous_public_key=receipt["previous_public_key"],
@@ -538,7 +613,7 @@ class TestSuccessionAdversarial:
             rotation_timestamp=receipt["rotation_timestamp"],
             succession_signature="!!! NOT VALID BASE64 !!!",
         )
-        result = SovereignKeyManager.verify_succession(tampered)
+        result = SovereignKeyManager.verify_succession(tampered, pre_rotation_key)
         assert result is False, (
             "Malformed base64 in succession_signature must return False, not raise"
         )
@@ -546,26 +621,26 @@ class TestSuccessionAdversarial:
     def test_rogue_keypair_cannot_forge_valid_succession_receipt(
         self, loaded_manager: SovereignKeyManager
     ) -> None:
-        """A receipt forged by a rogue keypair fails verify_succession against the real previous key."""
+        """A receipt forged by a rogue keypair fails verify_succession against the real anchor."""
         from cryptography.hazmat.primitives.asymmetric import ed25519 as _ed
+        from cryptography.hazmat.primitives import serialization as _ser
 
-        pre_rotation_key = loaded_manager.public_key
         loaded_manager.rotate_keypair()
+        # post_rotation_key is now the "known" key before any further rotation
         post_rotation_key = loaded_manager.public_key
 
-        # Attacker mints a fake succession from post_rotation → attacker_key
+        # Attacker generates their own keypair and mints a fake succession receipt
         attacker_private = _ed.Ed25519PrivateKey.generate()
         attacker_public_b64 = base64.b64encode(
             attacker_private.public_key().public_bytes(
-                encoding=__import__("cryptography.hazmat.primitives.serialization", fromlist=["Encoding"]).Encoding.Raw,
-                format=__import__("cryptography.hazmat.primitives.serialization", fromlist=["PublicFormat"]).PublicFormat.Raw,
+                encoding=_ser.Encoding.Raw,
+                format=_ser.PublicFormat.Raw,
             )
         ).decode()
 
-        import json as _json
         from datetime import datetime, timezone as _tz
         fake_timestamp = datetime.now(_tz.utc).isoformat()
-        fake_payload = _json.dumps(
+        fake_payload = json.dumps(
             {
                 "new_public_key": attacker_public_b64,
                 "previous_public_key": post_rotation_key,
@@ -581,7 +656,9 @@ class TestSuccessionAdversarial:
             rotation_timestamp=fake_timestamp,
             succession_signature=fake_sig,
         )
-        assert not SovereignKeyManager.verify_succession(forged), (
+        # Anchor check passes (previous_public_key matches post_rotation_key),
+        # but the crypto check must reject the rogue signature.
+        assert not SovereignKeyManager.verify_succession(forged, post_rotation_key), (
             "A receipt signed by a rogue key (not the previous private key) must fail verification"
         )
 
@@ -589,6 +666,7 @@ class TestSuccessionAdversarial:
         self, loaded_manager: SovereignKeyManager
     ) -> None:
         """An empty succession_signature returns False without raising an exception."""
+        pre_rotation_key = loaded_manager.public_key
         receipt = loaded_manager.rotate_keypair()
         tampered = SuccessionReceipt(
             previous_public_key=receipt["previous_public_key"],
@@ -596,13 +674,18 @@ class TestSuccessionAdversarial:
             rotation_timestamp=receipt["rotation_timestamp"],
             succession_signature="",
         )
-        result = SovereignKeyManager.verify_succession(tampered)
+        result = SovereignKeyManager.verify_succession(tampered, pre_rotation_key)
         assert result is False
 
     def test_swapped_keys_in_receipt_fails_verification(
         self, loaded_manager: SovereignKeyManager
     ) -> None:
-        """Swapping previous_public_key and new_public_key fields fails verify_succession."""
+        """Swapping previous_public_key and new_public_key fields fails verify_succession.
+
+        The anchor check catches the swap immediately: swapped["previous_public_key"]
+        is the post-rotation key, which does not equal the trusted pre-rotation anchor.
+        """
+        pre_rotation_key = loaded_manager.public_key
         receipt = loaded_manager.rotate_keypair()
         swapped = SuccessionReceipt(
             previous_public_key=receipt["new_public_key"],
@@ -610,6 +693,6 @@ class TestSuccessionAdversarial:
             rotation_timestamp=receipt["rotation_timestamp"],
             succession_signature=receipt["succession_signature"],
         )
-        assert not SovereignKeyManager.verify_succession(swapped), (
-            "Swapping previous and new keys in the receipt must fail verification"
+        assert not SovereignKeyManager.verify_succession(swapped, pre_rotation_key), (
+            "Swapping previous and new keys in the receipt must fail the anchor check"
         )
