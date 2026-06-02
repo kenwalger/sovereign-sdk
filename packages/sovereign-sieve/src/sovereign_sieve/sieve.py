@@ -1,7 +1,6 @@
 # packages/sovereign-sieve/src/sovereign_sieve/sieve.py
 import re
 from dataclasses import dataclass
-from typing import List, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -10,7 +9,7 @@ from typing import List, Tuple
 # string; the duplicate-heading pattern substitutes \1 to preserve exactly one
 # clean copy of the header rather than erasing both.
 # ---------------------------------------------------------------------------
-_FILLER_PATTERNS: List[Tuple[re.Pattern[str], str]] = [
+_FILLER_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # Greeting tokens — grouped inside a non-capturing alternation so that the
     # trailing (?![-\w]) lookahead applies uniformly to every option.
     (re.compile(r"\b(?:hi|hello|hey|greetings)\b(?![-\w])", re.IGNORECASE), ""),
