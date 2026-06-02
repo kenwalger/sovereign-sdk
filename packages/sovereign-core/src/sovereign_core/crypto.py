@@ -13,6 +13,34 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives import serialization
 
 
+class SuccessionReceipt(TypedDict):
+    """Cryptographic audit record produced when a node rotates its Ed25519 identity keypair.
+
+    Every field is covered by ``succession_signature``, which is an Ed25519
+    signature produced by the *previous* private key over the canonical JSON
+    serialisation of ``previous_public_key``, ``new_public_key``, and
+    ``rotation_timestamp``.  This gives any auditor holding the old public key
+    the ability to verify that the rotation was authorised by the legitimate
+    keyholder.
+
+    Attributes:
+        previous_public_key: Base64-encoded raw Ed25519 public key that was
+            active before the rotation event.
+        new_public_key: Base64-encoded raw Ed25519 public key that is active
+            after the rotation event.
+        rotation_timestamp: ISO 8601 UTC timestamp captured at the moment the
+            rotation payload was signed.
+        succession_signature: Base64-encoded raw Ed25519 signature produced by
+            signing the canonical rotation payload with the *previous* private
+            key.
+    """
+
+    previous_public_key: str
+    new_public_key: str
+    rotation_timestamp: str
+    succession_signature: str
+
+
 class ForensicReceipt(TypedDict):
     """Immutable, cryptographically sealed provenance record for a single tool execution.
 
@@ -60,6 +88,31 @@ class ReceiptSchema(BaseModel):
     public_key: str
     signature: str
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class PublicKeyBundle(BaseModel):
+    """Structured export of an Ed25519 public verification key with self-signed attestation.
+
+    Carries sufficient information for a downstream consumer to independently
+    verify both the authenticity of the key (via the ``attestation`` receipt)
+    and the identity of the issuing node (via ``node_id``).  The bundle is
+    serialisable to JSON via Pydantic v2 :meth:`model_dump_json`.
+
+    Attributes:
+        public_key: Base64-encoded raw 32-byte Ed25519 public key.
+        attestation: A :class:`ForensicReceipt` dictionary that is
+            self-signed by the node — i.e. the signing key matches
+            ``public_key`` — proving that the bundle issuer controls the
+            corresponding private key.
+        issued_at: UTC ISO 8601 timestamp recorded at bundle creation time.
+        node_id: Optional human-readable label for the issuing node.
+            Defaults to ``None`` when not supplied.
+    """
+
+    public_key: str
+    attestation: dict[str, Any]
+    issued_at: str
+    node_id: str | None = None
 
 
 class SovereignKeyManager:
@@ -390,6 +443,146 @@ class SovereignKeyManager:
             signature=validated.signature,
             metadata=validated.metadata,
         )
+
+    def rotate_keypair(self) -> SuccessionReceipt:
+        """Rotates the node's Ed25519 identity keypair and mints a cryptographic succession receipt.
+
+        Generates a brand-new Ed25519 keypair, constructs a canonical rotation
+        payload covering ``previous_public_key``, ``new_public_key``, and
+        ``rotation_timestamp``, signs that payload with the *current* (outgoing)
+        private key, then atomically promotes the new private key PEM over the
+        on-disk file using the same ``os.replace``/``os.fchmod`` pattern as
+        :meth:`load_or_generate_keypair`.
+
+        The in-memory ``_private_key`` and ``_public_key`` slots are updated
+        only after the disk promotion succeeds, so a write failure leaves the
+        node in a consistent state with the old identity still active.
+
+        Returns:
+            A :class:`SuccessionReceipt` TypedDict whose ``succession_signature``
+            is an Ed25519 signature produced by the *outgoing* private key over
+            the canonical rotation payload, providing an auditable chain of
+            identity handoff.
+
+        Raises:
+            RuntimeError: If ``SOVEREIGN_NODE_SECRET`` is not set, or if the
+                keypair is not loaded and cannot be loaded from disk.
+        """
+        if not self._private_key:
+            self.load_or_generate_keypair()
+
+        passphrase = self._resolve_node_secret()
+        old_private_key = self._private_key
+        old_public_key_b64 = self.get_base64_public_key()
+
+        new_private_key = ed25519.Ed25519PrivateKey.generate()
+        new_public_key = new_private_key.public_key()
+        new_public_key_b64 = base64.b64encode(
+            new_public_key.public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw,
+            )
+        ).decode("utf-8")
+
+        rotation_timestamp = datetime.now(timezone.utc).isoformat()
+
+        rotation_payload = json.dumps(
+            {
+                "new_public_key": new_public_key_b64,
+                "previous_public_key": old_public_key_b64,
+                "rotation_timestamp": rotation_timestamp,
+            },
+            sort_keys=True,
+        )
+        raw_sig = old_private_key.sign(rotation_payload.encode("utf-8"))
+        succession_signature = base64.b64encode(raw_sig).decode("utf-8")
+
+        new_pem = new_private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.BestAvailableEncryption(passphrase),
+        )
+
+        tmp_path: str = ""
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=os.path.dirname(self.private_key_path),
+                delete=False,
+            ) as tmp:
+                tmp_path = tmp.name
+                if hasattr(os, "fchmod"):
+                    os.fchmod(tmp.fileno(), 0o600)
+                else:
+                    os.chmod(tmp_path, 0o600)
+                tmp.write(new_pem)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            os.replace(tmp_path, self.private_key_path)
+            tmp_path = ""
+        except Exception:
+            if tmp_path:
+                try:
+                    os.remove(tmp_path)
+                except FileNotFoundError:
+                    pass
+            raise
+
+        with open(self.public_key_path, "wb") as f:
+            f.write(
+                new_public_key.public_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PublicFormat.SubjectPublicKeyInfo,
+                )
+            )
+
+        self._private_key = new_private_key
+        self._public_key = new_public_key
+
+        return SuccessionReceipt(
+            previous_public_key=old_public_key_b64,
+            new_public_key=new_public_key_b64,
+            rotation_timestamp=rotation_timestamp,
+            succession_signature=succession_signature,
+        )
+
+    @staticmethod
+    def verify_succession(receipt: SuccessionReceipt) -> bool:
+        """Validates that a key rotation event is cryptographically genuine.
+
+        Reconstructs the canonical rotation payload from the three non-signature
+        fields of ``receipt`` and verifies the ``succession_signature`` against
+        the ``previous_public_key`` embedded in the receipt.  Because the
+        previous public key is encoded in the receipt itself, a standalone
+        auditor with no access to any private key material or live node can
+        call this method.
+
+        Args:
+            receipt: A :class:`SuccessionReceipt` produced by
+                :meth:`rotate_keypair`.
+
+        Returns:
+            ``True`` if the ``succession_signature`` is a valid Ed25519
+            signature over the canonical rotation payload produced by the
+            private key corresponding to ``previous_public_key``.  ``False``
+            for any decoding error, signature failure, or structural anomaly.
+        """
+        try:
+            old_pub_bytes = base64.b64decode(receipt["previous_public_key"])
+            sig_bytes = base64.b64decode(receipt["succession_signature"])
+            old_public_key = ed25519.Ed25519PublicKey.from_public_bytes(old_pub_bytes)
+
+            rotation_payload = json.dumps(
+                {
+                    "new_public_key": receipt["new_public_key"],
+                    "previous_public_key": receipt["previous_public_key"],
+                    "rotation_timestamp": receipt["rotation_timestamp"],
+                },
+                sort_keys=True,
+            )
+            old_public_key.verify(sig_bytes, rotation_payload.encode("utf-8"))
+            return True
+        except Exception:
+            return False
 
     @staticmethod
     def verify_receipt(

@@ -163,7 +163,7 @@ Key deliverables:
 mechanism, enabling downstream consumers and auditors to independently authenticate
 ForensicReceipts without access to the signing node's private key material.
 
-### 6.1 Public Key Export and Distribution
+### 6.1 Public Key Export and Distribution — Shipped ✓
 
 Extend `SovereignGateway.export_public_key()` with a structured `PublicKeyBundle`
 export format that carries the base64-encoded key, a self-signed attestation receipt,
@@ -176,13 +176,14 @@ bundle = gateway.export_public_key_bundle()
 # bundle.issued_at    — UTC ISO 8601 timestamp
 # bundle.node_id      — optional human-readable node label
 
+gateway.save_public_key_bundle(".keys/bundle.json", node_id="node-alpha")
 ```
 
-Key deliverables:
+**Delivered:**
 
-* `PublicKeyBundle` Pydantic model with Pydantic v2 JSON serialization
-* `SovereignGateway.export_public_key_bundle()` method
-* `SovereignGateway.save_public_key_bundle(path)` for writing to disk as JSON
+* [x] `PublicKeyBundle` Pydantic v2 model in `crypto.py` with `model_dump_json()` serialization; `node_id` defaults to `None`
+* [x] `SovereignGateway.export_public_key_bundle(node_id=None)` minting a self-signed `ForensicReceipt` attestation that proves private-key ownership
+* [x] `SovereignGateway.save_public_key_bundle(path, node_id=None)` writing the bundle to disk as UTF-8 JSON
 
 ### 6.2 Stateless Receipt Verification CLI — Shipped ✓
 
@@ -197,19 +198,28 @@ sovereign-verify --receipt receipt.json --public-key <base64-encoded-public-key>
 
 ```
 
-### 6.3 Key Rotation and Succession
+### 6.3 Key Rotation and Succession — Shipped ✓
 
 A structured key rotation flow in `SovereignKeyManager` that generates a new keypair,
 mints a signed succession receipt (signed by the old key, containing the new public key),
 and atomically replaces the on-disk PEM.  The succession receipt provides a
 cryptographically auditable chain of identity handoff.
 
-Key deliverables:
+```python
+receipt = manager.rotate_keypair()
+# receipt["previous_public_key"]  — base64 key active before rotation
+# receipt["new_public_key"]       — base64 key active after rotation
+# receipt["rotation_timestamp"]   — UTC ISO 8601 timestamp
+# receipt["succession_signature"] — Ed25519 signature by the outgoing private key
 
-* `SovereignKeyManager.rotate_keypair() -> SuccessionReceipt`
-* `SuccessionReceipt` TypedDict containing `previous_public_key`, `new_public_key`,
-`rotation_timestamp`, and `succession_signature`
-* `SovereignKeyManager.verify_succession(receipt)` for auditing rotation events
+SovereignKeyManager.verify_succession(receipt)  # → True
+```
+
+**Delivered:**
+
+* [x] `SuccessionReceipt` TypedDict in `crypto.py` with `previous_public_key`, `new_public_key`, `rotation_timestamp`, and `succession_signature`
+* [x] `SovereignKeyManager.rotate_keypair() -> SuccessionReceipt` generating a fresh Ed25519 keypair, signing the canonical rotation payload with the outgoing private key, and atomically promoting the new PEM via `os.replace` + `os.fchmod`/`os.chmod`
+* [x] `SovereignKeyManager.verify_succession(receipt) -> bool` static method enabling standalone auditor-side verification of any rotation event without live key material
 
 ### 6.4 Multi-Node Federated Verification
 
