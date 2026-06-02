@@ -1,10 +1,3 @@
-Here is your updated `ROADMAP.md`. The three new architectural primitives—**`sovereign-sieve`**, **`sovereign-ledger`**, and **`sovereign-vault`**—have been seamlessly woven into the document.
-
-Rather than overloading your development schedule right now, they have been strategically placed as **Phase 7 (Token Economics Extraction)**, **Phase 8 (Write-Side Custody Ledger)**, and **Phase 9 (Context-Isolation Core)**. This transforms your document from a standalone Python SDK roadmap into the definitive master blueprint for the complete **Sovereign Systems Software Suite**.
-
----
-
-```markdown
 # Sovereign Systems Specification — Strategic Roadmap
 
 This document tracks the long-range architectural trajectory of the Sovereign Systems SDK and Suite.
@@ -37,6 +30,39 @@ established by the previous phase.
 - Prose Tax telemetry fused into `ForensicReceipt.metadata["prose_tax_summary"]` before Ed25519 signing
 - Defensive `os.makedirs` on key directory at gateway initialization for containerized environments
 - `export_public_key()` returning the base64-encoded Ed25519 public key for out-of-band verification
+
+### Phase 7 — Standalone Token Economics Primitives (`sovereign-sieve`) — Shipped ✓
+
+Extracted `sovereign-sieve` into a zero-dependency standalone micro-utility package for
+framework-agnostic Prose Tax reduction.  Allows scripts, background workers, and pipeline
+ingestors to aggressively filter structural text noise and mitigate Prose Tax outside an
+HTTP ASGI/WSGI context.
+
+```python
+from sovereign_sieve import pure_sieve, sieve_with_metrics
+
+# Drop-in string cleaner — no web framework or ML library required
+clean = pure_sieve("Hello! Please just help me analyze this dataset.")
+# → "help me analyze this dataset."
+
+# Cleaner with immediate FinOps telemetry
+result = sieve_with_metrics("Hi! I hope this helps. Please just run the pipeline.")
+print(result.text)                   # → "run the pipeline."
+print(result.tax_savings_percentage) # e.g. 66.6667 (%)
+```
+
+**Delivered:**
+
+* [x] `pure_sieve(payload: str) -> str` — pure synchronous Prose Tax filler-phrase cleaner;
+  no I/O, no shared state, zero external dependencies
+* [x] `sieve_with_metrics(payload: str) -> SieveOutput` — sieve pass with `raw_token_count`,
+  `optimized_token_count`, and `tax_savings_percentage` computed via UTF-8 byte-density heuristic
+* [x] `SieveOutput` dataclass with `text`, `raw_token_count`, `optimized_token_count`, and
+  `tax_savings_percentage` fields
+* [x] `packages/sovereign-sieve/pyproject.toml` declaring `sovereign-sieve` as a workspace member
+  at version `1.1.0` with zero runtime dependencies
+* [x] 47-case test suite in `packages/sovereign-sieve/tests/test_sieve.py` covering determinism,
+  idempotency, all filler categories, edge cases, Unicode, malformed inputs, and metrics arithmetic
 
 ---
 
@@ -154,6 +180,7 @@ Key deliverables:
 
 * [x] `sovereign-core` package
 * [x] `sovereign-fastapi` package
+* [x] `sovereign-sieve` package
 
 ---
 
@@ -242,33 +269,14 @@ Key deliverables:
 
 ---
 
-## Phase 7 — Standalone Token Economics Primitives (`sovereign-sieve`)
-
-**Target:** Extract the payload-cleansing mechanics from the web framework middleware tier into a zero-dependency, ultra-lightweight standalone utility to maximize Python ecosystem adoption.
-
-Allows scripts, background workers, and pipeline ingestors to aggressively filter structural text noise and mitigate Prose Tax outside an HTTP ASGI/WSGI context.
-
-```python
-from sovereign_sieve import pure_sieve
-
-raw_payload = "Hello! I would be honored to assist you today. The data is: {'id': 42}"
-optimized_payload = pure_sieve(raw_payload)  # Result: "{'id': 42}"
-
-```
-
-Key deliverables:
-
-* **Zero-Dependency Core:** Decouple regex token heuristics, negative-lookahead phrase filters, and AST structural cleansing code from web-framework runtimes.
-* **Micro-Utility Performance:** Optimize execution pathways for high-throughput batch processing loops (e.g., historical ledger ingestion pipelines).
-* **Frictionless On-Ramp:** Provide immediate FinOps token-savings metrics output for offline script environments.
-
----
-
 ## Phase 8 — Write-Side Custody Ledger (`sovereign-ledger`)
 
-**Target:** A dedicated, lightweight, local-first storage substrate designed specifically to enforce Write-Side Custody by indexing and safeguarding `ForensicReceipts` at the exact millisecond of ingestion.
+**Target:** A dedicated, lightweight, local-first storage substrate designed specifically
+to enforce Write-Side Custody by indexing and safeguarding `ForensicReceipts` at the
+exact millisecond of ingestion.
 
-Provides local-first systems with an append-only, tamper-evident transactional trace to shield compliance audits from post-hoc database mutation or log-injection vulnerabilities.
+Provides local-first systems with an append-only, tamper-evident transactional trace to
+shield compliance audits from post-hoc database mutation or log-injection vulnerabilities.
 
 ```python
 from sovereign_ledger import SovereignAppendOnlyLedger
@@ -288,9 +296,13 @@ Key deliverables:
 
 ## Phase 9 — Isolated Context Vault & Governance Server (`sovereign-vault`)
 
-**Target:** Implement the "Sovereign Vault" architecture as an isolated local orchestration boundary, delivering a first-class Model Context Protocol (MCP) server for enterprise boundary containment.
+**Target:** Implement the "Sovereign Vault" architecture as an isolated local orchestration
+boundary, delivering a first-class Model Context Protocol (MCP) server for enterprise
+boundary containment.
 
-Ensures local Small Language Models (SLMs) and autonomous cloud agents function within a strictly sandboxed, zero-variance hardware context ring, neutralizing adversarial prompt injections and data leaks.
+Ensures local Small Language Models (SLMs) and autonomous cloud agents function within a
+strictly sandboxed, zero-variance hardware context ring, neutralizing adversarial prompt
+injections and data leaks.
 
 ```bash
 # Registering the Sovereign Vault as a secure local compliance gate
@@ -334,7 +346,3 @@ to make a phase land.
 4. **Dependency minimalism** — `sovereign-core` must never take on a high-compute
 dependency (PyTorch, transformers, etc.).  Framework adapters carry their own
 optional dependency trees via extras (`pip install sovereign-fastapi[all]`).
-
-```
-
-```

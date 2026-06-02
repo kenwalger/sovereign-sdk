@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=77.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sovereign-sieve"
+version = "1.1.0"
+description = "Zero-dependency standalone Prose Tax token optimization utility for the Sovereign Systems SDK"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Text Processing :: Filters",
+]
+
+[project.urls]
+Homepage = "https://github.com/kenwalger/sovereign-sdk"
+Repository = "https://github.com/kenwalger/sovereign-sdk"
+Changelog = "https://github.com/kenwalger/sovereign-sdk/blob/main/CHANGELOG.md"
+
+[tool.setuptools.packages.find]
+where = ["src"]

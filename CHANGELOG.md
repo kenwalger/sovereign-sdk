@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Phase 7 — `sovereign-sieve` standalone micro-utility package** (new workspace member
+  `packages/sovereign-sieve/`): Extracted `sovereign-sieve` into a zero-dependency
+  standalone micro-utility package for framework-agnostic Prose Tax reduction.  The
+  package exposes two public functions and one structured result type:
+
+  - **`pure_sieve(payload: str) -> str`**: Pure synchronous string cleaner applying
+    the full Prose Tax filler-phrase regex library (greeting tokens, hedging adverbs,
+    affirmation filler, preamble phrases, degenerate markdown runs, duplicate headings)
+    with post-substitution whitespace normalization.  No I/O, no shared state, no web
+    framework or ML library import.  Safe for scripts, batch pipelines, and offline
+    data-processing workers.
+  - **`sieve_with_metrics(payload: str) -> SieveOutput`**: Identical sieve pass that
+    additionally returns `raw_token_count`, `optimized_token_count`, and
+    `tax_savings_percentage` in a `SieveOutput` dataclass — all computed via the
+    UTF-8 byte-density heuristic (÷ 4) without invoking any external tokenizer or
+    network service.
+  - **`SieveOutput` dataclass**: Structured result with `text`, `raw_token_count`,
+    `optimized_token_count`, and `tax_savings_percentage` (rounded to four decimal
+    places) fields.
+
+- **`packages/sovereign-sieve/tests/test_sieve.py`** — 47 determinism, filler-stripping,
+  edge-case, and metrics-arithmetic test cases across seven classes
+  (`TestPureSieveGreetingStripping`, `TestPureSieveHedgingAdverbs`,
+  `TestPureSieveAffirmationFiller`, `TestPureSievePreamblePhrases`,
+  `TestPureSieveMarkdownCleaning`, `TestPureSieveWhitespaceNormalization`,
+  `TestPureSieveDeterminism`, `TestPureSieveMalformedInputs`, `TestSieveWithMetrics`).
+  Covers determinism invariant, idempotency, Unicode payloads, very long inputs,
+  `TypeError` on non-`str` arguments, and internal savings-percentage arithmetic
+  consistency.
+
+### Fixed
+
+- **`rotate_keypair()` — `old_private_key` strict type annotation** (`crypto.py`):
+  The `old_private_key = self._private_key` assignment previously left the variable
+  with the inferred type `ed25519.Ed25519PrivateKey | None` because `self._private_key`
+  is declared as `Optional`.  While the preceding guard clause (`if not self._private_key`)
+  guarantees the value is non-`None` at that point, strict static type checkers and LSPs
+  could not narrow the type through the guard boundary and emitted a warning at the
+  `.sign()` call site.  The assignment is updated to
+  `old_private_key: ed25519.Ed25519PrivateKey = cast(ed25519.Ed25519PrivateKey, self._private_key)`
+  using `typing.cast` (imported alongside the existing `typing` imports), satisfying
+  strict type checkers without changing runtime behavior.
+
 ## [1.1.0] - 2026-06-01
 
 ### Added

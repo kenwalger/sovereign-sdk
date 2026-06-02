@@ -51,6 +51,12 @@ This repository is managed as an integrated `uv` workspace separating the crypto
 │   │       ├── test_gateway.py
 │   │       └── test_verification_protocol.py
 │   │
+│   ├── sovereign-sieve/                  # Zero-dependency standalone Prose Tax utility
+│   │   ├── src/sovereign_sieve/
+│   │   │   └── sieve.py                  # pure_sieve(), sieve_with_metrics(), SieveOutput
+│   │   └── tests/
+│   │       └── test_sieve.py
+│   │
 │   ├── sovereign-runtime/                # Compute/Execution tier (tool & model isolation)
 │   │   └── src/sovereign_runtime/
 │   │       ├── router.py                 # Intent-based pre-flight namespace exposure
@@ -69,6 +75,37 @@ This repository is managed as an integrated `uv` workspace separating the crypto
 ├── pyproject.toml                        # Monorepo configuration & workspace links
 └── uv.lock                               # Deterministic dependency lockfile
 ```
+
+---
+
+## `sovereign-sieve` — Standalone Token Optimization
+
+For scripts, batch pipelines, and offline data-processing workers that do not require cryptographic signing, `sovereign-sieve` delivers the Prose Tax regex engine as a zero-dependency synchronous utility:
+
+```bash
+pip install sovereign-sieve
+```
+
+```python
+from sovereign_sieve import pure_sieve, sieve_with_metrics
+
+# Drop-in string cleaner
+clean = pure_sieve("Hello! Please just help me analyze this dataset.")
+# → "help me analyze this dataset."
+
+# Cleaner + immediate FinOps telemetry
+result = sieve_with_metrics("Hi! I hope this helps. Please just run the pipeline.")
+print(result.text)                   # → "run the pipeline."
+print(result.raw_token_count)        # estimated tokens before sieve
+print(result.optimized_token_count)  # estimated tokens after sieve
+print(result.tax_savings_percentage) # e.g. 66.6667 (%)
+
+# Offline batch pipeline
+records = load_jsonl("prompts.jsonl")
+cleaned = [pure_sieve(r["text"]) for r in records]
+```
+
+`pure_sieve()` is pure and synchronous — no I/O, no shared state, no web framework or ML library imports. See [`packages/sovereign-sieve/README.md`](packages/sovereign-sieve/README.md) for full API documentation.
 
 ---
 
