@@ -249,7 +249,7 @@ Downstream auditors and consumers can verify the bundle's attestation receipt us
 ```python
 from sovereign_core.crypto import SovereignKeyManager
 
-manager = SovereignKeyManager(key_path=".keys/sovereign_identity.pem")
+manager = SovereignKeyManager(key_dir=".keys")
 manager.load_or_generate_keypair()
 
 # Capture the pre-rotation key from a trusted out-of-band source before rotating

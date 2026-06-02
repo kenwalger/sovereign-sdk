@@ -2,6 +2,7 @@
 
 import base64
 import json
+import os
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from sovereign_core.crypto import (
     PublicKeyBundle,
     SuccessionReceipt,
     SovereignKeyManager,
+    SovereignStorageError,
 )
 from sovereign_core.gateway import SovereignGateway
 
@@ -856,4 +858,139 @@ class TestKeyRotationAtomicStagingRollback:
         valid = SovereignKeyManager.verify_receipt(receipt, payload, expected_public_key=original_key)
         assert valid, (
             "Manager must produce verifiable receipts with the original key after a failed rotation"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Phase 6.3 — Promotion phase rollback (second os.replace failure)
+# ---------------------------------------------------------------------------
+
+
+class TestPromotionPhaseRollback:
+    """Regression tests for the hardened promotion phase in rotate_keypair().
+
+    These tests simulate a failure specifically on the second os.replace call
+    (the .pub promotion) — after the first os.replace (.pem) has already
+    committed — and verify that the rollback logic restores the original
+    private key, raises SovereignStorageError, and leaves no orphaned files.
+    """
+
+    def test_second_replace_failure_raises_sovereign_storage_error(
+        self, loaded_manager: SovereignKeyManager
+    ) -> None:
+        """A failure on the .pub os.replace raises SovereignStorageError, not the raw OSError."""
+        real_replace = os.replace
+        call_count = 0
+
+        def fail_on_second_replace(src: str, dst) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                raise OSError("Simulated failure on .pub os.replace")
+            return real_replace(src, dst)
+
+        with patch("sovereign_core.crypto.os.replace", side_effect=fail_on_second_replace):
+            with pytest.raises(SovereignStorageError, match="Key rotation failed"):
+                loaded_manager.rotate_keypair()
+
+    def test_second_replace_failure_restores_original_pem_on_disk(
+        self, loaded_manager: SovereignKeyManager
+    ) -> None:
+        """After .pub promotion failure, the original private key bytes are restored on disk."""
+        original_pem = loaded_manager.private_key_path.read_bytes()
+        real_replace = os.replace
+        call_count = 0
+
+        def fail_on_second_replace(src: str, dst) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                raise OSError("Simulated failure on .pub os.replace")
+            return real_replace(src, dst)
+
+        with patch("sovereign_core.crypto.os.replace", side_effect=fail_on_second_replace):
+            with pytest.raises(SovereignStorageError):
+                loaded_manager.rotate_keypair()
+
+        assert loaded_manager.private_key_path.read_bytes() == original_pem, (
+            "Rollback must restore the byte-identical original private key PEM to disk"
+        )
+
+    def test_second_replace_failure_leaves_in_memory_key_unchanged(
+        self, loaded_manager: SovereignKeyManager
+    ) -> None:
+        """In-memory key state is not updated when the promotion phase rolls back."""
+        original_key = loaded_manager.public_key
+        real_replace = os.replace
+        call_count = 0
+
+        def fail_on_second_replace(src: str, dst) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                raise OSError("Simulated failure on .pub os.replace")
+            return real_replace(src, dst)
+
+        with patch("sovereign_core.crypto.os.replace", side_effect=fail_on_second_replace):
+            with pytest.raises(SovereignStorageError):
+                loaded_manager.rotate_keypair()
+
+        assert loaded_manager.public_key == original_key, (
+            "In-memory key state must remain the pre-rotation key after rollback"
+        )
+
+    def test_second_replace_failure_leaves_no_orphaned_files(
+        self, loaded_manager: SovereignKeyManager
+    ) -> None:
+        """No staging or restore temp files remain after a rollback completes."""
+        real_replace = os.replace
+        call_count = 0
+
+        def fail_on_second_replace(src: str, dst) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                raise OSError("Simulated failure on .pub os.replace")
+            return real_replace(src, dst)
+
+        with patch("sovereign_core.crypto.os.replace", side_effect=fail_on_second_replace):
+            with pytest.raises(SovereignStorageError):
+                loaded_manager.rotate_keypair()
+
+        orphaned = list(loaded_manager.key_dir.glob("tmp*"))
+        assert len(orphaned) == 0, (
+            f"Rollback must remove all temp files; found: {orphaned}"
+        )
+
+    def test_manager_still_functional_after_promotion_rollback(
+        self, loaded_manager: SovereignKeyManager
+    ) -> None:
+        """After rollback, the manager mints verifiable receipts and can successfully rotate."""
+        original_key = loaded_manager.public_key
+        real_replace = os.replace
+        call_count = 0
+
+        def fail_on_second_replace(src: str, dst) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                raise OSError("Simulated failure on .pub os.replace")
+            return real_replace(src, dst)
+
+        with patch("sovereign_core.crypto.os.replace", side_effect=fail_on_second_replace):
+            with pytest.raises(SovereignStorageError):
+                loaded_manager.rotate_keypair()
+
+        # Receipts still verify against the original key
+        payload: dict[str, Any] = {"post_rollback": "audit_check"}
+        receipt = loaded_manager.generate_receipt(payload)
+        assert SovereignKeyManager.verify_receipt(receipt, payload, expected_public_key=original_key), (
+            "Manager must produce valid receipts with the original key after rollback"
+        )
+
+        # A subsequent clean rotation must succeed end-to-end
+        pre_key = loaded_manager.public_key
+        success_receipt = loaded_manager.rotate_keypair()
+        assert SovereignKeyManager.verify_succession(success_receipt, pre_key), (
+            "A clean rotation following a rolled-back rotation must produce a valid succession receipt"
         )

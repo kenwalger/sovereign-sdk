@@ -115,6 +115,16 @@ class PublicKeyBundle(BaseModel):
     node_id: str | None = None
 
 
+class SovereignStorageError(RuntimeError):
+    """Raised when an atomic key promotion fails after partial disk mutation.
+
+    Indicates that one of the two ``os.replace`` calls in the promotion phase
+    of :meth:`SovereignKeyManager.rotate_keypair` succeeded while the other
+    failed.  The exception message states whether structural disk consistency
+    was preserved via the rollback path.
+    """
+
+
 class SovereignKeyManager:
     """Manages the local-first Ed25519 identity lifecycle and cryptographic receipt operations.
 
@@ -549,9 +559,49 @@ class SovereignKeyManager:
                         pass
             raise
 
-        # Both staging writes committed — promote both atomically back-to-back.
+        # Capture the live private key bytes before any promotion so that a
+        # failure on the second os.replace can be undone atomically.
+        backup_pem_bytes = self.private_key_path.read_bytes()
+
+        # Promote the private key (.pem).
         os.replace(tmp_pem_path, self.private_key_path)
-        os.replace(tmp_pub_path, self.public_key_path)
+
+        # Promote the public key (.pub).  If this fails the .pem is already
+        # live with the new key, leaving a split identity on disk.  Roll back
+        # to the original .pem immediately to restore structural consistency.
+        try:
+            os.replace(tmp_pub_path, self.public_key_path)
+        except Exception as exc:
+            restore_tmp: str = ""
+            try:
+                with tempfile.NamedTemporaryFile(dir=self.key_dir, delete=False) as restore_file:
+                    restore_tmp = restore_file.name
+                    if hasattr(os, "fchmod"):
+                        os.fchmod(restore_file.fileno(), 0o600)
+                    else:
+                        os.chmod(restore_tmp, 0o600)
+                    restore_file.write(backup_pem_bytes)
+                    restore_file.flush()
+                    os.fsync(restore_file.fileno())
+                os.replace(restore_tmp, self.private_key_path)
+                restore_tmp = ""
+            except Exception:
+                if restore_tmp:
+                    try:
+                        os.remove(restore_tmp)
+                    except FileNotFoundError:
+                        pass
+            finally:
+                if tmp_pub_path:
+                    try:
+                        os.remove(tmp_pub_path)
+                    except FileNotFoundError:
+                        pass
+            raise SovereignStorageError(
+                f"Key rotation failed during public key promotion ({self.public_key_path}): "
+                f"{exc!r}.  The original private key has been restored — structural disk "
+                "consistency is preserved."
+            ) from exc
 
         # Update in-memory state only after both disk promotions succeed.
         self._private_key = new_private_key

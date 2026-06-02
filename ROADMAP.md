@@ -222,8 +222,9 @@ SovereignKeyManager.verify_succession(receipt, pre_rotation_key)  # → True
 **Delivered:**
 
 * [x] `SuccessionReceipt` TypedDict in `crypto.py` with `previous_public_key`, `new_public_key`, `rotation_timestamp`, and `succession_signature`
-* [x] `SovereignKeyManager.rotate_keypair() -> SuccessionReceipt` generating a fresh Ed25519 keypair, signing the canonical rotation payload with the outgoing private key, and atomically promoting both the new `.pem` and `.pub` via a transactional staging loop — both files are staged to disk before either live path is touched, eliminating the split-identity window
+* [x] `SovereignKeyManager.rotate_keypair() -> SuccessionReceipt` generating a fresh Ed25519 keypair, signing the canonical rotation payload with the outgoing private key, and atomically promoting both the new `.pem` and `.pub` via a two-phase hardened write: a transactional staging loop (both files staged before either is promoted) followed by a promotion phase with `SovereignStorageError` rollback (second `os.replace` failure restores the original `.pem` atomically)
 * [x] `SovereignKeyManager.verify_succession(receipt, trusted_previous_public_key) -> bool` static method enabling standalone auditor-side verification of any rotation event without live key material; the mandatory `trusted_previous_public_key` anchor prevents self-referential signature forgery
+* [x] `SovereignStorageError` custom exception raised exclusively when the promotion phase partially commits, carrying a human-readable consistency-preservation confirmation
 
 ### 6.4 Multi-Node Federated Verification
 

@@ -11,6 +11,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`SovereignStorageError` custom exception** (`crypto.py`): New `RuntimeError`
+  subclass raised exclusively when the promotion phase of `rotate_keypair()` fails
+  after partial disk mutation — specifically when the first `os.replace` (`.pem`)
+  succeeds but the second (`pub`) fails.  Carries a human-readable message describing
+  the failure and confirming whether structural disk consistency was preserved.
+  Exported from `sovereign_core` top-level namespace.
+
+- **`TestPromotionPhaseRollback`** — 5 new test cases in `test_verification_protocol.py`
+  that patch `sovereign_core.crypto.os.replace` to fail on the second call.  Assertions
+  cover: `SovereignStorageError` raised, original `.pem` bytes restored byte-for-byte,
+  in-memory key unchanged, zero orphaned temp files, and manager fully functional
+  (receipts and a subsequent clean rotation) after rollback.  Full workspace suite:
+  **125 passed, 1 skipped**.
+
 - **Phase 6.1 — `PublicKeyBundle` export format** (`crypto.py`, `gateway.py`):
   New `PublicKeyBundle` Pydantic v2 model in `sovereign_core.crypto` carrying four
   fields: `public_key` (base64-encoded raw Ed25519 key), `attestation` (a
@@ -74,7 +88,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `packages/sovereign-runtime/pyproject.toml`, root `pyproject.toml`) and
   `sovereign_core.__version__`.
 
+### Fixed
+
+- **`SovereignKeyManager` constructor parameter corrected in documentation**
+  (`README.md`, `packages/sovereign-core/README.md`): The "Key rotation with auditable
+  succession" snippet used `SovereignKeyManager(key_path=".keys/sovereign_identity.pem")`,
+  which would raise `TypeError` at runtime because the actual constructor parameter is
+  `key_dir` (a directory path, not a file path).  Both README files now show the correct
+  invocation: `SovereignKeyManager(key_dir=".keys")`.
+
 ### Security
+
+- **Fix 4 — Hardened key promotion phase with `SovereignStorageError` rollback** (`crypto.py`):
+  Even after the transactional staging loop (Fix 1) guarantees both files are synced to
+  disk before either is promoted, a failure on the second `os.replace` (the `.pub`
+  promotion) would leave the node with the new private key live but the old public key
+  on disk — an inconsistent pair.  The promotion phase now captures a byte-exact backup
+  of the original `.pem` before executing the first `os.replace`.  The second
+  `os.replace` is wrapped in a `try...except`.  On failure: the backup bytes are written
+  to a new temp file and atomically promoted back to the live `.pem` path via a nested
+  rollback write; the orphaned `.pub` staging file is removed in a `finally` block; a
+  `SovereignStorageError` is raised (not the raw `OSError`) with a message confirming
+  that structural disk consistency was preserved.
 
 - **Fix 1 — Hardened key rotation via atomic transactional staging loop** (`crypto.py`):
   The previous `rotate_keypair()` wrote the new `.pem` and `.pub` files via two
