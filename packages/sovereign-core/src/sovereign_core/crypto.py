@@ -6,7 +6,7 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, TypedDict, cast
 from pydantic import BaseModel, Field
 
 from cryptography.hazmat.primitives.asymmetric import ed25519
@@ -493,7 +493,7 @@ class SovereignKeyManager:
             self.load_or_generate_keypair()
 
         passphrase = self._resolve_node_secret()
-        old_private_key = self._private_key
+        old_private_key: ed25519.Ed25519PrivateKey = cast(ed25519.Ed25519PrivateKey, self._private_key)
         old_public_key_b64 = self.get_base64_public_key()
 
         # --- Pure compute: no I/O until the staging loop below ---

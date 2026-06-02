@@ -20,6 +20,7 @@ dev-dependencies = [
     "sovereign-core",
     "sovereign-runtime",
     "sovereign-fastapi",
+    "sovereign-sieve",
 ]
 
 # This block tells uv to resolve these dev-dependencies locally
@@ -27,6 +28,7 @@ dev-dependencies = [
 sovereign-core = { workspace = true }
 sovereign-runtime = { workspace = true }
 sovereign-fastapi = { workspace = true }
+sovereign-sieve = { workspace = true }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
