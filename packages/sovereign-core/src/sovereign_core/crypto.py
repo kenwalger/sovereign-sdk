@@ -13,6 +13,34 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives import serialization
 
 
+class SuccessionReceipt(TypedDict):
+    """Cryptographic audit record produced when a node rotates its Ed25519 identity keypair.
+
+    Every field is covered by ``succession_signature``, which is an Ed25519
+    signature produced by the *previous* private key over the canonical JSON
+    serialisation of ``previous_public_key``, ``new_public_key``, and
+    ``rotation_timestamp``.  This gives any auditor holding the old public key
+    the ability to verify that the rotation was authorised by the legitimate
+    keyholder.
+
+    Attributes:
+        previous_public_key: Base64-encoded raw Ed25519 public key that was
+            active before the rotation event.
+        new_public_key: Base64-encoded raw Ed25519 public key that is active
+            after the rotation event.
+        rotation_timestamp: ISO 8601 UTC timestamp captured at the moment the
+            rotation payload was signed.
+        succession_signature: Base64-encoded raw Ed25519 signature produced by
+            signing the canonical rotation payload with the *previous* private
+            key.
+    """
+
+    previous_public_key: str
+    new_public_key: str
+    rotation_timestamp: str
+    succession_signature: str
+
+
 class ForensicReceipt(TypedDict):
     """Immutable, cryptographically sealed provenance record for a single tool execution.
 
@@ -60,6 +88,41 @@ class ReceiptSchema(BaseModel):
     public_key: str
     signature: str
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class PublicKeyBundle(BaseModel):
+    """Structured export of an Ed25519 public verification key with self-signed attestation.
+
+    Carries sufficient information for a downstream consumer to independently
+    verify both the authenticity of the key (via the ``attestation`` receipt)
+    and the identity of the issuing node (via ``node_id``).  The bundle is
+    serialisable to JSON via Pydantic v2 :meth:`model_dump_json`.
+
+    Attributes:
+        public_key: Base64-encoded raw 32-byte Ed25519 public key.
+        attestation: A :class:`ForensicReceipt` dictionary that is
+            self-signed by the node — i.e. the signing key matches
+            ``public_key`` — proving that the bundle issuer controls the
+            corresponding private key.
+        issued_at: UTC ISO 8601 timestamp recorded at bundle creation time.
+        node_id: Optional human-readable label for the issuing node.
+            Defaults to ``None`` when not supplied.
+    """
+
+    public_key: str
+    attestation: dict[str, Any]
+    issued_at: str
+    node_id: str | None = None
+
+
+class SovereignStorageError(RuntimeError):
+    """Raised when an atomic key promotion fails after partial disk mutation.
+
+    Indicates that one of the two ``os.replace`` calls in the promotion phase
+    of :meth:`SovereignKeyManager.rotate_keypair` succeeded while the other
+    failed.  The exception message states whether structural disk consistency
+    was preserved via the rollback path.
+    """
 
 
 class SovereignKeyManager:
@@ -390,6 +453,251 @@ class SovereignKeyManager:
             signature=validated.signature,
             metadata=validated.metadata,
         )
+
+    def rotate_keypair(self) -> SuccessionReceipt:
+        """Rotates the node's Ed25519 identity keypair and mints a cryptographic succession receipt.
+
+        Generates a brand-new Ed25519 keypair, constructs a canonical rotation
+        payload covering ``previous_public_key``, ``new_public_key``, and
+        ``rotation_timestamp``, signs that payload with the *current* (outgoing)
+        private key, then atomically promotes both the new private-key PEM and the
+        public-key PEM via a transactional staging loop.
+
+        Staging loop invariant
+        ~~~~~~~~~~~~~~~~~~~~~~
+        Both files are written to isolated temp files *before* either live path is
+        touched.  Once and only once both staging writes successfully commit to disk
+        (``flush`` + ``fsync``), two back-to-back ``os.replace`` calls promote them.
+        If either staging write raises — disk-full, permission denied, I/O error —
+        the except handler deletes every staged file and re-raises without modifying
+        either live key path or the in-memory key state.  This eliminates the
+        split-identity window that existed when the two writes were promoted
+        independently inside separate try blocks.
+
+        The in-memory ``_private_key`` and ``_public_key`` slots are updated only
+        after both ``os.replace`` calls return, guaranteeing that a process crash
+        between the two promotions is detected on the next load via the on-disk
+        mismatch — a recoverable state — rather than an inconsistent in-memory one.
+
+        Returns:
+            A :class:`SuccessionReceipt` TypedDict whose ``succession_signature``
+            is an Ed25519 signature produced by the *outgoing* private key over
+            the canonical rotation payload, providing an auditable chain of
+            identity handoff.
+
+        Raises:
+            RuntimeError: If ``SOVEREIGN_NODE_SECRET`` is not set, or if the
+                keypair is not loaded and cannot be loaded from disk.
+        """
+        if not self._private_key:
+            self.load_or_generate_keypair()
+
+        passphrase = self._resolve_node_secret()
+        old_private_key = self._private_key
+        old_public_key_b64 = self.get_base64_public_key()
+
+        # --- Pure compute: no I/O until the staging loop below ---
+        new_private_key = ed25519.Ed25519PrivateKey.generate()
+        new_public_key = new_private_key.public_key()
+        new_public_key_b64 = base64.b64encode(
+            new_public_key.public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw,
+            )
+        ).decode("utf-8")
+
+        rotation_timestamp = datetime.now(timezone.utc).isoformat()
+        rotation_payload = json.dumps(
+            {
+                "new_public_key": new_public_key_b64,
+                "previous_public_key": old_public_key_b64,
+                "rotation_timestamp": rotation_timestamp,
+            },
+            sort_keys=True,
+        )
+        raw_sig = old_private_key.sign(rotation_payload.encode("utf-8"))
+        succession_signature = base64.b64encode(raw_sig).decode("utf-8")
+
+        new_pem = new_private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.BestAvailableEncryption(passphrase),
+        )
+        pub_pem = new_public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+
+        # --- Transactional staging loop ---
+        # Stage BOTH files in the key directory before promoting either live path.
+        tmp_pem_path: str = ""
+        tmp_pub_path: str = ""
+        try:
+            with tempfile.NamedTemporaryFile(dir=self.key_dir, delete=False) as tmp_pem:
+                tmp_pem_path = tmp_pem.name
+                if hasattr(os, "fchmod"):
+                    os.fchmod(tmp_pem.fileno(), 0o600)
+                else:
+                    os.chmod(tmp_pem_path, 0o600)
+                tmp_pem.write(new_pem)
+                tmp_pem.flush()
+                os.fsync(tmp_pem.fileno())
+
+            with tempfile.NamedTemporaryFile(dir=self.key_dir, delete=False) as tmp_pub:
+                tmp_pub_path = tmp_pub.name
+                tmp_pub.write(pub_pem)
+                tmp_pub.flush()
+                os.fsync(tmp_pub.fileno())
+
+        except Exception:
+            # Staging failed: purge every staged file without touching live targets.
+            for stale in (tmp_pem_path, tmp_pub_path):
+                if stale:
+                    try:
+                        os.remove(stale)
+                    except Exception as _cleanup_exc:
+                        print(
+                            f"⚠️  Warning: could not remove staging file {stale!r}: {_cleanup_exc!r}",
+                            file=sys.stderr,
+                        )
+            raise
+
+        # Capture the live private key bytes and promote the .pem.
+        # If either step fails, purge both staged files immediately so that
+        # no un-promoted key material is left on disk.
+        try:
+            backup_pem_bytes = self.private_key_path.read_bytes()
+            os.replace(tmp_pem_path, self.private_key_path)
+        except Exception:
+            for stale in (tmp_pem_path, tmp_pub_path):
+                try:
+                    os.remove(stale)
+                except Exception as _cleanup_exc:
+                    print(
+                        f"⚠️  Warning: could not remove staging file {stale!r}: {_cleanup_exc!r}",
+                        file=sys.stderr,
+                    )
+            raise
+
+        # Promote the public key (.pub).  If this fails the .pem is already
+        # live with the new key, leaving a split identity on disk.  Roll back
+        # to the original .pem immediately to restore structural consistency.
+        try:
+            os.replace(tmp_pub_path, self.public_key_path)
+        except Exception as exc:
+            rollback_succeeded = False
+            restore_tmp: str = ""
+            try:
+                with tempfile.NamedTemporaryFile(dir=self.key_dir, delete=False) as restore_file:
+                    restore_tmp = restore_file.name
+                    if hasattr(os, "fchmod"):
+                        os.fchmod(restore_file.fileno(), 0o600)
+                    else:
+                        os.chmod(restore_tmp, 0o600)
+                    restore_file.write(backup_pem_bytes)
+                    restore_file.flush()
+                    os.fsync(restore_file.fileno())
+                os.replace(restore_tmp, self.private_key_path)
+                restore_tmp = ""
+                rollback_succeeded = True
+            except Exception:
+                if restore_tmp:
+                    try:
+                        os.remove(restore_tmp)
+                    except Exception as _cleanup_exc:
+                        print(
+                            f"⚠️  Warning: could not remove restore temp file {restore_tmp!r}: {_cleanup_exc!r}",
+                            file=sys.stderr,
+                        )
+            finally:
+                if tmp_pub_path:
+                    try:
+                        os.remove(tmp_pub_path)
+                    except Exception as _cleanup_exc:
+                        print(
+                            f"⚠️  Warning: could not remove staged public key file {tmp_pub_path!r}: {_cleanup_exc!r}",
+                            file=sys.stderr,
+                        )
+            if rollback_succeeded:
+                raise SovereignStorageError(
+                    "Key rotation failed; structural disk consistency was preserved "
+                    "and the original private key was successfully restored."
+                ) from exc
+            raise SovereignStorageError(
+                "CRITICAL FAILURE: Key rotation failed and the system identity is in a "
+                "split-state. The original private key could not be restored. "
+                "Disk state may be corrupted."
+            ) from exc
+
+        # Update in-memory state only after both disk promotions succeed.
+        self._private_key = new_private_key
+        self._public_key = new_public_key
+
+        return SuccessionReceipt(
+            previous_public_key=old_public_key_b64,
+            new_public_key=new_public_key_b64,
+            rotation_timestamp=rotation_timestamp,
+            succession_signature=succession_signature,
+        )
+
+    @staticmethod
+    def verify_succession(
+        receipt: SuccessionReceipt,
+        trusted_previous_public_key: str,
+    ) -> bool:
+        """Validates that a key rotation event is cryptographically genuine.
+
+        Verification proceeds in two sequential steps:
+
+        1. **Anchor assertion**: ``receipt["previous_public_key"]`` is compared
+           byte-for-byte against ``trusted_previous_public_key``, which the
+           caller must supply from an out-of-band trusted source (e.g. a prior
+           receipt's ``new_public_key``, or the key stored before rotation was
+           initiated).  A mismatch returns ``False`` immediately, before any
+           cryptographic operation is attempted.  This guard breaks the
+           *self-referential loop* where an attacker could craft a receipt
+           signed by an arbitrary rogue keypair and include that keypair's
+           own public key in ``previous_public_key`` — causing the receipt to
+           verify against itself.
+
+        2. **Signature verification**: The canonical rotation payload
+           ``{"new_public_key": …, "previous_public_key": …,
+           "rotation_timestamp": …}`` is reconstructed and verified against
+           ``succession_signature`` using the key confirmed in step 1.
+
+        Args:
+            receipt: A :class:`SuccessionReceipt` produced by
+                :meth:`rotate_keypair`.
+            trusted_previous_public_key: The base64-encoded Ed25519 public key
+                that the caller independently knows was active *before* the
+                rotation event.  Must be sourced from a trusted record — not
+                from ``receipt`` itself.
+
+        Returns:
+            ``True`` if and only if the anchor assertion passes and the
+            Ed25519 signature is valid.  ``False`` for any anchor mismatch,
+            decoding error, signature failure, or structural anomaly.
+        """
+        try:
+            if receipt["previous_public_key"] != trusted_previous_public_key:
+                return False
+
+            old_pub_bytes = base64.b64decode(receipt["previous_public_key"])
+            sig_bytes = base64.b64decode(receipt["succession_signature"])
+            old_public_key = ed25519.Ed25519PublicKey.from_public_bytes(old_pub_bytes)
+
+            rotation_payload = json.dumps(
+                {
+                    "new_public_key": receipt["new_public_key"],
+                    "previous_public_key": receipt["previous_public_key"],
+                    "rotation_timestamp": receipt["rotation_timestamp"],
+                },
+                sort_keys=True,
+            )
+            old_public_key.verify(sig_bytes, rotation_payload.encode("utf-8"))
+            return True
+        except Exception:
+            return False
 
     @staticmethod
     def verify_receipt(

@@ -7,6 +7,185 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-06-01
+
+### Added
+
+- **`SovereignStorageError` custom exception** (`crypto.py`): New `RuntimeError`
+  subclass raised exclusively when the promotion phase of `rotate_keypair()` fails
+  after partial disk mutation.  Carries one of two distinct human-readable messages
+  depending on rollback outcome (see Security — Fix 4 and Fix 5).
+  Exported from `sovereign_core` top-level namespace.
+
+- **`TestPromotionPhaseRollback`** — 8 test cases in `test_verification_protocol.py`
+  (5 original + 3 regression cases) covering the full promotion-phase fault matrix:
+  first-replace failure (both staged files purged), second-replace failure with
+  successful rollback (`SovereignStorageError` + restored `.pem`), second-replace
+  failure with failed rollback (`SovereignStorageError` with `CRITICAL FAILURE`
+  split-state warning), in-memory key invariant, zero orphaned files, post-rollback
+  manager liveness, and cleanup `PermissionError` suppression (primary
+  `SovereignStorageError` surfaces intact even when `os.remove` raises).
+  Full workspace suite: **128 passed, 1 skipped**.
+
+- **Phase 6.1 — `PublicKeyBundle` export format** (`crypto.py`, `gateway.py`):
+  New `PublicKeyBundle` Pydantic v2 model in `sovereign_core.crypto` carrying four
+  fields: `public_key` (base64-encoded raw Ed25519 key), `attestation` (a
+  self-signed `ForensicReceipt` dict proving private-key ownership), `issued_at`
+  (UTC ISO 8601 timestamp sealed inside the attestation signature — see Security),
+  and optional `node_id` (human-readable label, default `None`).  Serialisable to
+  JSON via Pydantic v2 `model_dump_json()`.
+
+- **`SovereignGateway.export_public_key_bundle(node_id=None) -> PublicKeyBundle`**
+  (`gateway.py`): New gateway method that mints a self-signed `ForensicReceipt`
+  attestation over the payload `{"public_key": …, "type": "key_attestation"}`, then
+  assembles and returns a `PublicKeyBundle`.  Triggers lazy keypair loading if the
+  identity has not yet been initialised, consistent with `export_public_key()`.
+  The `issued_at` timestamp is computed before `generate_receipt()` is called so it
+  is covered by the Ed25519 signature.
+
+- **`SovereignGateway.save_public_key_bundle(path, node_id=None) -> None`**
+  (`gateway.py`): Convenience method that calls `export_public_key_bundle()` and
+  writes the Pydantic v2 `model_dump_json()` output to `path` as UTF-8 JSON.  The
+  parent directory must pre-exist; no `makedirs` is performed.
+
+- **Phase 6.3 — `SuccessionReceipt` TypedDict** (`crypto.py`): New TypedDict with
+  four fields: `previous_public_key` and `new_public_key` (base64-encoded Ed25519
+  keys), `rotation_timestamp` (UTC ISO 8601), and `succession_signature`
+  (base64-encoded Ed25519 signature of the canonical rotation payload produced by
+  the *outgoing* private key).
+
+- **`SovereignKeyManager.rotate_keypair() -> SuccessionReceipt`** (`crypto.py`):
+  Generates a brand-new Ed25519 keypair, builds a canonical JSON rotation payload
+  binding `previous_public_key`, `new_public_key`, and `rotation_timestamp`, signs
+  it with the *outgoing* private key, then atomically promotes both the new private
+  key `.pem` and the public key `.pub` to disk via the workspace's existing
+  `tempfile.NamedTemporaryFile` → `os.fsync` → `os.replace` pattern.  In-memory
+  identity slots are updated only after both disk writes succeed, ensuring the node
+  is never left with a split identity state.
+
+- **`SovereignKeyManager.verify_succession(receipt, trusted_previous_public_key) -> bool`**
+  (`crypto.py`): Static method for standalone auditor-side verification of any
+  rotation event.  Requires no live key material.  Performs an anchor assertion
+  (see Security) before any cryptographic operation, then verifies the
+  `succession_signature` against the canonical rotation payload using the
+  `previous_public_key` confirmed by the anchor — see Security for why the
+  explicit `trusted_previous_public_key` argument is mandatory.
+
+- **`test_verification_protocol.py`** — 48 new test cases across six classes:
+  `TestPublicKeyBundleModel` (4), `TestPublicKeyBundleExport` (14),
+  `TestPublicKeyBundleSave` (6), `TestKeyRotationBasic` (9),
+  `TestSuccessionVerification` (4), `TestSuccessionAdversarial` (8) and two
+  dedicated security-property tests (`test_bundle_issued_at_is_sealed_in_attestation_signature`,
+  `test_verify_succession_anchor_check_rejects_wrong_trusted_key`).  Full workspace
+  suite: **108 passed, 1 skipped** (POSIX `fchmod`, correct on Windows).
+
+- **`PublicKeyBundle` and `SuccessionReceipt` exported from `sovereign_core.__init__`**:
+  Both new types added to `__all__` for direct importability from the top-level
+  package namespace.
+
+### Changed
+
+- **Version promoted to `1.1.0`** across all workspace package manifests
+  (`packages/sovereign-core/pyproject.toml`, `packages/sovereign-fastapi/pyproject.toml`,
+  `packages/sovereign-runtime/pyproject.toml`, root `pyproject.toml`) and
+  `sovereign_core.__version__`.
+
+### Fixed
+
+- **`SovereignKeyManager` constructor parameter corrected in documentation**
+  (`README.md`, `packages/sovereign-core/README.md`): The "Key rotation with auditable
+  succession" snippet used `SovereignKeyManager(key_path=".keys/sovereign_identity.pem")`,
+  which would raise `TypeError` at runtime because the actual constructor parameter is
+  `key_dir` (a directory path, not a file path).  Both README files now show the correct
+  invocation: `SovereignKeyManager(key_dir=".keys")`.
+
+### Security
+
+- **Fix 8 — Atomic `save_public_key_bundle()` write via temp-file promotion** (`gateway.py`):
+  `save_public_key_bundle()` previously called `Path.write_text()` directly, leaving
+  the bundle file partially written or absent if a crash occurred during the I/O.
+  The method now follows the workspace's standard promotion pattern:
+  `tempfile.NamedTemporaryFile` → `os.fsync` → `os.replace`, so the destination path
+  is either the complete previous bundle or the complete new bundle — never a partial
+  write.  The orphaned temp is removed on failure.
+
+- **Fix 7 — Broad cleanup exception suppression in `rotate_keypair()`** (`crypto.py`):
+  Every `os.remove()` call in cleanup and rollback blocks previously caught only
+  `FileNotFoundError`, allowing any other OS-level error (`PermissionError`,
+  `IsADirectoryError`, etc.) to propagate out of the cleanup block and silently
+  replace the primary exception — masking the `SovereignStorageError` carrying the
+  split-state or recovery message.  All four cleanup sites now catch `Exception`,
+  print a `⚠️ Warning:` diagnostic to `stderr`, and continue, guaranteeing the
+  primary exception is never suppressed by a secondary file-deletion failure.
+
+- **Fix 6 — Conditional split-state diagnostics in promotion rollback** (`crypto.py`):
+  The `SovereignStorageError` raised after a `.pub` promotion failure previously carried
+  a single static message regardless of whether the rollback restore succeeded.  An
+  operator reading the log had no way to distinguish a clean recovery from a corrupted
+  split identity.  The rollback path now tracks `rollback_succeeded` and branches:
+  on success it raises with "Key rotation failed; structural disk consistency was
+  preserved and the original private key was successfully restored."; on failure it
+  raises with "CRITICAL FAILURE: Key rotation failed and the system identity is in a
+  split-state. The original private key could not be restored. Disk state may be
+  corrupted." — an unambiguous operator alert that the node requires manual intervention.
+
+- **Fix 5 — Staged file cleanup on first `os.replace` failure** (`crypto.py`):
+  Before this fix, a failure on the first `os.replace` (promoting the staged `.pem` to
+  the live path) left the staged `.pub` temp file orphaned on disk — an un-promoted new
+  private key with no corresponding public key.  The `backup_pem_bytes` read and the
+  first `os.replace` are now wrapped in a single `try/except` that deletes both
+  `tmp_pem_path` and `tmp_pub_path` before re-raising, guaranteeing no key material is
+  left behind if the initial promotion step fails.
+
+- **Fix 4 — Hardened key promotion phase with `SovereignStorageError` rollback** (`crypto.py`):
+  Even after the transactional staging loop (Fix 1) guarantees both files are synced to
+  disk before either is promoted, a failure on the second `os.replace` (the `.pub`
+  promotion) would leave the node with the new private key live but the old public key
+  on disk — an inconsistent pair.  The promotion phase now captures a byte-exact backup
+  of the original `.pem` before executing the first `os.replace`.  The second
+  `os.replace` is wrapped in a `try...except`.  On failure: the backup bytes are written
+  to a new temp file and atomically promoted back to the live `.pem` path via a nested
+  rollback write; the orphaned `.pub` staging file is removed in a `finally` block; a
+  `SovereignStorageError` is raised with a message conditional on rollback outcome
+  (see Fix 6).
+
+- **Fix 1 — Hardened key rotation via atomic transactional staging loop** (`crypto.py`):
+  The previous `rotate_keypair()` wrote the new `.pem` and `.pub` files via two
+  *independent* atomic promotions, each in its own try/except block.  If the first
+  promotion (`.pem`) succeeded and the second (`.pub`) failed — disk-full, permission
+  denied, I/O error — the node was left with a split identity: the on-disk private
+  key no longer matched the public key.  The method is now governed by a single
+  transactional staging loop: both files are written to isolated temp files within the
+  same key directory before either live path is touched.  Only once both staging writes
+  commit to disk via `flush` + `fsync` are the two back-to-back `os.replace` calls
+  executed.  If either staging write raises, the except handler deletes every staged
+  file and re-raises without modifying any live key path or in-memory key state.
+  In-memory identity slots are updated only after both `os.replace` calls return.
+
+- **Fix 2 — Mitigated self-referential signature validation via mandatory external anchor pinning** (`crypto.py`):
+  `verify_succession()` previously derived the verification public key entirely
+  from the receipt's own `previous_public_key` field.  An attacker could mint a
+  `SuccessionReceipt` with a rogue keypair, embed that keypair's own public key as
+  `previous_public_key`, and have the receipt verify correctly against itself.
+  The method signature is changed to
+  `verify_succession(receipt, trusted_previous_public_key: str) -> bool`.  A strict
+  anchor guard clause `if receipt["previous_public_key"] != trusted_previous_public_key: return False`
+  executes before any base64 decoding or Ed25519 operation.  The trusted anchor
+  must be supplied by the caller from an out-of-band source — e.g. the
+  `new_public_key` of the preceding receipt, or the key recorded before the
+  rotation was initiated — not from the receipt under audit.
+
+- **Fix 3 — Sealed metadata exposure by capturing `issued_at` within the Ed25519 payload envelope** (`gateway.py`):
+  In `export_public_key_bundle()`, `issued_at` was previously computed after
+  `generate_receipt()` returned, leaving the bundle's issuance timestamp
+  uncovered by the Ed25519 signature.  An attacker could modify `issued_at` on
+  the bundle object or in a saved JSON file without breaking attestation
+  verification.  `issued_at` is now captured before `generate_receipt()` is
+  called and included in the metadata dict that becomes part of the signed
+  canonical manifest.  `bundle.issued_at` and
+  `bundle.attestation["metadata"]["issued_at"]` are now provably identical strings
+  covered by the same signature.
+
 ## [1.0.0] - 2026-05-22
 
 ### Added

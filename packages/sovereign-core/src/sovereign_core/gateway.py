@@ -2,11 +2,13 @@
 import asyncio
 import os
 import re
+import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TypedDict, Union
 from pydantic import BaseModel, Field
 
-from .crypto import ForensicReceipt, SovereignKeyManager
+from .crypto import ForensicReceipt, PublicKeyBundle, SovereignKeyManager
 
 
 class SessionContext(BaseModel):
@@ -478,6 +480,96 @@ class SovereignGateway:
             total_tokens_saved=cumulative_saved,
         )
         return SovereignBoundaryResponse(content=content, receipt=receipt)
+
+    def export_public_key_bundle(self, node_id: str | None = None) -> PublicKeyBundle:
+        """Return a structured :class:`~sovereign_core.crypto.PublicKeyBundle` for this gateway identity.
+
+        The bundle carries the base64-encoded public key, a self-signed
+        :class:`~sovereign_core.crypto.ForensicReceipt` attestation (signed by
+        the node's private key over a payload that includes the public key
+        itself, proving private-key ownership), a UTC issuance timestamp, and an
+        optional human-readable node label.
+
+        Args:
+            node_id: Optional string label for the issuing node, e.g.
+                ``"node-alpha"`` or a UUID.  Defaults to ``None``.
+
+        Returns:
+            A :class:`~sovereign_core.crypto.PublicKeyBundle` Pydantic model
+            that can be serialised to JSON via :meth:`model_dump_json` and
+            shared with downstream verifiers.
+
+        Raises:
+            RuntimeError: If ``SOVEREIGN_NODE_SECRET`` is not set in the
+                environment and no keypair has been pre-loaded.
+        """
+        if not self._key_manager.has_identity:
+            self._key_manager.load_or_generate_keypair()
+        pub_key = self._key_manager.public_key
+        # issued_at is captured before generate_receipt() so it is included in
+        # the signed metadata manifest and fully covered by the Ed25519 signature.
+        issued_at = datetime.now(timezone.utc).isoformat()
+        attestation_payload: Dict[str, Any] = {
+            "public_key": pub_key,
+            "type": "key_attestation",
+        }
+        attestation = self._key_manager.generate_receipt(
+            payload=attestation_payload,
+            metadata={
+                "issued_at": issued_at,
+                "purpose": "key_attestation",
+                "source": "PublicKeyBundle",
+            },
+        )
+        return PublicKeyBundle(
+            public_key=pub_key,
+            attestation=dict(attestation),
+            issued_at=issued_at,
+            node_id=node_id,
+        )
+
+    def save_public_key_bundle(self, path: str, node_id: str | None = None) -> None:
+        """Serialise and write the public key bundle to disk as a JSON file.
+
+        Calls :meth:`export_public_key_bundle`, serialises the result to UTF-8
+        JSON, and atomically promotes it to ``path`` via the workspace's
+        standard ``tempfile.NamedTemporaryFile`` → ``os.fsync`` → ``os.replace``
+        pattern.  This guarantees the bundle file on disk is never left
+        partially written or in a corrupted state if a crash occurs during the
+        write.  The parent directory must already exist; no ``makedirs`` is
+        performed.
+
+        Args:
+            path: Destination file path for the JSON bundle.
+            node_id: Optional node label forwarded to
+                :meth:`export_public_key_bundle`.  Defaults to ``None``.
+
+        Raises:
+            RuntimeError: If ``SOVEREIGN_NODE_SECRET`` is not set.
+            OSError: If ``path`` cannot be written (e.g. parent directory does
+                not exist or insufficient permissions).
+        """
+        bundle = self.export_public_key_bundle(node_id=node_id)
+        json_bytes = bundle.model_dump_json().encode("utf-8")
+        dest = Path(path)
+        tmp_path: str = ""
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=dest.parent, delete=False, suffix=".tmp"
+            ) as tmp_file:
+                tmp_path = tmp_file.name
+                tmp_file.write(json_bytes)
+                tmp_file.flush()
+                os.fsync(tmp_file.fileno())
+            os.replace(tmp_path, dest)
+            tmp_path = ""
+        except Exception:
+            if tmp_path:
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+            raise
 
     def export_public_key(self) -> str:
         """Return the base64-encoded Ed25519 public verification key for this gateway identity.
