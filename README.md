@@ -91,11 +91,11 @@ from sovereign_sieve import pure_sieve, sieve_with_metrics
 
 # Drop-in string cleaner
 clean = pure_sieve("Hello! Please just help me analyze this dataset.")
-# → "help me analyze this dataset."
+# → "! help me analyze this dataset."
 
 # Cleaner + immediate FinOps telemetry
 result = sieve_with_metrics("Hi! I hope this helps. Please just run the pipeline.")
-print(result.text)                   # → "run the pipeline."
+print(result.text)                   # → "! helps. run the pipeline."
 print(result.raw_token_count)        # estimated tokens before sieve
 print(result.optimized_token_count)  # estimated tokens after sieve
 print(result.tax_savings_percentage) # e.g. 66.6667 (%)

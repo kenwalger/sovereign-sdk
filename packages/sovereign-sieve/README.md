@@ -30,7 +30,7 @@ from sovereign_sieve import pure_sieve
 raw = "Hello! Please just help me analyze this dataset."
 clean = pure_sieve(raw)
 print(clean)
-# → "help me analyze this dataset."
+# → "! help me analyze this dataset."
 ```
 
 ### `sieve_with_metrics` — cleaner + FinOps telemetry
@@ -42,7 +42,7 @@ result = sieve_with_metrics(
     "Hi! I hope this helps. Please just run the pipeline."
 )
 print(result.text)
-# → "run the pipeline."
+# → "! helps. run the pipeline."
 
 print(result.raw_token_count)        # estimated tokens before sieve
 print(result.optimized_token_count)  # estimated tokens after sieve

@@ -29,8 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `optimized_token_count`, and `tax_savings_percentage` (rounded to four decimal
     places) fields.
 
-- **`packages/sovereign-sieve/tests/test_sieve.py`** — 47 determinism, filler-stripping,
-  edge-case, and metrics-arithmetic test cases across seven classes
+- **`packages/sovereign-sieve/tests/test_sieve.py`** — 67 determinism, filler-stripping,
+  edge-case, and metrics-arithmetic test cases across nine classes
   (`TestPureSieveGreetingStripping`, `TestPureSieveHedgingAdverbs`,
   `TestPureSieveAffirmationFiller`, `TestPureSievePreamblePhrases`,
   `TestPureSieveMarkdownCleaning`, `TestPureSieveWhitespaceNormalization`,
