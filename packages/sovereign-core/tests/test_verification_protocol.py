@@ -2,8 +2,10 @@
 
 import base64
 import json
+import tempfile
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -695,4 +697,163 @@ class TestSuccessionAdversarial:
         )
         assert not SovereignKeyManager.verify_succession(swapped, pre_rotation_key), (
             "Swapping previous and new keys in the receipt must fail the anchor check"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Phase 6.3 — Transactional staging loop rollback regression tests
+# ---------------------------------------------------------------------------
+
+
+class TestKeyRotationAtomicStagingRollback:
+    """Regression tests for the transactional staging loop in rotate_keypair().
+
+    These tests simulate disk I/O failures during the staging phase and verify
+    that the rollback guarantee holds: neither live key file nor in-memory state
+    is mutated when either staging write raises.
+    """
+
+    def test_pub_staging_failure_leaves_pem_on_disk_unchanged(
+        self, loaded_manager: SovereignKeyManager
+    ) -> None:
+        """When the .pub staging write raises, the .pem on disk is byte-identical to before.
+
+        Validates the core transactional invariant: neither live path is touched
+        until both staging writes commit successfully.
+        """
+        original_pem = loaded_manager.private_key_path.read_bytes()
+
+        real_ntf = tempfile.NamedTemporaryFile
+        call_count = 0
+
+        def fail_on_second_call(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                raise OSError("Simulated disk failure on .pub staging write")
+            return real_ntf(**kwargs)
+
+        with patch("sovereign_core.crypto.tempfile.NamedTemporaryFile", side_effect=fail_on_second_call):
+            with pytest.raises(OSError, match="Simulated disk failure on .pub staging write"):
+                loaded_manager.rotate_keypair()
+
+        assert loaded_manager.private_key_path.read_bytes() == original_pem, (
+            "Private key PEM on disk must be unchanged after a .pub staging failure"
+        )
+
+    def test_pub_staging_failure_leaves_pub_on_disk_unchanged(
+        self, loaded_manager: SovereignKeyManager
+    ) -> None:
+        """When the .pub staging write raises, the .pub file on disk is unchanged."""
+        original_pub = loaded_manager.public_key_path.read_bytes() if loaded_manager.public_key_path.exists() else None
+
+        real_ntf = tempfile.NamedTemporaryFile
+        call_count = 0
+
+        def fail_on_second_call(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                raise OSError("Simulated disk failure on .pub staging write")
+            return real_ntf(**kwargs)
+
+        with patch("sovereign_core.crypto.tempfile.NamedTemporaryFile", side_effect=fail_on_second_call):
+            with pytest.raises(OSError):
+                loaded_manager.rotate_keypair()
+
+        if original_pub is not None:
+            assert loaded_manager.public_key_path.read_bytes() == original_pub, (
+                "Public key file on disk must be unchanged after a .pub staging failure"
+            )
+
+    def test_pem_staging_failure_leaves_both_files_unchanged(
+        self, loaded_manager: SovereignKeyManager
+    ) -> None:
+        """When the .pem staging write raises, both live key files remain byte-identical."""
+        original_pem = loaded_manager.private_key_path.read_bytes()
+        original_pub = loaded_manager.public_key_path.read_bytes() if loaded_manager.public_key_path.exists() else None
+
+        def fail_immediately(**kwargs):
+            raise OSError("Simulated disk failure on .pem staging write")
+
+        with patch("sovereign_core.crypto.tempfile.NamedTemporaryFile", side_effect=fail_immediately):
+            with pytest.raises(OSError, match="Simulated disk failure on .pem staging write"):
+                loaded_manager.rotate_keypair()
+
+        assert loaded_manager.private_key_path.read_bytes() == original_pem
+        if original_pub is not None:
+            assert loaded_manager.public_key_path.read_bytes() == original_pub
+
+    def test_pub_staging_failure_leaves_no_orphaned_temp_files(
+        self, loaded_manager: SovereignKeyManager
+    ) -> None:
+        """After a .pub staging failure, the except handler removes all staged temps."""
+        real_ntf = tempfile.NamedTemporaryFile
+        call_count = 0
+
+        def fail_on_second_call(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                raise OSError("Simulated disk failure on .pub staging write")
+            return real_ntf(**kwargs)
+
+        with patch("sovereign_core.crypto.tempfile.NamedTemporaryFile", side_effect=fail_on_second_call):
+            with pytest.raises(OSError):
+                loaded_manager.rotate_keypair()
+
+        orphaned = list(loaded_manager.key_dir.glob("tmp*"))
+        assert len(orphaned) == 0, (
+            f"Except handler must remove all staged temp files after failure; found: {orphaned}"
+        )
+
+    def test_pub_staging_failure_leaves_in_memory_key_state_unchanged(
+        self, loaded_manager: SovereignKeyManager
+    ) -> None:
+        """In-memory _private_key and _public_key are not swapped when staging fails."""
+        original_key = loaded_manager.public_key
+
+        real_ntf = tempfile.NamedTemporaryFile
+        call_count = 0
+
+        def fail_on_second_call(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                raise OSError("Simulated disk failure on .pub staging write")
+            return real_ntf(**kwargs)
+
+        with patch("sovereign_core.crypto.tempfile.NamedTemporaryFile", side_effect=fail_on_second_call):
+            with pytest.raises(OSError):
+                loaded_manager.rotate_keypair()
+
+        assert loaded_manager.public_key == original_key, (
+            "In-memory public key must remain the pre-rotation key after a staging failure"
+        )
+
+    def test_manager_still_mints_valid_receipts_after_failed_rotation(
+        self, loaded_manager: SovereignKeyManager
+    ) -> None:
+        """After a staging failure, the manager can still mint and verify receipts with the old key."""
+        original_key = loaded_manager.public_key
+
+        real_ntf = tempfile.NamedTemporaryFile
+        call_count = 0
+
+        def fail_on_second_call(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                raise OSError("Simulated disk failure on .pub staging write")
+            return real_ntf(**kwargs)
+
+        with patch("sovereign_core.crypto.tempfile.NamedTemporaryFile", side_effect=fail_on_second_call):
+            with pytest.raises(OSError):
+                loaded_manager.rotate_keypair()
+
+        payload: dict[str, Any] = {"recovery_check": "post_failure_receipt"}
+        receipt = loaded_manager.generate_receipt(payload)
+        valid = SovereignKeyManager.verify_receipt(receipt, payload, expected_public_key=original_key)
+        assert valid, (
+            "Manager must produce verifiable receipts with the original key after a failed rotation"
         )

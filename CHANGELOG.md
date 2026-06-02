@@ -76,15 +76,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- **Fix 1 — Atomic `.pub` file promotion in `rotate_keypair()`** (`crypto.py`):
-  The public key `.pub` file was previously written with a plain `open()` call,
-  creating a split-state window between the atomic `.pem` promotion and the `.pub`
-  write — a crash in that window would leave the two files mismatched.  The write
-  is now performed via the same `tempfile.NamedTemporaryFile` → `os.fsync` →
-  `os.replace` pattern used for the `.pem`, so both files land atomically and
-  cannot diverge.
+- **Fix 1 — Hardened key rotation via atomic transactional staging loop** (`crypto.py`):
+  The previous `rotate_keypair()` wrote the new `.pem` and `.pub` files via two
+  *independent* atomic promotions, each in its own try/except block.  If the first
+  promotion (`.pem`) succeeded and the second (`.pub`) failed — disk-full, permission
+  denied, I/O error — the node was left with a split identity: the on-disk private
+  key no longer matched the public key.  The method is now governed by a single
+  transactional staging loop: both files are written to isolated temp files within the
+  same key directory before either live path is touched.  Only once both staging writes
+  commit to disk via `flush` + `fsync` are the two back-to-back `os.replace` calls
+  executed.  If either staging write raises, the except handler deletes every staged
+  file and re-raises without modifying any live key path or in-memory key state.
+  In-memory identity slots are updated only after both `os.replace` calls return.
 
-- **Fix 2 — Self-referential succession verification loop broken** (`crypto.py`):
+- **Fix 2 — Mitigated self-referential signature validation via mandatory external anchor pinning** (`crypto.py`):
   `verify_succession()` previously derived the verification public key entirely
   from the receipt's own `previous_public_key` field.  An attacker could mint a
   `SuccessionReceipt` with a rogue keypair, embed that keypair's own public key as
@@ -97,7 +102,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `new_public_key` of the preceding receipt, or the key recorded before the
   rotation was initiated — not from the receipt under audit.
 
-- **Fix 3 — `issued_at` timestamp sealed inside the attestation signature** (`gateway.py`):
+- **Fix 3 — Sealed metadata exposure by capturing `issued_at` within the Ed25519 payload envelope** (`gateway.py`):
   In `export_public_key_bundle()`, `issued_at` was previously computed after
   `generate_receipt()` returned, leaving the bundle's issuance timestamp
   uncovered by the Ed25519 signature.  An attacker could modify `issued_at` on

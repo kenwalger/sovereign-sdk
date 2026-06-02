@@ -450,13 +450,24 @@ class SovereignKeyManager:
         Generates a brand-new Ed25519 keypair, constructs a canonical rotation
         payload covering ``previous_public_key``, ``new_public_key``, and
         ``rotation_timestamp``, signs that payload with the *current* (outgoing)
-        private key, then atomically promotes the new private key PEM over the
-        on-disk file using the same ``os.replace``/``os.fchmod`` pattern as
-        :meth:`load_or_generate_keypair`.
+        private key, then atomically promotes both the new private-key PEM and the
+        public-key PEM via a transactional staging loop.
 
-        The in-memory ``_private_key`` and ``_public_key`` slots are updated
-        only after the disk promotion succeeds, so a write failure leaves the
-        node in a consistent state with the old identity still active.
+        Staging loop invariant
+        ~~~~~~~~~~~~~~~~~~~~~~
+        Both files are written to isolated temp files *before* either live path is
+        touched.  Once and only once both staging writes successfully commit to disk
+        (``flush`` + ``fsync``), two back-to-back ``os.replace`` calls promote them.
+        If either staging write raises — disk-full, permission denied, I/O error —
+        the except handler deletes every staged file and re-raises without modifying
+        either live key path or the in-memory key state.  This eliminates the
+        split-identity window that existed when the two writes were promoted
+        independently inside separate try blocks.
+
+        The in-memory ``_private_key`` and ``_public_key`` slots are updated only
+        after both ``os.replace`` calls return, guaranteeing that a process crash
+        between the two promotions is detected on the next load via the on-disk
+        mismatch — a recoverable state — rather than an inconsistent in-memory one.
 
         Returns:
             A :class:`SuccessionReceipt` TypedDict whose ``succession_signature``
@@ -475,6 +486,7 @@ class SovereignKeyManager:
         old_private_key = self._private_key
         old_public_key_b64 = self.get_base64_public_key()
 
+        # --- Pure compute: no I/O until the staging loop below ---
         new_private_key = ed25519.Ed25519PrivateKey.generate()
         new_public_key = new_private_key.public_key()
         new_public_key_b64 = base64.b64encode(
@@ -485,7 +497,6 @@ class SovereignKeyManager:
         ).decode("utf-8")
 
         rotation_timestamp = datetime.now(timezone.utc).isoformat()
-
         rotation_payload = json.dumps(
             {
                 "new_public_key": new_public_key_b64,
@@ -502,55 +513,47 @@ class SovereignKeyManager:
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.BestAvailableEncryption(passphrase),
         )
-
-        tmp_path: str = ""
-        try:
-            with tempfile.NamedTemporaryFile(
-                dir=os.path.dirname(self.private_key_path),
-                delete=False,
-            ) as tmp:
-                tmp_path = tmp.name
-                if hasattr(os, "fchmod"):
-                    os.fchmod(tmp.fileno(), 0o600)
-                else:
-                    os.chmod(tmp_path, 0o600)
-                tmp.write(new_pem)
-                tmp.flush()
-                os.fsync(tmp.fileno())
-            os.replace(tmp_path, self.private_key_path)
-            tmp_path = ""
-        except Exception:
-            if tmp_path:
-                try:
-                    os.remove(tmp_path)
-                except FileNotFoundError:
-                    pass
-            raise
-
         pub_pem = new_public_key.public_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo,
         )
+
+        # --- Transactional staging loop ---
+        # Stage BOTH files in the key directory before promoting either live path.
+        tmp_pem_path: str = ""
         tmp_pub_path: str = ""
         try:
-            with tempfile.NamedTemporaryFile(
-                dir=os.path.dirname(self.public_key_path),
-                delete=False,
-            ) as tmp_pub:
+            with tempfile.NamedTemporaryFile(dir=self.key_dir, delete=False) as tmp_pem:
+                tmp_pem_path = tmp_pem.name
+                if hasattr(os, "fchmod"):
+                    os.fchmod(tmp_pem.fileno(), 0o600)
+                else:
+                    os.chmod(tmp_pem_path, 0o600)
+                tmp_pem.write(new_pem)
+                tmp_pem.flush()
+                os.fsync(tmp_pem.fileno())
+
+            with tempfile.NamedTemporaryFile(dir=self.key_dir, delete=False) as tmp_pub:
                 tmp_pub_path = tmp_pub.name
                 tmp_pub.write(pub_pem)
                 tmp_pub.flush()
                 os.fsync(tmp_pub.fileno())
-            os.replace(tmp_pub_path, self.public_key_path)
-            tmp_pub_path = ""
+
         except Exception:
-            if tmp_pub_path:
-                try:
-                    os.remove(tmp_pub_path)
-                except FileNotFoundError:
-                    pass
+            # Staging failed: purge every staged file without touching live targets.
+            for stale in (tmp_pem_path, tmp_pub_path):
+                if stale:
+                    try:
+                        os.remove(stale)
+                    except FileNotFoundError:
+                        pass
             raise
 
+        # Both staging writes committed — promote both atomically back-to-back.
+        os.replace(tmp_pem_path, self.private_key_path)
+        os.replace(tmp_pub_path, self.public_key_path)
+
+        # Update in-memory state only after both disk promotions succeed.
         self._private_key = new_private_key
         self._public_key = new_public_key
 

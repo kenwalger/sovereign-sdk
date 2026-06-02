@@ -202,24 +202,28 @@ sovereign-verify --receipt receipt.json --public-key <base64-encoded-public-key>
 
 A structured key rotation flow in `SovereignKeyManager` that generates a new keypair,
 mints a signed succession receipt (signed by the old key, containing the new public key),
-and atomically replaces the on-disk PEM.  The succession receipt provides a
-cryptographically auditable chain of identity handoff.
+and atomically promotes both the private-key PEM and public-key PEM via a transactional
+staging loop.  The succession receipt provides a cryptographically auditable chain of
+identity handoff.
 
 ```python
+# Capture the pre-rotation key from a trusted source before rotating
+pre_rotation_key = manager.public_key
+
 receipt = manager.rotate_keypair()
 # receipt["previous_public_key"]  — base64 key active before rotation
 # receipt["new_public_key"]       — base64 key active after rotation
 # receipt["rotation_timestamp"]   — UTC ISO 8601 timestamp
 # receipt["succession_signature"] — Ed25519 signature by the outgoing private key
 
-SovereignKeyManager.verify_succession(receipt)  # → True
+SovereignKeyManager.verify_succession(receipt, pre_rotation_key)  # → True
 ```
 
 **Delivered:**
 
 * [x] `SuccessionReceipt` TypedDict in `crypto.py` with `previous_public_key`, `new_public_key`, `rotation_timestamp`, and `succession_signature`
-* [x] `SovereignKeyManager.rotate_keypair() -> SuccessionReceipt` generating a fresh Ed25519 keypair, signing the canonical rotation payload with the outgoing private key, and atomically promoting the new PEM via `os.replace` + `os.fchmod`/`os.chmod`
-* [x] `SovereignKeyManager.verify_succession(receipt) -> bool` static method enabling standalone auditor-side verification of any rotation event without live key material
+* [x] `SovereignKeyManager.rotate_keypair() -> SuccessionReceipt` generating a fresh Ed25519 keypair, signing the canonical rotation payload with the outgoing private key, and atomically promoting both the new `.pem` and `.pub` via a transactional staging loop — both files are staged to disk before either live path is touched, eliminating the split-identity window
+* [x] `SovereignKeyManager.verify_succession(receipt, trusted_previous_public_key) -> bool` static method enabling standalone auditor-side verification of any rotation event without live key material; the mandatory `trusted_previous_public_key` anchor prevents self-referential signature forgery
 
 ### 6.4 Multi-Node Federated Verification
 
