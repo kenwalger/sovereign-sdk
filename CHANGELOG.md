@@ -17,13 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   depending on rollback outcome (see Security — Fix 4 and Fix 5).
   Exported from `sovereign_core` top-level namespace.
 
-- **`TestPromotionPhaseRollback`** — 7 test cases in `test_verification_protocol.py`
-  (5 original + 2 new regression cases) covering the full promotion-phase fault matrix:
+- **`TestPromotionPhaseRollback`** — 8 test cases in `test_verification_protocol.py`
+  (5 original + 3 regression cases) covering the full promotion-phase fault matrix:
   first-replace failure (both staged files purged), second-replace failure with
   successful rollback (`SovereignStorageError` + restored `.pem`), second-replace
   failure with failed rollback (`SovereignStorageError` with `CRITICAL FAILURE`
-  split-state warning), in-memory key invariant, zero orphaned files, and post-rollback
-  manager liveness.  Full workspace suite: **127 passed, 1 skipped**.
+  split-state warning), in-memory key invariant, zero orphaned files, post-rollback
+  manager liveness, and cleanup `PermissionError` suppression (primary
+  `SovereignStorageError` surfaces intact even when `os.remove` raises).
+  Full workspace suite: **128 passed, 1 skipped**.
 
 - **Phase 6.1 — `PublicKeyBundle` export format** (`crypto.py`, `gateway.py`):
   New `PublicKeyBundle` Pydantic v2 model in `sovereign_core.crypto` carrying four
@@ -98,6 +100,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   invocation: `SovereignKeyManager(key_dir=".keys")`.
 
 ### Security
+
+- **Fix 8 — Atomic `save_public_key_bundle()` write via temp-file promotion** (`gateway.py`):
+  `save_public_key_bundle()` previously called `Path.write_text()` directly, leaving
+  the bundle file partially written or absent if a crash occurred during the I/O.
+  The method now follows the workspace's standard promotion pattern:
+  `tempfile.NamedTemporaryFile` → `os.fsync` → `os.replace`, so the destination path
+  is either the complete previous bundle or the complete new bundle — never a partial
+  write.  The orphaned temp is removed on failure.
+
+- **Fix 7 — Broad cleanup exception suppression in `rotate_keypair()`** (`crypto.py`):
+  Every `os.remove()` call in cleanup and rollback blocks previously caught only
+  `FileNotFoundError`, allowing any other OS-level error (`PermissionError`,
+  `IsADirectoryError`, etc.) to propagate out of the cleanup block and silently
+  replace the primary exception — masking the `SovereignStorageError` carrying the
+  split-state or recovery message.  All four cleanup sites now catch `Exception`,
+  print a `⚠️ Warning:` diagnostic to `stderr`, and continue, guaranteeing the
+  primary exception is never suppressed by a secondary file-deletion failure.
 
 - **Fix 6 — Conditional split-state diagnostics in promotion rollback** (`crypto.py`):
   The `SovereignStorageError` raised after a `.pub` promotion failure previously carried

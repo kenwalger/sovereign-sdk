@@ -1052,3 +1052,39 @@ class TestPromotionPhaseRollback:
         assert "split-state" in msg, (
             f"Exception message must contain 'split-state' when rollback also fails; got: {msg!r}"
         )
+
+    def test_cleanup_permission_error_does_not_suppress_sovereign_storage_error(
+        self, loaded_manager: SovereignKeyManager
+    ) -> None:
+        """A PermissionError on os.remove(tmp_pub_path) during rollback does not suppress SovereignStorageError.
+
+        Validates the cleanup exception suppression defence: the finally block
+        catches the PermissionError and logs it to stderr, then the caller still
+        receives the primary SovereignStorageError with the correct restoration
+        message — not a raw PermissionError from the file cleanup.
+        """
+        real_replace = os.replace
+        replace_call_count = 0
+
+        def fail_on_second_replace(src: str, dst) -> None:
+            nonlocal replace_call_count
+            replace_call_count += 1
+            if replace_call_count == 2:
+                raise OSError("Simulated .pub promotion failure")
+            return real_replace(src, dst)
+
+        def always_raise_permission_error(path: str) -> None:
+            raise PermissionError(f"Simulated PermissionError on remove: {path!r}")
+
+        with patch("sovereign_core.crypto.os.replace", side_effect=fail_on_second_replace):
+            with patch("sovereign_core.crypto.os.remove", side_effect=always_raise_permission_error):
+                with pytest.raises(SovereignStorageError) as exc_info:
+                    loaded_manager.rotate_keypair()
+
+        msg = str(exc_info.value)
+        assert "Key rotation failed" in msg, (
+            f"Primary SovereignStorageError must surface intact despite cleanup PermissionError; got: {msg!r}"
+        )
+        assert exc_info.type is SovereignStorageError, (
+            "Exception type must be SovereignStorageError, not PermissionError from the cleanup block"
+        )

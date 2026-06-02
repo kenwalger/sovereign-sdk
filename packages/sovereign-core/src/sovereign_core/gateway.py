@@ -2,6 +2,7 @@
 import asyncio
 import os
 import re
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TypedDict, Union
@@ -530,9 +531,12 @@ class SovereignGateway:
     def save_public_key_bundle(self, path: str, node_id: str | None = None) -> None:
         """Serialise and write the public key bundle to disk as a JSON file.
 
-        Calls :meth:`export_public_key_bundle` and writes the Pydantic v2
-        ``model_dump_json()`` output to ``path``.  The file is encoded as
-        UTF-8.  The parent directory must already exist; no ``makedirs`` is
+        Calls :meth:`export_public_key_bundle`, serialises the result to UTF-8
+        JSON, and atomically promotes it to ``path`` via the workspace's
+        standard ``tempfile.NamedTemporaryFile`` → ``os.fsync`` → ``os.replace``
+        pattern.  This guarantees the bundle file on disk is never left
+        partially written or in a corrupted state if a crash occurs during the
+        write.  The parent directory must already exist; no ``makedirs`` is
         performed.
 
         Args:
@@ -546,7 +550,26 @@ class SovereignGateway:
                 not exist or insufficient permissions).
         """
         bundle = self.export_public_key_bundle(node_id=node_id)
-        Path(path).write_text(bundle.model_dump_json(), encoding="utf-8")
+        json_bytes = bundle.model_dump_json().encode("utf-8")
+        dest = Path(path)
+        tmp_path: str = ""
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=dest.parent, delete=False, suffix=".tmp"
+            ) as tmp_file:
+                tmp_path = tmp_file.name
+                tmp_file.write(json_bytes)
+                tmp_file.flush()
+                os.fsync(tmp_file.fileno())
+            os.replace(tmp_path, dest)
+            tmp_path = ""
+        except Exception:
+            if tmp_path:
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+            raise
 
     def export_public_key(self) -> str:
         """Return the base64-encoded Ed25519 public verification key for this gateway identity.

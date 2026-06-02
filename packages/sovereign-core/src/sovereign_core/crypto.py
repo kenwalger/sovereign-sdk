@@ -555,8 +555,11 @@ class SovereignKeyManager:
                 if stale:
                     try:
                         os.remove(stale)
-                    except FileNotFoundError:
-                        pass
+                    except Exception as _cleanup_exc:
+                        print(
+                            f"⚠️  Warning: could not remove staging file {stale!r}: {_cleanup_exc!r}",
+                            file=sys.stderr,
+                        )
             raise
 
         # Capture the live private key bytes and promote the .pem.
@@ -569,8 +572,11 @@ class SovereignKeyManager:
             for stale in (tmp_pem_path, tmp_pub_path):
                 try:
                     os.remove(stale)
-                except FileNotFoundError:
-                    pass
+                except Exception as _cleanup_exc:
+                    print(
+                        f"⚠️  Warning: could not remove staging file {stale!r}: {_cleanup_exc!r}",
+                        file=sys.stderr,
+                    )
             raise
 
         # Promote the public key (.pub).  If this fails the .pem is already
@@ -598,14 +604,20 @@ class SovereignKeyManager:
                 if restore_tmp:
                     try:
                         os.remove(restore_tmp)
-                    except FileNotFoundError:
-                        pass
+                    except Exception as _cleanup_exc:
+                        print(
+                            f"⚠️  Warning: could not remove restore temp file {restore_tmp!r}: {_cleanup_exc!r}",
+                            file=sys.stderr,
+                        )
             finally:
                 if tmp_pub_path:
                     try:
                         os.remove(tmp_pub_path)
-                    except FileNotFoundError:
-                        pass
+                    except Exception as _cleanup_exc:
+                        print(
+                            f"⚠️  Warning: could not remove staged public key file {tmp_pub_path!r}: {_cleanup_exc!r}",
+                            file=sys.stderr,
+                        )
             if rollback_succeeded:
                 raise SovereignStorageError(
                     "Key rotation failed; structural disk consistency was preserved "
