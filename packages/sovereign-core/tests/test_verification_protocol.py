@@ -994,3 +994,61 @@ class TestPromotionPhaseRollback:
         assert SovereignKeyManager.verify_succession(success_receipt, pre_key), (
             "A clean rotation following a rolled-back rotation must produce a valid succession receipt"
         )
+
+    def test_first_replace_failure_cleans_up_both_staging_files(
+        self, loaded_manager: SovereignKeyManager
+    ) -> None:
+        """When the first os.replace (.pem promotion) fails, both staged temp files are deleted.
+
+        Validates Task 1: the cleanup guard around the initial promotion step
+        purges both tmp_pem_path and tmp_pub_path so no un-promoted key material
+        is left on disk after the exception propagates.
+        """
+        real_replace = os.replace
+        call_count = 0
+
+        def fail_on_first_replace(src: str, dst) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise OSError("Simulated failure on .pem os.replace")
+            return real_replace(src, dst)
+
+        with patch("sovereign_core.crypto.os.replace", side_effect=fail_on_first_replace):
+            with pytest.raises(OSError, match="Simulated failure on .pem os.replace"):
+                loaded_manager.rotate_keypair()
+
+        orphaned = list(loaded_manager.key_dir.glob("tmp*"))
+        assert len(orphaned) == 0, (
+            f"Both staged temp files must be deleted when the first os.replace fails; found: {orphaned}"
+        )
+
+    def test_pub_promotion_and_rollback_both_fail_raises_critical_split_state_error(
+        self, loaded_manager: SovereignKeyManager
+    ) -> None:
+        """When .pub promotion and the .pem rollback os.replace both fail, the critical split-state message is raised.
+
+        Validates Task 2: the conditional error message path emits the CRITICAL FAILURE
+        warning when rollback_succeeded remains False after the nested restore attempt.
+        """
+        real_replace = os.replace
+        call_count = 0
+
+        def fail_from_second_call_onwards(src: str, dst) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                raise OSError("Simulated failure")
+            return real_replace(src, dst)
+
+        with patch("sovereign_core.crypto.os.replace", side_effect=fail_from_second_call_onwards):
+            with pytest.raises(SovereignStorageError) as exc_info:
+                loaded_manager.rotate_keypair()
+
+        msg = str(exc_info.value)
+        assert "CRITICAL FAILURE" in msg, (
+            f"Exception message must contain 'CRITICAL FAILURE' when rollback also fails; got: {msg!r}"
+        )
+        assert "split-state" in msg, (
+            f"Exception message must contain 'split-state' when rollback also fails; got: {msg!r}"
+        )

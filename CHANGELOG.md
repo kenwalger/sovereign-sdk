@@ -13,17 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`SovereignStorageError` custom exception** (`crypto.py`): New `RuntimeError`
   subclass raised exclusively when the promotion phase of `rotate_keypair()` fails
-  after partial disk mutation — specifically when the first `os.replace` (`.pem`)
-  succeeds but the second (`pub`) fails.  Carries a human-readable message describing
-  the failure and confirming whether structural disk consistency was preserved.
+  after partial disk mutation.  Carries one of two distinct human-readable messages
+  depending on rollback outcome (see Security — Fix 4 and Fix 5).
   Exported from `sovereign_core` top-level namespace.
 
-- **`TestPromotionPhaseRollback`** — 5 new test cases in `test_verification_protocol.py`
-  that patch `sovereign_core.crypto.os.replace` to fail on the second call.  Assertions
-  cover: `SovereignStorageError` raised, original `.pem` bytes restored byte-for-byte,
-  in-memory key unchanged, zero orphaned temp files, and manager fully functional
-  (receipts and a subsequent clean rotation) after rollback.  Full workspace suite:
-  **125 passed, 1 skipped**.
+- **`TestPromotionPhaseRollback`** — 7 test cases in `test_verification_protocol.py`
+  (5 original + 2 new regression cases) covering the full promotion-phase fault matrix:
+  first-replace failure (both staged files purged), second-replace failure with
+  successful rollback (`SovereignStorageError` + restored `.pem`), second-replace
+  failure with failed rollback (`SovereignStorageError` with `CRITICAL FAILURE`
+  split-state warning), in-memory key invariant, zero orphaned files, and post-rollback
+  manager liveness.  Full workspace suite: **127 passed, 1 skipped**.
 
 - **Phase 6.1 — `PublicKeyBundle` export format** (`crypto.py`, `gateway.py`):
   New `PublicKeyBundle` Pydantic v2 model in `sovereign_core.crypto` carrying four
@@ -99,6 +99,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Fix 6 — Conditional split-state diagnostics in promotion rollback** (`crypto.py`):
+  The `SovereignStorageError` raised after a `.pub` promotion failure previously carried
+  a single static message regardless of whether the rollback restore succeeded.  An
+  operator reading the log had no way to distinguish a clean recovery from a corrupted
+  split identity.  The rollback path now tracks `rollback_succeeded` and branches:
+  on success it raises with "Key rotation failed; structural disk consistency was
+  preserved and the original private key was successfully restored."; on failure it
+  raises with "CRITICAL FAILURE: Key rotation failed and the system identity is in a
+  split-state. The original private key could not be restored. Disk state may be
+  corrupted." — an unambiguous operator alert that the node requires manual intervention.
+
+- **Fix 5 — Staged file cleanup on first `os.replace` failure** (`crypto.py`):
+  Before this fix, a failure on the first `os.replace` (promoting the staged `.pem` to
+  the live path) left the staged `.pub` temp file orphaned on disk — an un-promoted new
+  private key with no corresponding public key.  The `backup_pem_bytes` read and the
+  first `os.replace` are now wrapped in a single `try/except` that deletes both
+  `tmp_pem_path` and `tmp_pub_path` before re-raising, guaranteeing no key material is
+  left behind if the initial promotion step fails.
+
 - **Fix 4 — Hardened key promotion phase with `SovereignStorageError` rollback** (`crypto.py`):
   Even after the transactional staging loop (Fix 1) guarantees both files are synced to
   disk before either is promoted, a failure on the second `os.replace` (the `.pub`
@@ -108,8 +127,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `os.replace` is wrapped in a `try...except`.  On failure: the backup bytes are written
   to a new temp file and atomically promoted back to the live `.pem` path via a nested
   rollback write; the orphaned `.pub` staging file is removed in a `finally` block; a
-  `SovereignStorageError` is raised (not the raw `OSError`) with a message confirming
-  that structural disk consistency was preserved.
+  `SovereignStorageError` is raised with a message conditional on rollback outcome
+  (see Fix 6).
 
 - **Fix 1 — Hardened key rotation via atomic transactional staging loop** (`crypto.py`):
   The previous `rotate_keypair()` wrote the new `.pem` and `.pub` files via two

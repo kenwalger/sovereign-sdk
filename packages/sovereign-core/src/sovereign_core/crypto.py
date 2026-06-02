@@ -559,12 +559,19 @@ class SovereignKeyManager:
                         pass
             raise
 
-        # Capture the live private key bytes before any promotion so that a
-        # failure on the second os.replace can be undone atomically.
-        backup_pem_bytes = self.private_key_path.read_bytes()
-
-        # Promote the private key (.pem).
-        os.replace(tmp_pem_path, self.private_key_path)
+        # Capture the live private key bytes and promote the .pem.
+        # If either step fails, purge both staged files immediately so that
+        # no un-promoted key material is left on disk.
+        try:
+            backup_pem_bytes = self.private_key_path.read_bytes()
+            os.replace(tmp_pem_path, self.private_key_path)
+        except Exception:
+            for stale in (tmp_pem_path, tmp_pub_path):
+                try:
+                    os.remove(stale)
+                except FileNotFoundError:
+                    pass
+            raise
 
         # Promote the public key (.pub).  If this fails the .pem is already
         # live with the new key, leaving a split identity on disk.  Roll back
@@ -572,6 +579,7 @@ class SovereignKeyManager:
         try:
             os.replace(tmp_pub_path, self.public_key_path)
         except Exception as exc:
+            rollback_succeeded = False
             restore_tmp: str = ""
             try:
                 with tempfile.NamedTemporaryFile(dir=self.key_dir, delete=False) as restore_file:
@@ -585,6 +593,7 @@ class SovereignKeyManager:
                     os.fsync(restore_file.fileno())
                 os.replace(restore_tmp, self.private_key_path)
                 restore_tmp = ""
+                rollback_succeeded = True
             except Exception:
                 if restore_tmp:
                     try:
@@ -597,10 +606,15 @@ class SovereignKeyManager:
                         os.remove(tmp_pub_path)
                     except FileNotFoundError:
                         pass
+            if rollback_succeeded:
+                raise SovereignStorageError(
+                    "Key rotation failed; structural disk consistency was preserved "
+                    "and the original private key was successfully restored."
+                ) from exc
             raise SovereignStorageError(
-                f"Key rotation failed during public key promotion ({self.public_key_path}): "
-                f"{exc!r}.  The original private key has been restored — structural disk "
-                "consistency is preserved."
+                "CRITICAL FAILURE: Key rotation failed and the system identity is in a "
+                "split-state. The original private key could not be restored. "
+                "Disk state may be corrupted."
             ) from exc
 
         # Update in-memory state only after both disk promotions succeed.
