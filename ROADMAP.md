@@ -43,11 +43,11 @@ from sovereign_sieve import pure_sieve, sieve_with_metrics
 
 # Drop-in string cleaner — no web framework or ML library required
 clean = pure_sieve("Hello! Please just help me analyze this dataset.")
-# → "help me analyze this dataset."
+# → "! help me analyze this dataset."
 
 # Cleaner with immediate FinOps telemetry
 result = sieve_with_metrics("Hi! I hope this helps. Please just run the pipeline.")
-print(result.text)                   # → "run the pipeline."
+print(result.text)                   # → "! helps. run the pipeline."
 print(result.tax_savings_percentage) # e.g. 66.6667 (%)
 ```
 
@@ -61,7 +61,7 @@ print(result.tax_savings_percentage) # e.g. 66.6667 (%)
   `tax_savings_percentage` fields
 * [x] `packages/sovereign-sieve/pyproject.toml` declaring `sovereign-sieve` as a workspace member
   at version `1.1.0` with zero runtime dependencies
-* [x] 47-case test suite in `packages/sovereign-sieve/tests/test_sieve.py` covering determinism,
+* [x] 67-case test suite in `packages/sovereign-sieve/tests/test_sieve.py` covering determinism,
   idempotency, all filler categories, edge cases, Unicode, malformed inputs, and metrics arithmetic
 
 ---
