@@ -411,7 +411,7 @@ instance/
 .scrapy
 
 # Sphinx documentation
-docs/_build/
+planning_docs/_build/
 
 # PyBuilder
 .pybuilder/
@@ -507,4 +507,4 @@ commit-message.txt
 folder_structure.txt
 tag-message.txt
 .keys/
-CLAUDE.md
+planning_docs/

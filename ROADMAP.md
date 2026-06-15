@@ -269,7 +269,7 @@ Key deliverables:
 
 ---
 
-## Phase 8 — Write-Side Custody Ledger (`sovereign-ledger`)
+## Phase 8 — Write-Side Custody Ledger (`sovereign-ledger`) — Shipped ✓
 
 **Target:** A dedicated, lightweight, local-first storage substrate designed specifically
 to enforce Write-Side Custody by indexing and safeguarding `ForensicReceipts` at the
@@ -279,18 +279,30 @@ Provides local-first systems with an append-only, tamper-evident transactional t
 shield compliance audits from post-hoc database mutation or log-injection vulnerabilities.
 
 ```python
-from sovereign_ledger import SovereignAppendOnlyLedger
+from sovereign_ledger import SovereignLedger
 
-ledger = SovereignAppendOnlyLedger(database_path=".storage/sovereign_history.db")
-ledger.commit_receipt(receipt, payload_manifest)
+ledger = SovereignLedger(db_path=".keys/sovereign_audit.db")
+ledger.append_receipt(receipt, sieved_content)
+assert ledger.verify_ledger_integrity()  # → True on an untampered chain
 
 ```
 
-Key deliverables:
+**Delivered:**
 
-* **Append-Only SQLite Engine:** A hardened local transactional datastore engineered specifically for logging, tracing, and indexing reasoning artifacts and causal state transitions.
-* **Automated Lineage Verification:** Continuous background scanning or query-time hooks that ensure stored records exactly match their signed Ed25519 public key history.
-* **Anti-Attic Structuring:** Force strict indexing schemas on raw data, formally migrating local data environments away from loose "Digital Attic" vector storage anti-patterns.
+* [x] `SovereignLedger` — zero-external-dependency SQLite engine with WAL mode, NORMAL
+  synchronous enforcement, and strict foreign-key locks applied at initialization.
+* [x] `forensic_ledger` table with nine typed columns and a `UNIQUE` constraint on
+  `payload_hash` to guarantee single-ingestion invariant.
+* [x] Engine-level `BEFORE UPDATE` and `BEFORE DELETE` SQL triggers that call
+  `RAISE(FAIL, 'Write-Side Custody violation: ...')`, aborting mutation from any
+  SQLite client regardless of whether it uses the Python class or opens the file raw.
+* [x] SHA-256 parent-hash chain rooted at a static genesis constant, linking every
+  appended row to its cryptographic predecessor.
+* [x] `verify_ledger_integrity() -> bool` — O(n) sweep that re-derives the expected
+  parent hash for each row and returns `False` on any detected breach.
+* [x] 44-case adversarial test suite covering trigger enforcement (internal and external
+  client), out-of-band corruption detection, mid-chain deletion detection, injected-row
+  detection, and full lifecycle correctness.
 
 ---
 

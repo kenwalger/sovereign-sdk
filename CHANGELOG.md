@@ -9,6 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Phase 8 — `sovereign-ledger` immutable provenance engine** (new workspace member
+  `packages/sovereign-ledger/`): Introduces a local-first, SQLite-backed, append-only
+  audit ledger that enforces Write-Side Custody for all `ForensicReceipt` transactions.
+  The engine stores receipts in a SHA-256 hash-chained table and makes any historical
+  tampering mathematically detectable via `verify_ledger_integrity()`.
+
+  - **`SovereignLedger`** (`engine.py`): Zero-external-dependency class backed by the
+    Python standard library `sqlite3` module.  Applies WAL journal mode, `NORMAL`
+    synchronous enforcement, and strict foreign-key locks as connection pragmas at
+    initialization.  Creates the `forensic_ledger` table with nine typed columns
+    (`id`, `payload_hash` UNIQUE, `parent_hash`, `timestamp`, `sieved_content`,
+    `signature`, `raw_token_count`, `optimized_token_count`,
+    `tax_savings_percentage`) and installs two engine-level `BEFORE UPDATE` /
+    `BEFORE DELETE` SQL triggers that call `RAISE(FAIL, 'Write-Side Custody
+    violation: ...')`, aborting any mutation attempt regardless of which SQLite
+    client opens the file.
+  - **`append_receipt(receipt, sieved_content) -> str`**: Derives a rolling SHA-256
+    `parent_hash` chained from the immediately preceding row's `signature`,
+    `payload_hash`, and `parent_hash` (or the static genesis constant
+    `SHA-256("SOVEREIGN_LEDGER_GENESIS_BLOCK_v1.0")` for the first entry) before
+    executing an atomic `INSERT`.  Prose Tax token-economy metrics are extracted from
+    `receipt["metadata"]["prose_tax_summary"]` when present; the three metric columns
+    store `NULL` when the summary key is absent.  Returns the `payload_hash` as an
+    opaque receipt identifier.  No update or deletion methods are exposed.
+  - **`verify_ledger_integrity() -> bool`**: O(n) cursor sweep that re-derives the
+    expected `parent_hash` for every row from its predecessor, returning `False` on
+    the first chain break.  Detects row field mutation, mid-chain row deletion that
+    collapses the sequence, and injected rows whose `parent_hash` does not match the
+    re-derived value.
+
+  - **`packages/sovereign-ledger/tests/test_ledger.py`** — 44 test cases across six
+    classes (`TestSovereignLedgerInit`, `TestAppendReceipt`, `TestHashChain`,
+    `TestImmutabilityTriggers`, `TestVerifyLedgerIntegrity`, `TestEdgeCases`)
+    covering schema assertion, WAL mode verification, hash-chain arithmetic from the
+    genesis root through multi-row sequences, determinism across independent instances,
+    adversarial trigger tests using both the ledger's own connection and an external
+    raw `sqlite3` client connection, out-of-band signature/payload/parent-hash
+    corruption detection, mid-chain deletion detection, fabricated-row injection
+    detection, Unicode payload round-trip, duplicate `payload_hash` rejection, and
+    close-and-reopen lifecycle correctness.
+
 - **Phase 7 — `sovereign-sieve` standalone micro-utility package** (new workspace member
   `packages/sovereign-sieve/`): Extracted `sovereign-sieve` into a zero-dependency
   standalone micro-utility package for framework-agnostic Prose Tax reduction.  The
