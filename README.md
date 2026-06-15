@@ -140,7 +140,7 @@ Two mechanisms enforce immutability:
 
 2. **SHA-256 hash chain** — each row's `parent_hash` is derived from the preceding row's `signature + payload_hash + parent_hash`. Modifying any field of any historical row, deleting a middle row, or injecting a fabricated row breaks the chain; `verify_ledger_integrity()` returns `False` on the first detected discrepancy.
 
-See [`docs/sovereign-ledger.md`](docs/sovereign-ledger.md) for the full schema reference, pragma table, threat model matrix, and integration pattern.
+See [`docs/sovereign-ledger.md`](planning_docs/sovereign-ledger.md) for the full schema reference, pragma table, threat model matrix, and integration pattern.
 
 ---
 

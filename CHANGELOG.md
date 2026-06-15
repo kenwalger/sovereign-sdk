@@ -39,16 +39,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     collapses the sequence, and injected rows whose `parent_hash` does not match the
     re-derived value.
 
-  - **`packages/sovereign-ledger/tests/test_ledger.py`** — 44 test cases across six
+  - **`packages/sovereign-ledger/tests/test_ledger.py`** — 46 test cases across seven
     classes (`TestSovereignLedgerInit`, `TestAppendReceipt`, `TestHashChain`,
-    `TestImmutabilityTriggers`, `TestVerifyLedgerIntegrity`, `TestEdgeCases`)
-    covering schema assertion, WAL mode verification, hash-chain arithmetic from the
-    genesis root through multi-row sequences, determinism across independent instances,
-    adversarial trigger tests using both the ledger's own connection and an external
-    raw `sqlite3` client connection, out-of-band signature/payload/parent-hash
-    corruption detection, mid-chain deletion detection, fabricated-row injection
-    detection, Unicode payload round-trip, duplicate `payload_hash` rejection, and
-    close-and-reopen lifecycle correctness.
+    `TestImmutabilityTriggers`, `TestVerifyLedgerIntegrity`, `TestEdgeCases`,
+    `TestConcurrentAppend`) covering schema assertion, WAL mode verification,
+    hash-chain arithmetic from the genesis root through multi-row sequences,
+    determinism across independent instances, adversarial trigger tests using both the
+    ledger's own connection and an external raw `sqlite3` client connection, out-of-band
+    signature/payload/parent-hash corruption detection, mid-chain deletion detection,
+    fabricated-row injection detection, Unicode payload round-trip, duplicate
+    `payload_hash` rejection, close-and-reopen lifecycle correctness, and a concurrent
+    stress test (`TestConcurrentAppend`) that spawns 8 threads each holding a separate
+    connection, synchronised at a `threading.Barrier` for maximum lock contention, then
+    asserts 100% chain linearity after all writers complete.
 
 - **Phase 7 — `sovereign-sieve` standalone micro-utility package** (new workspace member
   `packages/sovereign-sieve/`): Extracted `sovereign-sieve` into a zero-dependency

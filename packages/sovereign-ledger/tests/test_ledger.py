@@ -13,6 +13,7 @@ Invariants verified across every test class:
 """
 import hashlib
 import sqlite3
+import threading
 
 import pytest
 
@@ -507,7 +508,7 @@ class TestVerifyLedgerIntegrity:
         incorrect parent_hash must be caught during the sweep.
         """
         ledger, db_path = file_ledger
-        ledger.append_receipt(_make_recipe := _make_receipt("hash_INJ1", "sig_INJ1"), "content")
+        ledger.append_receipt(_make_receipt("hash_INJ1", "sig_INJ1"), "content")
 
         raw = sqlite3.connect(db_path)
         raw.execute(
@@ -607,3 +608,57 @@ class TestEdgeCases:
         cur = l2._conn.execute("SELECT COUNT(*) FROM forensic_ledger")
         assert cur.fetchone()[0] == 2
         l2.close()
+
+
+# ---------------------------------------------------------------------------
+# TestConcurrentAppend
+# ---------------------------------------------------------------------------
+class TestConcurrentAppend:
+    """Stress-test the BEGIN IMMEDIATE write serialisation guarantee.
+
+    Each thread opens its own SovereignLedger connection to the same file-backed
+    database — the most adversarial realistic concurrent-producer scenario.  A
+    threading.Barrier holds all threads at the starting gate until every one is
+    ready, maximising lock contention.  After all threads complete, the full
+    hash chain must be perfectly linear with no sibling parent_hash forks.
+    """
+
+    def test_concurrent_appends_produce_linear_chain(self, tmp_path):
+        db_path = str(tmp_path / "concurrent.db")
+
+        # Bootstrap the schema once before any worker spawns.
+        primary = SovereignLedger(db_path)
+        primary.close()
+
+        N = 8
+        errors: list[Exception] = []
+        barrier = threading.Barrier(N)
+
+        def append_one(i: int) -> None:
+            ledger = SovereignLedger(db_path)
+            try:
+                # Hold at the barrier so all N threads race simultaneously.
+                barrier.wait()
+                ledger.append_receipt(
+                    _make_receipt(f"hash_CONC_{i:03d}", f"sig_CONC_{i:03d}"),
+                    f"content_{i}",
+                )
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                ledger.close()
+
+        threads = [threading.Thread(target=append_one, args=(i,)) for i in range(N)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"Unexpected errors during concurrent append: {errors}"
+
+        verifier = SovereignLedger(db_path)
+        cur = verifier._conn.execute("SELECT COUNT(*) FROM forensic_ledger")
+        assert cur.fetchone()[0] == N
+        # BEGIN IMMEDIATE serialises writes — the chain must be perfectly linear.
+        assert verifier.verify_ledger_integrity() is True
+        verifier.close()

@@ -2,6 +2,7 @@
 import hashlib
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 
 # Root of the hash chain.  Hardcoded so that the genesis entry is verifiable
@@ -39,26 +40,40 @@ class SovereignLedger:
     """Append-only, hash-chained SQLite ledger for ForensicReceipt provenance.
 
     Enforces Write-Side Custody through two complementary mechanisms:
-    1. Engine-level BEFORE UPDATE / BEFORE DELETE triggers that abort any
-       mutation attempt regardless of which client opens the database file.
+
+    1. Engine-level ``BEFORE UPDATE`` / ``BEFORE DELETE`` triggers stored
+       inside the database file that abort any mutation attempt regardless of
+       which client opens the file.
     2. A SHA-256 parent-hash chain linking every row to its predecessor,
        making out-of-band filesystem tampering detectable via
-       ``verify_ledger_integrity()``.
+       :meth:`verify_ledger_integrity`.
 
-    The public interface is strictly append-only: ``append_receipt`` and
-    ``verify_ledger_integrity``.  No update or deletion methods exist.
+    The public interface is strictly append-only: :meth:`append_receipt` and
+    :meth:`verify_ledger_integrity`.  No update or deletion methods exist.
 
-    Args:
-        db_path: Filesystem path to the SQLite database file.  Use the
-            special value ``":memory:"`` for an in-process ephemeral store
-            (useful in tests).  Defaults to ``".keys/sovereign_audit.db"``.
+    Concurrent writers are serialised through ``BEGIN IMMEDIATE`` transactions,
+    which acquire an exclusive reserved lock before the chain tip is read.
+    This eliminates the TOCTOU window that would otherwise allow concurrent
+    threads or processes to derive identical ``parent_hash`` values (sibling
+    fork).  A 5-second ``busy_timeout`` allows writers to retry rather than
+    immediately raising :exc:`sqlite3.OperationalError` under momentary
+    contention.
+
+    :param db_path: Filesystem path to the SQLite database file.  Pass
+        ``":memory:"`` for an ephemeral in-process store (useful in tests).
+    :type db_path: str
     """
 
     def __init__(self, db_path: str = ".keys/sovereign_audit.db") -> None:
         if db_path != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._db_path = db_path
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        # isolation_level=None puts the connection in autocommit mode so that
+        # the explicit BEGIN IMMEDIATE in append_receipt() is not wrapped or
+        # interfered with by Python's implicit transaction machinery.
+        self._conn = sqlite3.connect(
+            db_path, check_same_thread=False, isolation_level=None
+        )
         self._conn.row_factory = sqlite3.Row
         self._apply_pragmas()
         self._bootstrap_schema()
@@ -71,86 +86,98 @@ class SovereignLedger:
         self._conn.execute("PRAGMA journal_mode = WAL;")
         self._conn.execute("PRAGMA synchronous = NORMAL;")
         self._conn.execute("PRAGMA foreign_keys = ON;")
+        # Retry for up to 5 seconds before surfacing a lock error, supporting
+        # concurrent multi-connection write workloads without immediate failure.
+        self._conn.execute("PRAGMA busy_timeout = 5000;")
 
     def _bootstrap_schema(self) -> None:
+        # executescript() explicitly ignores isolation_level and issues its
+        # own COMMIT before running the script, so it is safe in autocommit mode.
         self._conn.executescript(_DDL)
-
-    def _compute_parent_hash(self) -> str:
-        """Derives the parent_hash for the next row from the current chain tip.
-
-        Returns the static genesis hash when the ledger is empty.
-        """
-        cursor = self._conn.execute(
-            "SELECT signature, payload_hash, parent_hash "
-            "FROM forensic_ledger ORDER BY id DESC LIMIT 1"
-        )
-        tip = cursor.fetchone()
-        if tip is None:
-            return _GENESIS_HASH
-        chain_input = tip["signature"] + tip["payload_hash"] + tip["parent_hash"]
-        return hashlib.sha256(chain_input.encode("utf-8")).hexdigest()
 
     # ------------------------------------------------------------------
     # Public interface
     # ------------------------------------------------------------------
 
-    def append_receipt(self, receipt: dict, sieved_content: str) -> str:
+    def append_receipt(self, receipt: dict[str, Any], sieved_content: str) -> str:
         """Append an immutable ForensicReceipt entry to the ledger.
 
-        Derives a rolling SHA-256 ``parent_hash`` from the immediately
-        preceding row's cryptographic artifacts (``signature``,
-        ``payload_hash``, ``parent_hash``), or from the hardcoded genesis
-        block constant when the ledger is empty, then executes a single
-        atomic INSERT.
+        The chain-tip read and subsequent ``INSERT`` are tightly bound inside a
+        single ``BEGIN IMMEDIATE`` transaction.  Acquiring the reserved lock
+        *before* reading the tip eliminates the TOCTOU window that concurrent
+        writers would otherwise exploit to derive identical ``parent_hash``
+        values.
 
-        Prose Tax token-economy metrics are extracted from
-        ``receipt["metadata"]["prose_tax_summary"]`` when present; the
-        corresponding columns are stored as NULL when the key is absent.
+        The rolling ``parent_hash`` is the SHA-256 digest of the preceding
+        row's ``signature + payload_hash + parent_hash`` concatenation, or the
+        hardcoded genesis constant when the ledger is empty.  Prose Tax
+        token-economy metrics are extracted from
+        ``receipt["metadata"]["prose_tax_summary"]`` when present; the three
+        metric columns store ``NULL`` when the key is absent.
 
-        Args:
-            receipt: A ``ForensicReceipt``-compatible dict containing at
-                minimum ``payload_hash``, ``timestamp``, ``signature``, and
-                ``metadata`` keys.
-            sieved_content: The Prose-Tax-minimized string payload that was
-                signed to produce ``receipt``.
-
-        Returns:
-            The ``payload_hash`` of the newly appended row, usable as an
+        :param receipt: A ``ForensicReceipt``-compatible mapping containing at
+            minimum ``payload_hash``, ``timestamp``, ``signature``, and
+            ``metadata`` keys.
+        :type receipt: dict[str, Any]
+        :param sieved_content: The Prose-Tax-minimized string payload that was
+            signed to produce ``receipt``.
+        :type sieved_content: str
+        :return: The ``payload_hash`` of the newly appended row, usable as an
             opaque receipt identifier.
-
-        Raises:
-            sqlite3.IntegrityError: If ``receipt["payload_hash"]`` already
-                exists in the ledger (UNIQUE constraint enforcement).
+        :rtype: str
+        :raises sqlite3.IntegrityError: If ``receipt["payload_hash"]`` already
+            exists in the ledger (``UNIQUE`` constraint enforcement).
+        :raises sqlite3.OperationalError: If the database lock cannot be
+            acquired within the configured ``busy_timeout`` (transient write
+            collision under high concurrency).
         """
-        metadata = receipt.get("metadata") or {}
-        prose_tax = metadata.get("prose_tax_summary") or {}
+        metadata: dict[str, Any] = receipt.get("metadata") or {}
+        prose_tax: dict[str, Any] = metadata.get("prose_tax_summary") or {}
 
         raw_tokens = prose_tax.get("raw_token_count")
         optimized_tokens = prose_tax.get("optimized_token_count")
         savings_pct = prose_tax.get("tax_savings_percentage")
-
-        parent_hash = self._compute_parent_hash()
         payload_hash: str = receipt["payload_hash"]
 
-        self._conn.execute(
-            """
-            INSERT INTO forensic_ledger
-                (payload_hash, parent_hash, timestamp, sieved_content, signature,
-                 raw_token_count, optimized_token_count, tax_savings_percentage)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                payload_hash,
-                parent_hash,
-                receipt["timestamp"],
-                sieved_content,
-                receipt["signature"],
-                raw_tokens,
-                optimized_tokens,
-                savings_pct,
-            ),
-        )
-        self._conn.commit()
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            tip = self._conn.execute(
+                "SELECT signature, payload_hash, parent_hash "
+                "FROM forensic_ledger ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+
+            if tip is None:
+                parent_hash = _GENESIS_HASH
+            else:
+                chain_input = tip["signature"] + tip["payload_hash"] + tip["parent_hash"]
+                parent_hash = hashlib.sha256(chain_input.encode("utf-8")).hexdigest()
+
+            self._conn.execute(
+                """
+                INSERT INTO forensic_ledger
+                    (payload_hash, parent_hash, timestamp, sieved_content, signature,
+                     raw_token_count, optimized_token_count, tax_savings_percentage)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payload_hash,
+                    parent_hash,
+                    receipt["timestamp"],
+                    sieved_content,
+                    receipt["signature"],
+                    raw_tokens,
+                    optimized_tokens,
+                    savings_pct,
+                ),
+            )
+            self._conn.execute("COMMIT")
+        except Exception:
+            try:
+                self._conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+
         return payload_hash
 
     def verify_ledger_integrity(self) -> bool:
@@ -161,15 +188,15 @@ class SovereignLedger:
         ``payload_hash``, and ``parent_hash``.  The first row is validated
         against the static genesis hash constant.
 
-        Any discrepancy — whether caused by an UPDATE to an existing field,
-        a DELETE that collapses the row sequence, or the injection of a
+        Any discrepancy — whether caused by an ``UPDATE`` to an existing field,
+        a ``DELETE`` that collapses the row sequence, or the injection of a
         fabricated row with an incorrect parent pointer — causes an immediate
         ``False`` return.
 
-        Returns:
-            ``True`` if every row's recorded ``parent_hash`` matches the
+        :return: ``True`` if every row's recorded ``parent_hash`` matches the
             mathematically re-derived value; ``False`` on the first detected
             breach.
+        :rtype: bool
         """
         cursor = self._conn.execute(
             "SELECT payload_hash, parent_hash, signature "
@@ -191,5 +218,9 @@ class SovereignLedger:
         return True
 
     def close(self) -> None:
-        """Release the SQLite connection."""
+        """Release the SQLite connection.
+
+        :return: None
+        :rtype: None
+        """
         self._conn.close()
