@@ -109,11 +109,24 @@ class SovereignLedger:
         values.
 
         The rolling ``parent_hash`` is the SHA-256 digest of the preceding
-        row's ``signature + payload_hash + parent_hash`` concatenation, or the
-        hardcoded genesis constant when the ledger is empty.  Prose Tax
-        token-economy metrics are extracted from
-        ``receipt["metadata"]["prose_tax_summary"]`` when present; the three
-        metric columns store ``NULL`` when the key is absent.
+        row's full-payload canonical preimage::
+
+            SHA-256(
+                prev.signature
+                + prev.payload_hash
+                + prev.parent_hash
+                + prev.sieved_content
+                + prev.timestamp
+                + str(prev.tax_savings_percentage)   # "" when NULL
+            )
+
+        Sealing all six columns in the preimage means that any out-of-band
+        mutation of textual content or temporal metadata breaks the chain,
+        not only mutations of the cryptographic fields.  The genesis constant
+        is used as the parent for the first entry.  Prose Tax token-economy
+        metrics are extracted from ``receipt["metadata"]["prose_tax_summary"]``
+        when present; the three metric columns store ``NULL`` when the key is
+        absent.
 
         :param receipt: A ``ForensicReceipt``-compatible mapping containing at
             minimum ``payload_hash``, ``timestamp``, ``signature``, and
@@ -143,14 +156,23 @@ class SovereignLedger:
         self._conn.execute("BEGIN IMMEDIATE")
         try:
             tip = self._conn.execute(
-                "SELECT signature, payload_hash, parent_hash "
+                "SELECT signature, payload_hash, parent_hash, "
+                "sieved_content, timestamp, tax_savings_percentage "
                 "FROM forensic_ledger ORDER BY id DESC LIMIT 1"
             ).fetchone()
 
             if tip is None:
                 parent_hash = _GENESIS_HASH
             else:
-                chain_input = tip["signature"] + tip["payload_hash"] + tip["parent_hash"]
+                pct = tip["tax_savings_percentage"]
+                chain_input = (
+                    tip["signature"]
+                    + tip["payload_hash"]
+                    + tip["parent_hash"]
+                    + tip["sieved_content"]
+                    + tip["timestamp"]
+                    + ("" if pct is None else str(pct))
+                )
                 parent_hash = hashlib.sha256(chain_input.encode("utf-8")).hexdigest()
 
             self._conn.execute(
@@ -186,11 +208,20 @@ class SovereignLedger:
         """Perform a full hash-chain sweep to detect any historical tampering.
 
         Iterates every row in insertion order, re-deriving the expected
-        ``parent_hash`` for each entry from its predecessor's ``signature``,
-        ``payload_hash``, and ``parent_hash``.  The first row is validated
-        against the static genesis hash constant.
+        ``parent_hash`` for each entry from the same six-column canonical
+        preimage used at insertion time::
 
-        Any discrepancy — whether caused by an ``UPDATE`` to an existing field,
+            SHA-256(
+                row.signature
+                + row.payload_hash
+                + row.parent_hash
+                + row.sieved_content
+                + row.timestamp
+                + str(row.tax_savings_percentage)   # "" when NULL
+            )
+
+        The first row is validated against the static genesis hash constant.
+        Any discrepancy — whether caused by an ``UPDATE`` to any column,
         a ``DELETE`` that collapses the row sequence, or the injection of a
         fabricated row with an incorrect parent pointer — causes an immediate
         ``False`` return.
@@ -201,7 +232,8 @@ class SovereignLedger:
         :rtype: bool
         """
         cursor = self._conn.execute(
-            "SELECT payload_hash, parent_hash, signature "
+            "SELECT payload_hash, parent_hash, signature, "
+            "sieved_content, timestamp, tax_savings_percentage "
             "FROM forensic_ledger ORDER BY id ASC"
         )
         rows = cursor.fetchall()
@@ -210,8 +242,14 @@ class SovereignLedger:
         for row in rows:
             if row["parent_hash"] != expected_parent:
                 return False
+            pct = row["tax_savings_percentage"]
             chain_input = (
-                row["signature"] + row["payload_hash"] + row["parent_hash"]
+                row["signature"]
+                + row["payload_hash"]
+                + row["parent_hash"]
+                + row["sieved_content"]
+                + row["timestamp"]
+                + ("" if pct is None else str(pct))
             )
             expected_parent = hashlib.sha256(
                 chain_input.encode("utf-8")

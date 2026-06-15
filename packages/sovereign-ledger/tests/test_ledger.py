@@ -241,11 +241,21 @@ class TestHashChain:
         mem_ledger.append_receipt(_make_receipt("hash_B2", "sig_B2"), "content2")
 
         cur = mem_ledger._conn.execute(
-            "SELECT signature, payload_hash, parent_hash FROM forensic_ledger WHERE id = 1"
+            "SELECT signature, payload_hash, parent_hash, "
+            "sieved_content, timestamp, tax_savings_percentage "
+            "FROM forensic_ledger WHERE id = 1"
         )
         row1 = cur.fetchone()
+        pct = row1["tax_savings_percentage"]
         expected = hashlib.sha256(
-            (row1["signature"] + row1["payload_hash"] + row1["parent_hash"]).encode()
+            (
+                row1["signature"]
+                + row1["payload_hash"]
+                + row1["parent_hash"]
+                + row1["sieved_content"]
+                + row1["timestamp"]
+                + ("" if pct is None else str(pct))
+            ).encode()
         ).hexdigest()
 
         cur2 = mem_ledger._conn.execute(
@@ -258,11 +268,21 @@ class TestHashChain:
             mem_ledger.append_receipt(_make_receipt(f"hash_C{i}", f"sig_C{i}"), "c")
 
         cur = mem_ledger._conn.execute(
-            "SELECT signature, payload_hash, parent_hash FROM forensic_ledger WHERE id = 2"
+            "SELECT signature, payload_hash, parent_hash, "
+            "sieved_content, timestamp, tax_savings_percentage "
+            "FROM forensic_ledger WHERE id = 2"
         )
         row2 = cur.fetchone()
+        pct = row2["tax_savings_percentage"]
         expected = hashlib.sha256(
-            (row2["signature"] + row2["payload_hash"] + row2["parent_hash"]).encode()
+            (
+                row2["signature"]
+                + row2["payload_hash"]
+                + row2["parent_hash"]
+                + row2["sieved_content"]
+                + row2["timestamp"]
+                + ("" if pct is None else str(pct))
+            ).encode()
         ).hexdigest()
 
         cur3 = mem_ledger._conn.execute(
@@ -514,6 +534,46 @@ class TestVerifyLedgerIntegrity:
                 "injected content",
                 "injected_sig",
             ),
+        )
+        raw.commit()
+        raw.close()
+
+        assert ledger.verify_ledger_integrity() is False
+
+    def test_outofband_content_tamper_breaks_chain(self, file_ledger):
+        """Mutating only the sieved_content column of a historical row — leaving
+        all hash and signature columns intact — must break the chain because
+        sieved_content is now sealed inside the SHA-256 parent_hash preimage.
+        """
+        ledger, db_path = file_ledger
+        ledger.append_receipt(_make_receipt("hash_SC1", "sig_SC1"), "original sieved content")
+        ledger.append_receipt(_make_receipt("hash_SC2", "sig_SC2"), "content 2")
+        assert ledger.verify_ledger_integrity() is True
+
+        raw = sqlite3.connect(db_path)
+        raw.execute("DROP TRIGGER IF EXISTS prevent_update_forensic_ledger")
+        raw.execute(
+            "UPDATE forensic_ledger SET sieved_content = 'injected replacement text' WHERE id = 1"
+        )
+        raw.commit()
+        raw.close()
+
+        assert ledger.verify_ledger_integrity() is False
+
+    def test_outofband_timestamp_tamper_breaks_chain(self, file_ledger):
+        """Mutating only the timestamp column of a historical row — leaving all
+        hash and signature columns intact — must break the chain because
+        timestamp is now sealed inside the SHA-256 parent_hash preimage.
+        """
+        ledger, db_path = file_ledger
+        ledger.append_receipt(_make_receipt("hash_TS1", "sig_TS1"), "content 1")
+        ledger.append_receipt(_make_receipt("hash_TS2", "sig_TS2"), "content 2")
+        assert ledger.verify_ledger_integrity() is True
+
+        raw = sqlite3.connect(db_path)
+        raw.execute("DROP TRIGGER IF EXISTS prevent_update_forensic_ledger")
+        raw.execute(
+            "UPDATE forensic_ledger SET timestamp = '1970-01-01T00:00:00Z' WHERE id = 1"
         )
         raw.commit()
         raw.close()

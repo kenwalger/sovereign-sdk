@@ -300,10 +300,11 @@ assert ledger.verify_ledger_integrity()  # → True on an untampered chain
   appended row to its cryptographic predecessor.
 * [x] `verify_ledger_integrity() -> bool` — O(n) sweep that re-derives the expected
   parent hash for each row and returns `False` on any detected breach.
-* [x] 46-case adversarial test suite covering trigger enforcement (internal and external
-  client), out-of-band corruption detection, mid-chain deletion detection, injected-row
-  detection, full lifecycle correctness, and concurrent write serialisation via
-  `BEGIN IMMEDIATE` (8-thread stress test confirming zero chain fragmentation).
+* [x] 48-case adversarial test suite covering trigger enforcement (internal and external
+  client), out-of-band corruption detection (signature, payload hash, parent hash,
+  sieved content, timestamp), mid-chain deletion detection, injected-row detection,
+  full lifecycle correctness, and concurrent write serialisation via `BEGIN IMMEDIATE`
+  (8-thread stress test confirming zero chain fragmentation).
 
 ---
 
