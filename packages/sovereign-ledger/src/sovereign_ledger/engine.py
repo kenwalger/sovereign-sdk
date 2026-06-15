@@ -139,6 +139,7 @@ class SovereignLedger:
         savings_pct = prose_tax.get("tax_savings_percentage")
         payload_hash: str = receipt["payload_hash"]
 
+        committed = False
         self._conn.execute("BEGIN IMMEDIATE")
         try:
             tip = self._conn.execute(
@@ -171,12 +172,13 @@ class SovereignLedger:
                 ),
             )
             self._conn.execute("COMMIT")
-        except Exception:
-            try:
-                self._conn.execute("ROLLBACK")
-            except sqlite3.Error:
-                pass
-            raise
+            committed = True
+        finally:
+            if not committed:
+                try:
+                    self._conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
 
         return payload_hash
 

@@ -51,16 +51,6 @@ def _make_receipt(
     }
 
 
-def _make_minimal_receipt(payload_hash: str, signature: str) -> dict:
-    return {
-        "timestamp": "2026-06-15T00:00:00Z",
-        "payload_hash": payload_hash,
-        "public_key": "key==",
-        "signature": signature,
-        "metadata": {},
-    }
-
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
