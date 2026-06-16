@@ -220,6 +220,11 @@ class SovereignLedger:
                     # handle immediately so workers never hit "no such table".
                     conn.executescript(_DDL)
             except Exception:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
+                self._connections.remove(conn)
                 raise
             self._thread_local.conn = conn
         return conn
