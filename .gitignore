@@ -411,6 +411,7 @@ instance/
 .scrapy
 
 # Sphinx documentation
+docs/_build/
 planning_docs/_build/
 
 # PyBuilder

@@ -299,6 +299,9 @@ class SovereignLedger:
         :raises sqlite3.OperationalError: If the database lock cannot be
             acquired within the configured ``busy_timeout`` (transient write
             collision under high concurrency).
+        :raises SovereignStorageError: If this :class:`SovereignLedger` instance
+            has been closed via :meth:`close` prior to the call; raised by
+            :meth:`_get_conn` before any database operation is attempted.
         """
         metadata: dict[str, Any] = receipt.get("metadata") or {}  # :type: Any — caller-defined JSON sub-object; field keys are producer-specific and cannot be statically narrowed at the ledger boundary.
         prose_tax: dict[str, Any] = metadata.get("prose_tax_summary") or {}  # :type: Any — optional telemetry bag with no enforced schema; field presence varies per producing gateway.
@@ -419,6 +422,9 @@ class SovereignLedger:
             mathematically re-derived value and the optional tip anchor matches;
             ``False`` on the first detected breach.
         :rtype: bool
+        :raises SovereignStorageError: If this :class:`SovereignLedger` instance
+            has been closed via :meth:`close` prior to the call; raised by
+            :meth:`_get_conn` before any database operation is attempted.
         """
         expected_parent = _GENESIS_HASH
         last_payload_hash: str | None = None
