@@ -20,8 +20,10 @@ class SovereignEnvelope:
     and persisted to the VFS on every ``seal()`` call.  On construction, any
     previously persisted counter is restored from the sequence file, enabling
     the counter to resume monotonically after a hardware reboot rather than
-    resetting to zero and opening a replay window.  File I/O failures degrade
-    gracefully to RAM-only tracking without raising.
+    resetting to zero and opening a replay window.  File-access failures
+    (``OSError``) degrade gracefully to a zero counter without raising.
+    Corrupt or non-integer sequence file contents propagate as ``ValueError``
+    to prevent a silent rollback to zero that would open a replay window.
 
     :param node_id: Immutable identifier for the originating sensor node.
     :type node_id: str
@@ -45,9 +47,11 @@ class SovereignEnvelope:
         self._sequence: int = 0
         try:
             with open(self._sequence_file, "r") as f:
-                self._sequence = int(f.read().strip())
-        except Exception:
-            self._sequence = 0
+                data: str = f.read()
+        except OSError:
+            pass
+        else:
+            self._sequence = int(data.strip())
 
     def seal(self, timestamp: str, payload: dict) -> bytes:
         """Canonicalize, sign, and serialize a sensor observation into a wire envelope.

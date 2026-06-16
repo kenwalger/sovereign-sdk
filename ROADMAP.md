@@ -363,10 +363,11 @@ wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 2
   (`_MOCK_KEY`) when the key file is absent (`OSError`), keeping desktop CI operational without
   a provisioned key store; returns raw 32-byte HMAC-SHA256 digest bytes (no encoding); declares
   `algorithm() -> "hmac-sha256"`; not suitable for production custody chains.
-* [x] `ESP32HardwareDriver` (`drivers/esp32_hardware.py`) — placeholder shell class establishing
+* [ ] `ESP32HardwareDriver` (`drivers/esp32_hardware.py`) — v0.1 HAL skeleton establishing
   the class contract and import surface for the ESP32 on-chip ECC accelerator; declares
-  `algorithm() -> "ecdsa-p256"` as a forward-looking identifier; full register-level
-  engineering deferred to the next sprint.
+  `algorithm() -> "ecdsa-p256"` as a forward-looking algorithm identifier; `sign()` raises
+  `NotImplementedError` — full register-level engineering is deferred to the next sprint
+  and this driver must not be wired into any production custody chain in its current state.
 * [x] `packages/sovereign-sensor/pyproject.toml` — zero runtime dependencies; targets Python 3.12
   for desktop test compatibility; restricts internal library code to standard MicroPython built-ins
   (`json`, `sys`, `machine`, `hashlib`, `binascii`).

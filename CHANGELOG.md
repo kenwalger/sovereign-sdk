@@ -50,11 +50,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     Returns raw 32-byte HMAC-SHA256 digest bytes (no encoding applied; hex encoding is the
     envelope layer's exclusive responsibility).  Declares `algorithm() -> "hmac-sha256"`.
     Not intended for production custody chains.
-  - **`ESP32HardwareDriver`** (`drivers/esp32_hardware.py`): Placeholder shell class establishing
-    the class contract and import surface for the ESP32 on-chip ECC accelerator via MicroPython
-    `machine` and `hashlib` HAL bindings.  Declares `algorithm() -> "ecdsa-p256"` as a
-    forward-looking identifier for the hardware signing primitive.  Full low-level register-level
-    engineering deferred to the next sprint.
+  - **`ESP32HardwareDriver`** (`drivers/esp32_hardware.py`): v0.1 HAL skeleton class
+    establishing the class contract and import surface for the ESP32 on-chip ECC accelerator
+    via MicroPython `machine` and `hashlib` HAL bindings.  Declares `algorithm() -> "ecdsa-p256"`
+    as a forward-looking identifier for the hardware signing primitive.  `sign()` raises
+    `NotImplementedError`; full register-level engineering is deferred to the next sprint.
+    This driver must not be wired into any production custody chain in its current state.
 
   - **`packages/sovereign-sensor/tests/test_sensor.py`** — 21 test cases across two classes
     (`TestBootstrap`: 3 cases; `TestEnvelopeSeal`: 18 cases) verifying: platform auto-detection

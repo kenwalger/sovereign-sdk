@@ -15,9 +15,15 @@ Invariants verified across every test:
 - Signature is hex-encoded by the envelope layer (not the driver), guaranteeing
   that all bytes 0x00-0xFF map safely to alphanumeric characters without
   UnicodeDecodeError on constrained MicroPython silicon.
+- sign() raises RuntimeError if called before initialize_hardware(), preventing
+  silent keyless HMAC packets from bad setup sequencing.
+- Every test uses an isolated tmp_path sequence file so no test run pollutes
+  the workspace VFS state or interferes with concurrent test execution.
 """
 import json
 from pathlib import Path
+
+import pytest
 
 from sovereign_sensor import SovereignEnvelope, bootstrap_sensor_node
 from sovereign_sensor.drivers.software_fallback import SoftwareFallbackDriver
@@ -32,12 +38,14 @@ _PAYLOAD: dict = {"sensor": "temperature", "value": 42, "unit": "C"}
 class TestBootstrap:
     """Verify platform detection and driver selection logic."""
 
-    def test_returns_sovereign_envelope_instance(self) -> None:
+    def test_returns_sovereign_envelope_instance(self, tmp_path: Path) -> None:
         """bootstrap_sensor_node must return a SovereignEnvelope on any non-ESP32 host."""
-        result = bootstrap_sensor_node(_NODE_ID, _KEY_PATH)
+        result = bootstrap_sensor_node(
+            _NODE_ID, _KEY_PATH, sequence_file=str(tmp_path / ".sovereign_sequence")
+        )
         assert isinstance(result, SovereignEnvelope)
 
-    def test_non_esp32_platform_selects_software_fallback(self) -> None:
+    def test_non_esp32_platform_selects_software_fallback(self, tmp_path: Path) -> None:
         """Desktop CI must bind SoftwareFallbackDriver, verified via the public algorithm() contract.
 
         The software fallback declares "hmac-sha256" via its algorithm() method,
@@ -45,60 +53,92 @@ class TestBootstrap:
         value confirms driver selection through the public HAL interface without
         piercing private envelope attributes.
         """
-        envelope = bootstrap_sensor_node(_NODE_ID, _KEY_PATH)
+        envelope = bootstrap_sensor_node(
+            _NODE_ID, _KEY_PATH, sequence_file=str(tmp_path / ".sovereign_sequence")
+        )
         parsed = json.loads(envelope.seal(_TIMESTAMP, _PAYLOAD))
         assert parsed["alg"] == "hmac-sha256"
 
-    def test_software_driver_is_initialized_after_bootstrap(self) -> None:
+    def test_software_driver_is_initialized_after_bootstrap(self, tmp_path: Path) -> None:
         """bootstrap_sensor_node must call initialize_hardware() before returning.
 
         Verified by confirming that seal() completes without exception on the
         first call: a driver whose initialize_hardware() was never invoked would
-        be unable to service sign() requests.
+        raise RuntimeError and be unable to service sign() requests.
         """
-        envelope = bootstrap_sensor_node(_NODE_ID, _KEY_PATH)
+        envelope = bootstrap_sensor_node(
+            _NODE_ID, _KEY_PATH, sequence_file=str(tmp_path / ".sovereign_sequence")
+        )
         result = envelope.seal(_TIMESTAMP, _PAYLOAD)
         assert isinstance(result, bytes)
+
+
+class TestDriverGuard:
+    """Verify that SoftwareFallbackDriver enforces its initialization contract."""
+
+    def test_sign_raises_runtime_error_if_not_initialized(self) -> None:
+        """sign() must raise RuntimeError when called before initialize_hardware().
+
+        Verifies the initialization guard that prevents silent, keyless HMAC
+        packets arising from bad setup sequencing.  A driver that has never had
+        initialize_hardware() invoked must not fall back to an empty key or
+        produce any output.
+        """
+        driver = SoftwareFallbackDriver(_KEY_PATH)
+        with pytest.raises(RuntimeError, match="initialize_hardware"):
+            driver.sign(b"test-preimage")
 
 
 class TestEnvelopeSeal:
     """Verify structural and semantic correctness of sealed envelopes."""
 
-    def test_seal_returns_bytes(self) -> None:
+    def test_seal_returns_bytes(self, tmp_path: Path) -> None:
         """seal() must return raw bytes suitable for wire transmission."""
-        envelope = bootstrap_sensor_node(_NODE_ID, _KEY_PATH)
+        envelope = bootstrap_sensor_node(
+            _NODE_ID, _KEY_PATH, sequence_file=str(tmp_path / ".sovereign_sequence")
+        )
         result = envelope.seal(_TIMESTAMP, _PAYLOAD)
         assert isinstance(result, bytes)
 
-    def test_seal_produces_valid_json(self) -> None:
+    def test_seal_produces_valid_json(self, tmp_path: Path) -> None:
         """Sealed bytes must parse as valid JSON without error."""
-        envelope = bootstrap_sensor_node(_NODE_ID, _KEY_PATH)
+        envelope = bootstrap_sensor_node(
+            _NODE_ID, _KEY_PATH, sequence_file=str(tmp_path / ".sovereign_sequence")
+        )
         result = envelope.seal(_TIMESTAMP, _PAYLOAD)
         parsed = json.loads(result)
         assert isinstance(parsed, dict)
 
-    def test_seal_envelope_contains_exactly_seven_mandatory_keys(self) -> None:
+    def test_seal_envelope_contains_exactly_seven_mandatory_keys(self, tmp_path: Path) -> None:
         """Transmission envelope must contain exactly: v, n, t, q, alg, d, s."""
-        envelope = bootstrap_sensor_node(_NODE_ID, _KEY_PATH)
+        envelope = bootstrap_sensor_node(
+            _NODE_ID, _KEY_PATH, sequence_file=str(tmp_path / ".sovereign_sequence")
+        )
         parsed = json.loads(envelope.seal(_TIMESTAMP, _PAYLOAD))
         assert set(parsed.keys()) == {"v", "n", "t", "q", "alg", "d", "s"}
 
-    def test_seal_protocol_version_is_integer_one(self) -> None:
+    def test_seal_protocol_version_is_integer_one(self, tmp_path: Path) -> None:
         """'v' field must be the integer 1, not the string '1'."""
-        envelope = bootstrap_sensor_node(_NODE_ID, _KEY_PATH)
+        envelope = bootstrap_sensor_node(
+            _NODE_ID, _KEY_PATH, sequence_file=str(tmp_path / ".sovereign_sequence")
+        )
         parsed = json.loads(envelope.seal(_TIMESTAMP, _PAYLOAD))
         assert parsed["v"] == 1
         assert isinstance(parsed["v"], int)
 
-    def test_seal_node_id_field_matches_constructor(self) -> None:
+    def test_seal_node_id_field_matches_constructor(self, tmp_path: Path) -> None:
         """'n' field must be the node_id supplied to bootstrap_sensor_node."""
-        envelope = bootstrap_sensor_node(_NODE_ID, _KEY_PATH)
+        envelope = bootstrap_sensor_node(
+            _NODE_ID, _KEY_PATH, sequence_file=str(tmp_path / ".sovereign_sequence")
+        )
         parsed = json.loads(envelope.seal(_TIMESTAMP, _PAYLOAD))
         assert parsed["n"] == _NODE_ID
 
-    def test_seal_timestamp_field_is_preserved_verbatim(self) -> None:
+    def test_seal_timestamp_field_is_preserved_verbatim(self, tmp_path: Path) -> None:
         """'t' field must be the exact timestamp string passed to seal()."""
-        envelope = bootstrap_sensor_node(_NODE_ID, _KEY_PATH)
+        envelope = bootstrap_sensor_node(
+            _NODE_ID, _KEY_PATH, sequence_file=str(tmp_path / ".sovereign_sequence")
+        )
         parsed = json.loads(envelope.seal(_TIMESTAMP, _PAYLOAD))
         assert parsed["t"] == _TIMESTAMP
 
@@ -131,40 +171,50 @@ class TestEnvelopeSeal:
         ]
         assert q_values == [1, 2, 3]
 
-    def test_seal_algorithm_field_matches_software_fallback_driver(self) -> None:
+    def test_seal_algorithm_field_matches_software_fallback_driver(self, tmp_path: Path) -> None:
         """'alg' field must carry the driver's declared algorithm identifier."""
-        envelope = bootstrap_sensor_node(_NODE_ID, _KEY_PATH)
+        envelope = bootstrap_sensor_node(
+            _NODE_ID, _KEY_PATH, sequence_file=str(tmp_path / ".sovereign_sequence")
+        )
         parsed = json.loads(envelope.seal(_TIMESTAMP, _PAYLOAD))
         assert parsed["alg"] == "hmac-sha256"
 
-    def test_seal_payload_round_trips_without_mutation(self) -> None:
+    def test_seal_payload_round_trips_without_mutation(self, tmp_path: Path) -> None:
         """'d' field must equal the original payload dict after JSON round-trip."""
-        envelope = bootstrap_sensor_node(_NODE_ID, _KEY_PATH)
+        envelope = bootstrap_sensor_node(
+            _NODE_ID, _KEY_PATH, sequence_file=str(tmp_path / ".sovereign_sequence")
+        )
         parsed = json.loads(envelope.seal(_TIMESTAMP, _PAYLOAD))
         assert parsed["d"] == _PAYLOAD
 
-    def test_seal_signature_is_non_empty_ascii_string(self) -> None:
+    def test_seal_signature_is_non_empty_ascii_string(self, tmp_path: Path) -> None:
         """'s' field must be a non-empty string decodable as ASCII."""
-        envelope = bootstrap_sensor_node(_NODE_ID, _KEY_PATH)
+        envelope = bootstrap_sensor_node(
+            _NODE_ID, _KEY_PATH, sequence_file=str(tmp_path / ".sovereign_sequence")
+        )
         parsed = json.loads(envelope.seal(_TIMESTAMP, _PAYLOAD))
         assert isinstance(parsed["s"], str)
         assert len(parsed["s"]) > 0
         parsed["s"].encode("ascii")  # raises if non-ASCII
 
-    def test_seal_signature_is_sha256_hex_length(self) -> None:
+    def test_seal_signature_is_sha256_hex_length(self, tmp_path: Path) -> None:
         """Software fallback HMAC-SHA256 signature must be a 64-character hex digest."""
-        envelope = bootstrap_sensor_node(_NODE_ID, _KEY_PATH)
+        envelope = bootstrap_sensor_node(
+            _NODE_ID, _KEY_PATH, sequence_file=str(tmp_path / ".sovereign_sequence")
+        )
         parsed = json.loads(envelope.seal(_TIMESTAMP, _PAYLOAD))
         assert len(parsed["s"]) == 64
 
-    def test_seal_output_is_minified_json(self) -> None:
+    def test_seal_output_is_minified_json(self, tmp_path: Path) -> None:
         """Output bytes must not contain whitespace after separators (ultra-minified)."""
-        envelope = bootstrap_sensor_node(_NODE_ID, _KEY_PATH)
+        envelope = bootstrap_sensor_node(
+            _NODE_ID, _KEY_PATH, sequence_file=str(tmp_path / ".sovereign_sequence")
+        )
         result = envelope.seal(_TIMESTAMP, _PAYLOAD)
         assert b": " not in result
         assert b", " not in result
 
-    def test_seal_is_deterministic_across_independent_instances(self) -> None:
+    def test_seal_is_deterministic_across_independent_instances(self, tmp_path: Path) -> None:
         """Two envelope instances initialized from the same sequence file state
         must produce byte-identical seals for identical inputs.
 
@@ -173,24 +223,26 @@ class TestEnvelopeSeal:
         identical node_id, timestamp, payload, key material, and sequence
         position, the HMAC preimages are identical and the outputs match.
         """
-        envelope_a = bootstrap_sensor_node(_NODE_ID, _KEY_PATH)
-        envelope_b = bootstrap_sensor_node(_NODE_ID, _KEY_PATH)
+        seq_file = str(tmp_path / ".sovereign_sequence")
+        envelope_a = bootstrap_sensor_node(_NODE_ID, _KEY_PATH, sequence_file=seq_file)
+        envelope_b = bootstrap_sensor_node(_NODE_ID, _KEY_PATH, sequence_file=seq_file)
         assert envelope_a.seal(_TIMESTAMP, _PAYLOAD) == envelope_b.seal(_TIMESTAMP, _PAYLOAD)
 
-    def test_seal_signature_changes_when_payload_changes(self) -> None:
+    def test_seal_signature_changes_when_payload_changes(self, tmp_path: Path) -> None:
         """Distinct payloads at the same sequence position must produce distinct signatures.
 
         Two independent instances are used so that both seal at the same counter
         value (both read N at init and increment to N+1 on their respective
         first calls), isolating payload as the sole independent variable.
         """
-        envelope_a = bootstrap_sensor_node(_NODE_ID, _KEY_PATH)
-        envelope_b = bootstrap_sensor_node(_NODE_ID, _KEY_PATH)
+        seq_file = str(tmp_path / ".sovereign_sequence")
+        envelope_a = bootstrap_sensor_node(_NODE_ID, _KEY_PATH, sequence_file=seq_file)
+        envelope_b = bootstrap_sensor_node(_NODE_ID, _KEY_PATH, sequence_file=seq_file)
         sig_a = json.loads(envelope_a.seal(_TIMESTAMP, {"v": 1}))["s"]
         sig_b = json.loads(envelope_b.seal(_TIMESTAMP, {"v": 2}))["s"]
         assert sig_a != sig_b
 
-    def test_seal_signature_contains_only_valid_hex_characters(self) -> None:
+    def test_seal_signature_contains_only_valid_hex_characters(self, tmp_path: Path) -> None:
         """'s' field must consist exclusively of lowercase hex characters (0-9, a-f).
 
         Validates that envelope.py applies binascii.hexlify() to the raw driver
@@ -199,7 +251,9 @@ class TestEnvelopeSeal:
         UnicodeDecodeError on MicroPython silicon.
         """
         _HEX_ALPHABET: frozenset = frozenset("0123456789abcdef")
-        envelope = bootstrap_sensor_node(_NODE_ID, _KEY_PATH)
+        envelope = bootstrap_sensor_node(
+            _NODE_ID, _KEY_PATH, sequence_file=str(tmp_path / ".sovereign_sequence")
+        )
         parsed = json.loads(envelope.seal(_TIMESTAMP, _PAYLOAD))
         assert all(c in _HEX_ALPHABET for c in parsed["s"])
 

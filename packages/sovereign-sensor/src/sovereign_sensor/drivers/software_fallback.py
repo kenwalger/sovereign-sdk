@@ -75,5 +75,11 @@ class SoftwareFallbackDriver(SovereignCryptoDriver):
         :type payload: bytes
         :return: Raw 32-byte HMAC-SHA256 digest.
         :rtype: bytes
+        :raises RuntimeError: If ``initialize_hardware()`` has not been called
+            prior to this invocation.
         """
+        if not self._initialized or not hasattr(self, "_secret_key"):
+            raise RuntimeError(
+                "Driver must be initialized via initialize_hardware() before generating signatures."
+            )
         return hmac.new(self._secret_key, payload, hashlib.sha256).digest()
