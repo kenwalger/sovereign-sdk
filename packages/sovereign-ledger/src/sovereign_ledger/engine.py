@@ -1,6 +1,7 @@
 # packages/sovereign-ledger/src/sovereign_ledger/engine.py
 import hashlib
 import sqlite3
+import threading
 from pathlib import Path
 from types import TracebackType
 from typing import Any
@@ -88,13 +89,12 @@ class SovereignLedger:
         with SovereignLedger(db_path=".keys/sovereign_audit.db") as ledger:
             ledger.append_receipt(receipt, sieved_content)
 
-    Concurrent writers are serialised through ``BEGIN IMMEDIATE`` transactions,
-    which acquire an exclusive reserved lock before the chain tip is read.
-    This eliminates the TOCTOU window that would otherwise allow concurrent
-    threads or processes to derive identical ``parent_hash`` values (sibling
-    fork).  A 5-second ``busy_timeout`` allows writers to retry rather than
-    immediately raising :exc:`sqlite3.OperationalError` under momentary
-    contention.
+    Each thread that accesses a shared ``SovereignLedger`` instance receives
+    its own isolated ``sqlite3.Connection`` via :meth:`_get_conn`, eliminating
+    cursor and transaction state sharing across threads.  ``BEGIN IMMEDIATE``
+    and ``busy_timeout = 5000`` serialise writes at the SQLite reserved-lock
+    level, preventing sibling-fork ``parent_hash`` collisions without requiring
+    a Python-layer mutex.
 
     :param db_path: Filesystem path to the SQLite database file.  Pass
         ``":memory:"`` for an ephemeral in-process store (useful in tests).
@@ -105,32 +105,52 @@ class SovereignLedger:
         if db_path != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._db_path = db_path
-        # isolation_level=None puts the connection in autocommit mode so that
-        # the explicit BEGIN IMMEDIATE in append_receipt() is not wrapped or
-        # interfered with by Python's implicit transaction machinery.
-        self._conn = sqlite3.connect(
-            db_path, check_same_thread=False, isolation_level=None
-        )
-        self._conn.row_factory = sqlite3.Row
-        self._apply_pragmas()
+        self._thread_local = threading.local()
+        # Tracks every per-thread connection so close() can release all file
+        # descriptors regardless of which thread calls it.
+        self._connections: list[sqlite3.Connection] = []
+        self._connections_lock = threading.Lock()
+        # Bootstrap the forensic_ledger schema and triggers on the initialising
+        # thread's connection.  Subsequent thread connections share the schema
+        # already present in the database file and require only pragma application.
         self._bootstrap_schema()
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
-    def _apply_pragmas(self) -> None:
-        self._conn.execute("PRAGMA journal_mode = WAL;")
-        self._conn.execute("PRAGMA synchronous = NORMAL;")
-        self._conn.execute("PRAGMA foreign_keys = ON;")
+    def _get_conn(self) -> sqlite3.Connection:
+        # Returns the calling thread's dedicated sqlite3.Connection, creating
+        # and registering a new one on first access from this thread.
+        conn: sqlite3.Connection | None = getattr(self._thread_local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(
+                self._db_path, check_same_thread=False, isolation_level=None
+            )
+            conn.row_factory = sqlite3.Row
+            self._apply_pragmas(conn)
+            self._thread_local.conn = conn
+            with self._connections_lock:
+                self._connections.append(conn)
+        return conn
+
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        # Convenience accessor; always returns the calling thread's isolated handle.
+        return self._get_conn()
+
+    def _apply_pragmas(self, conn: sqlite3.Connection) -> None:
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA synchronous = NORMAL;")
+        conn.execute("PRAGMA foreign_keys = ON;")
         # Retry for up to 5 seconds before surfacing a lock error, supporting
         # concurrent multi-connection write workloads without immediate failure.
-        self._conn.execute("PRAGMA busy_timeout = 5000;")
+        conn.execute("PRAGMA busy_timeout = 5000;")
 
     def _bootstrap_schema(self) -> None:
         # executescript() explicitly ignores isolation_level and issues its
         # own COMMIT before running the script, so it is safe in autocommit mode.
-        self._conn.executescript(_DDL)
+        self._get_conn().executescript(_DDL)
 
     # ------------------------------------------------------------------
     # Public interface
@@ -193,7 +213,7 @@ class SovereignLedger:
 
         raw_tokens: int | None = prose_tax.get("raw_token_count")
         optimized_tokens: int | None = prose_tax.get("optimized_token_count")
-        savings_pct: float | None = prose_tax.get("tax_savings_percentage")
+        savings_pct: int | float | None = prose_tax.get("tax_savings_percentage")
         payload_hash: str = receipt["payload_hash"]
 
         committed = False
@@ -331,16 +351,23 @@ class SovereignLedger:
         return True
 
     def close(self) -> None:
-        """Release the underlying SQLite connection handle.
+        """Release all thread-local SQLite connection handles tracked by this instance.
 
-        Called automatically by :meth:`__exit__` when the instance is used as
-        a context manager.  Safe to call after the connection is already closed
-        (``sqlite3`` silently ignores redundant close calls).
+        Iterates every connection registered across all threads and closes each
+        one, ensuring no file descriptors are leaked regardless of how many
+        producer threads have accessed the ledger.  Called automatically by
+        :meth:`__exit__` when the instance is used as a context manager.
 
         :return: None
         :rtype: None
         """
-        self._conn.close()
+        with self._connections_lock:
+            for conn in self._connections:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
+            self._connections.clear()
 
     def __enter__(self) -> "SovereignLedger":
         """Enter the runtime context, returning the ledger instance.
@@ -357,12 +384,12 @@ class SovereignLedger:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        """Exit the runtime context, releasing the SQLite connection.
+        """Exit the runtime context, releasing all SQLite connections.
 
         Called automatically at the close of a ``with`` block regardless of
-        whether an exception was raised, ensuring the file descriptor is never
+        whether an exception was raised, ensuring file descriptors are never
         leaked in long-running production server lifecycles.  Exceptions are
-        not suppressed; they propagate normally after the connection is closed.
+        not suppressed; they propagate normally after the connections are closed.
 
         :param exc_type: Exception class raised inside the ``with`` block, or
             ``None`` if the block exited cleanly.

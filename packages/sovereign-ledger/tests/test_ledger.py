@@ -792,11 +792,21 @@ class TestEdgeCases:
 class TestConcurrentAppend:
     """Stress-test the BEGIN IMMEDIATE write serialisation guarantee.
 
-    Each thread opens its own SovereignLedger connection to the same file-backed
-    database — the most adversarial realistic concurrent-producer scenario.  A
-    threading.Barrier holds all threads at the starting gate until every one is
-    ready, maximising lock contention.  After all threads complete, the full
-    hash chain must be perfectly linear with no sibling parent_hash forks.
+    Two distinct concurrent-write patterns are verified:
+
+    * Separate-instance (test_concurrent_appends_produce_linear_chain) — each
+      thread owns its own SovereignLedger instance and therefore its own
+      sqlite3.Connection.  Tests that SQLite-level locking alone is sufficient.
+
+    * Shared-instance (test_shared_instance_multi_thread_append) — all threads
+      share one SovereignLedger instance.  Tests that thread-local connection
+      isolation prevents cursor/transaction state collisions while BEGIN
+      IMMEDIATE still serialises writes at the SQLite reserved-lock level.
+
+    A threading.Barrier holds all threads at the starting gate until every one
+    is ready, maximising lock contention on both scenarios.  After all threads
+    complete, the full hash chain must be perfectly linear with no sibling
+    parent_hash forks.
     """
 
     def test_concurrent_appends_produce_linear_chain(self, tmp_path):
@@ -838,3 +848,45 @@ class TestConcurrentAppend:
         # BEGIN IMMEDIATE serialises writes — the chain must be perfectly linear.
         assert verifier.verify_ledger_integrity() is True
         verifier.close()
+
+    def test_shared_instance_multi_thread_append(self, tmp_path):
+        """A single SovereignLedger instance shared across N concurrent threads
+        must produce a perfectly linear hash chain with zero transaction errors.
+
+        Thread-local sqlite3.Connection handles prevent cursor and transaction
+        state from being shared across threads.  BEGIN IMMEDIATE serialises
+        writes at the SQLite reserved-lock level via busy_timeout retry, closing
+        the shared-instance collision vulnerability without a Python-layer mutex.
+        """
+        db_path = str(tmp_path / "shared_instance.db")
+        N = 8
+        errors: list[Exception] = []
+        barrier = threading.Barrier(N)
+
+        # One shared instance — every thread uses the exact same object reference.
+        ledger = SovereignLedger(db_path)
+
+        def append_one(i: int) -> None:
+            try:
+                # Hold at the barrier so all N threads race simultaneously.
+                barrier.wait()
+                ledger.append_receipt(
+                    _make_receipt(f"hash_SI_{i:03d}", f"sig_SI_{i:03d}"),
+                    f"shared_content_{i}",
+                )
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=append_one, args=(i,)) for i in range(N)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"Unexpected errors during shared-instance concurrent append: {errors}"
+
+        cur = ledger._conn.execute("SELECT COUNT(*) FROM forensic_ledger")
+        assert cur.fetchone()[0] == N
+        # Thread-local isolation + BEGIN IMMEDIATE — chain must be perfectly linear.
+        assert ledger.verify_ledger_integrity() is True
+        ledger.close()
