@@ -43,11 +43,16 @@ def _canonical_preimage(
     timestamp: str,
     raw_token_count: int | None,
     optimized_token_count: int | None,
-    tax_savings_percentage: float | None,
+    tax_savings_percentage: int | float | None,
     sieved_content: str,
 ) -> str:
     # NUL delimiter closes length-substitution field-boundary attacks; naive
     # concatenation allows "AB"+"CDEF" to collide with "ABC"+"DEF".
+    #
+    # tax_savings_percentage uses fixed-precision :.4f serialisation so that a
+    # Python int (e.g. 25, received at append time) and an SQLite REAL extraction
+    # (e.g. 25.0, returned at verify time) both produce the same token "25.0000",
+    # preventing a divergence that would silently corrupt every subsequent parent_hash.
     return "\x00".join([
         signature,
         payload_hash,
@@ -55,7 +60,7 @@ def _canonical_preimage(
         timestamp,
         "NULL" if raw_token_count is None else str(raw_token_count),
         "NULL" if optimized_token_count is None else str(optimized_token_count),
-        "NULL" if tax_savings_percentage is None else str(tax_savings_percentage),
+        "NULL" if tax_savings_percentage is None else f"{float(tax_savings_percentage):.4f}",
         sieved_content,
     ])
 

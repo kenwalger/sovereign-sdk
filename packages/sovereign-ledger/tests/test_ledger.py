@@ -35,7 +35,7 @@ def _make_receipt(
     timestamp: str = "2026-06-15T12:00:00Z",
     raw_tokens: int = 100,
     optimized_tokens: int = 75,
-    savings_pct: float = 25.0,
+    savings_pct: int | float = 25,
 ) -> dict[str, Any]:
     return {
         "timestamp": timestamp,
@@ -63,7 +63,7 @@ def _expected_parent(row: sqlite3.Row) -> str:
             row["timestamp"],
             "NULL" if row["raw_token_count"] is None else str(row["raw_token_count"]),
             "NULL" if row["optimized_token_count"] is None else str(row["optimized_token_count"]),
-            "NULL" if row["tax_savings_percentage"] is None else str(row["tax_savings_percentage"]),
+            "NULL" if row["tax_savings_percentage"] is None else f"{float(row['tax_savings_percentage']):.4f}",
             row["sieved_content"],
         ]).encode("utf-8")
     ).hexdigest()
@@ -704,6 +704,32 @@ class TestEdgeCases:
             ("hash_HIGH",),
         )
         assert abs(cur.fetchone()[0] - 99.9) < 1e-9
+
+    def test_integer_metrics_dont_break_chain(self, mem_ledger):
+        """Receipts whose prose_tax_summary values are Python ints (not floats)
+        must survive a full hash-chain verification pass.
+
+        SQLite stores tax_savings_percentage as REAL and returns it as a Python
+        float, while the receipt dict may carry a bare int.  Fixed-precision
+        :.4f formatting in _canonical_preimage ensures both representations
+        produce the identical token ("25.0000") so the chain never diverges.
+        """
+        int_receipt = {
+            "timestamp": "2026-06-15T12:00:00Z",
+            "payload_hash": "hash_INT_METRICS",
+            "public_key": "key==",
+            "signature": "sig_INT_METRICS",
+            "metadata": {
+                "prose_tax_summary": {
+                    "raw_token_count": 200,
+                    "optimized_token_count": 150,
+                    "tax_savings_percentage": 25,   # bare Python int, not 25.0
+                }
+            },
+        }
+        mem_ledger.append_receipt(int_receipt, "content with integer metrics")
+        mem_ledger.append_receipt(_make_receipt("hash_INT2", "sig_INT2"), "follow-up")
+        assert mem_ledger.verify_ledger_integrity() is True
 
     def test_close_then_new_instance_appends_correctly(self, tmp_path):
         db_path = str(tmp_path / "reuse.db")
