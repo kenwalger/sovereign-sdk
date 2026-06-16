@@ -304,7 +304,7 @@ assert ledger.verify_ledger_integrity()  # → True on an untampered chain
 * [x] `SovereignStorageError` exception (exported from `sovereign_ledger`) raised by
   `_get_conn()` when called on a closed instance, preventing use-after-close access to
   released connection handles.
-* [x] 59-case adversarial test suite covering trigger enforcement (internal and external
+* [x] 60-case adversarial test suite covering trigger enforcement (internal and external
   client), `RAISE(ROLLBACK)` transaction-abort semantics confirming post-hoc injection
   via COMMIT is impossible, out-of-band corruption detection across all eight data columns
   (signature, payload hash, parent hash, timestamp, raw/optimized token counts, savings
@@ -315,8 +315,9 @@ assert ledger.verify_ledger_integrity()  # → True on an untampered chain
   shared-instance file-backed scenarios confirming zero chain fragmentation; plus a
   shared-instance in-memory scenario confirming correct per-thread DDL bootstrapping —
   each thread obtains an independent isolated SQLite store, so chain linearity
-  assertions apply only to file-backed topologies), and connection-registry purge verification
-  (`close()` releases all thread-local handles to zero).
+  assertions apply only to file-backed topologies), connection-registry purge verification
+  (`close()` releases all thread-local handles to zero), and cross-thread in-memory
+  `RuntimeWarning` emission (`test_in_memory_cross_thread_emits_runtime_warning`).
 
 ---
 

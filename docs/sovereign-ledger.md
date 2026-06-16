@@ -26,8 +26,8 @@ with SovereignLedger(db_path=".keys/sovereign_audit.db") as ledger:
     ok = ledger.verify_ledger_integrity()                       # True on an untampered ledger
 
     # Pin the sweep to a known tip to detect tail-truncation attacks
-    tip = ledger.append_receipt(receipt, sieved_content)        # capture after last append
-    ok  = ledger.verify_ledger_integrity(expected_tip_hash=tip) # False if last row was deleted
+    tip = ledger.append_receipt(receipt_2, sieved_content_2)       # distinct receipt — unique payload_hash
+    ok  = ledger.verify_ledger_integrity(expected_tip_hash=tip)    # False if last row was deleted
 ```
 
 ---

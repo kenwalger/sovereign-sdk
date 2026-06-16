@@ -39,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     collapses the sequence, and injected rows whose `parent_hash` does not match the
     re-derived value.
 
-  - **`packages/sovereign-ledger/tests/test_ledger.py`** — 59 test cases across seven
+  - **`packages/sovereign-ledger/tests/test_ledger.py`** — 60 test cases across seven
     classes (`TestSovereignLedgerInit`, `TestAppendReceipt`, `TestHashChain`,
     `TestImmutabilityTriggers`, `TestVerifyLedgerIntegrity`, `TestEdgeCases`,
     `TestConcurrentAppend`) covering schema assertion, WAL mode verification,
@@ -52,16 +52,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     corruption detection, mid-chain deletion detection, fabricated-row injection
     detection, Unicode payload round-trip, duplicate `payload_hash` rejection,
     close-and-reopen lifecycle correctness, connection-registry purge verification
-    (`close()` releases all thread-local handles and empties the registry to zero), and
+    (`close()` releases all thread-local handles and empties the registry to zero),
     `test_out_of_band_tax_savings_percentage_tamper_breaks_chain` covering the
     remaining column isolation gap, concurrent write stress tests
     (`TestConcurrentAppend`) covering separate-instance and shared-instance
     file-backed scenarios (8-thread chain-linearity assertions) plus a
     shared-instance in-memory scenario validating per-thread DDL bootstrap
     correctness (each thread receives an independent isolated SQLite in-memory
-    store; writes are not aggregated into a single unified chain), and
+    store; writes are not aggregated into a single unified chain),
     closed-instance lifecycle hardening verifying that `SovereignStorageError`
-    is raised immediately on any post-`close()` access.
+    is raised immediately on any post-`close()` access, and
+    `test_in_memory_cross_thread_emits_runtime_warning` asserting that `_get_conn()`
+    emits a `RuntimeWarning` when a worker thread opens a new in-memory connection
+    on a shared instance created by a different thread, confirming the per-thread
+    isolation advisory reaches callers at the correct callsite.
 
 - **Phase 7 — `sovereign-sieve` standalone micro-utility package** (new workspace member
   `packages/sovereign-sieve/`): Extracted `sovereign-sieve` into a zero-dependency
