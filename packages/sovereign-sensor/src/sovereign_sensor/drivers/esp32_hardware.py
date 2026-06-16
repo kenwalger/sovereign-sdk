@@ -7,7 +7,7 @@ HAL bindings.  Full low-level register engineering is deferred to the
 next sprint; this module establishes the class contract and import
 surface so the bootstrap router can bind it without modification.
 """
-from sovereign_sensor.interface import SovereignCryptoDriver
+from ..interface import SovereignCryptoDriver
 
 
 class ESP32HardwareDriver(SovereignCryptoDriver):

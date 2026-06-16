@@ -65,7 +65,9 @@ class SovereignEnvelope:
            reboots.  VFS write failures degrade gracefully to RAM-only tracking.
         2. Active algorithm identifier is queried from the driver, embedding
            the signing primitive into the authenticated preimage for protocol agility.
-        3. Payload is canonicalized to minified JSON with no inter-token whitespace.
+        3. Payload keys are alphabetically sorted and the dict is serialized to
+           minified JSON with no inter-token whitespace, guaranteeing an identical
+           preimage regardless of key insertion order on any MicroPython target.
         4. A versioned, hardened preimage string is constructed as
            ``1|node_id|timestamp|sequence|algorithm|canonical_payload``,
            binding the protocol version, identity, time, ordering, and algorithm
@@ -88,13 +90,17 @@ class SovereignEnvelope:
         :rtype: bytes
         """
         self._sequence += 1
+        # Persist counter to VFS immediately after increment.  The with-block
+        # guarantees flush and close before execution continues, satisfying
+        # MicroPython's flash-write coherence requirement: a power-cycle at any
+        # subsequent point cannot reuse this sequence position.
         try:
             with open(self._sequence_file, "w") as f:
                 f.write(str(self._sequence))
         except Exception:
             pass  # Degrade gracefully to RAM-only sequence tracking.
         algo: str = self._driver.algorithm()
-        canonical: str = json.dumps(payload, separators=(",", ":"))
+        canonical: str = json.dumps(payload, separators=(",", ":"), sort_keys=True)
         preimage: bytes = (
             f"1|{self._node_id}|{timestamp}|{self._sequence}|{algo}|{canonical}"
             .encode("utf-8")

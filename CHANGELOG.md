@@ -30,8 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     counter incremented and immediately persisted to the configured VFS path, binding each frame
     to a unique emission position for replay protection across power cycles (degrades gracefully
     to RAM-only tracking on VFS write failure); (2) algorithm identifier queried from driver via
-    `algorithm()`; (3) payload canonicalized via `json.dumps(..., separators=(',', ':'))`;
-    (4) versioned preimage constructed as `1|node_id|timestamp|sequence|algorithm|canonical_payload`,
+    `algorithm()`; (3) payload keys alphabetically sorted and serialized via
+    `json.dumps(..., separators=(',', ':'), sort_keys=True)`, guaranteeing a byte-identical
+    preimage regardless of dict key insertion order across bare-metal MicroPython targets and
+    desktop gateways; (4) versioned preimage constructed as `1|node_id|timestamp|sequence|algorithm|canonical_payload`,
     binding protocol version, identity, time, ordering, and algorithm into a single signed surface;
     (5) preimage dispatched across the driver's `sign()` boundary, returning raw binary bytes;
     (6) raw bytes hex-encoded via `binascii.hexlify`, guaranteeing all values `0x00–0xFF` map
@@ -57,11 +59,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `NotImplementedError`; full register-level engineering is deferred to the next sprint.
     This driver must not be wired into any production custody chain in its current state.
 
-  - **`packages/sovereign-sensor/tests/test_sensor.py`** — 21 test cases across two classes
-    (`TestBootstrap`: 3 cases; `TestEnvelopeSeal`: 18 cases) verifying: platform auto-detection
-    confirmed via the public `algorithm()` contract (sealed `"alg"` field equals `"hmac-sha256"`)
-    rather than private attribute access; driver initialization confirmed via successful `seal()`
-    completion; `seal()` returns `bytes`; output parses as valid JSON; transmission envelope
+  - **`packages/sovereign-sensor/tests/test_sensor.py`** — 23 test cases across three classes
+    (`TestBootstrap`: 3 cases; `TestDriverGuard`: 1 case; `TestEnvelopeSeal`: 19 cases)
+    verifying: platform auto-detection confirmed via the public `algorithm()` contract (sealed
+    `"alg"` field equals `"hmac-sha256"`) rather than private attribute access; driver
+    initialization confirmed via successful `seal()` completion; `sign()` raises `RuntimeError`
+    when called before `initialize_hardware()`, preventing silent keyless HMAC packets from bad
+    setup sequencing; `seal()` returns `bytes`; output parses as valid JSON; transmission envelope
     contains exactly the seven keys `v`, `n`, `t`, `q`, `alg`, `d`, `s`; `v` is integer `1`;
     `n` and `t` are preserved verbatim; `q` starts at `1` on the first call (isolated via
     `tmp_path` sequence file); three consecutive calls on the same instance produce `q` values
@@ -71,9 +75,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (no whitespace after separators); two independent fresh instances produce byte-identical first
     seals for identical inputs (cross-instance determinism); distinct payloads at the same
     sequence position produce distinct signatures; `"s"` field contains only characters from the
-    set `{0–9, a–f}`; HMAC signatures diverge when distinct key files supply different secret
-    material (key material participation); sequence counter correctly resumes from the persisted
-    VFS value after a simulated hardware reboot (replay-protection continuity). **21 passed, 0 failed.**
+    set `{0–9, a–f}`; `sort_keys=True` canonicalization produces byte-identical signatures for
+    semantically equivalent payloads with inverted key insertion order, proving preimage invariance
+    across all MicroPython targets; HMAC signatures diverge when distinct key files supply
+    different secret material (key material participation); sequence counter correctly resumes from
+    the persisted VFS value after a simulated hardware reboot (replay-protection continuity).
+    **23 passed, 0 failed.**
 
 - **Phase 8 — `sovereign-ledger` immutable provenance engine** (new workspace member
   `packages/sovereign-ledger/`): Introduces a local-first, SQLite-backed, append-only
@@ -162,6 +169,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Covers determinism invariant, idempotency, Unicode payloads, very long inputs,
   `TypeError` on non-`str` arguments, and internal savings-percentage arithmetic
   consistency.
+
+### Changed
+
+- **`SovereignEnvelope.seal()` — alphabetical key canonicalization enforced** (`envelope.py`):
+  The `json.dumps` call that serializes the payload into the HMAC preimage now passes
+  `sort_keys=True`, guaranteeing that semantically equivalent payloads with different key
+  insertion orders produce byte-identical canonical strings.  On constrained MicroPython
+  targets, dict insertion order is not guaranteed stable across firmware versions or allocation
+  events; without this flag, two nodes sealing the same observation could produce diverging
+  preimages and non-matching signatures.  The flag makes cryptographic preimages perfectly
+  deterministic across space and time.
+
+- **`SoftwareFallbackDriver.sign()` — initialization guard simplified** (`drivers/software_fallback.py`):
+  The guard condition was tightened to `if not self._initialized:`, removing a previously
+  present redundant `hasattr(self, "_secret_key")` check.  The `_secret_key` attribute is
+  unconditionally declared in `__init__`, making the `hasattr` test structurally dead code;
+  the `_initialized` boolean is the sole authoritative initialization sentinel.
+
+- **Driver imports standardized to package-relative form** (`drivers/software_fallback.py`,
+  `drivers/esp32_hardware.py`): Both driver modules now import `SovereignCryptoDriver` via
+  `from ..interface import SovereignCryptoDriver`, consistent with the workspace-wide
+  convention for intra-package imports.
 
 ### Fixed
 

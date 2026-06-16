@@ -12,7 +12,7 @@ validation and desktop integration testing only.
 import hashlib
 import hmac
 
-from sovereign_sensor.interface import SovereignCryptoDriver
+from ..interface import SovereignCryptoDriver
 
 
 class SoftwareFallbackDriver(SovereignCryptoDriver):
@@ -78,7 +78,7 @@ class SoftwareFallbackDriver(SovereignCryptoDriver):
         :raises RuntimeError: If ``initialize_hardware()`` has not been called
             prior to this invocation.
         """
-        if not self._initialized or not hasattr(self, "_secret_key"):
+        if not self._initialized:
             raise RuntimeError(
                 "Driver must be initialized via initialize_hardware() before generating signatures."
             )

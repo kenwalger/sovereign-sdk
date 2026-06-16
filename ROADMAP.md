@@ -347,8 +347,9 @@ wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 2
   observations in a seven-step deterministic pipeline: (1) monotonic sequence counter incremented
   and immediately persisted to the configured VFS path for replay protection across power cycles
   (degrades gracefully to RAM-only tracking on VFS write failure); (2) algorithm identifier queried
-  from driver; (3) payload canonicalized via `json.dumps(..., separators=(',', ':'))`;
-  (4) versioned preimage constructed as `1|node_id|timestamp|sequence|algorithm|canonical_payload`;
+  from driver; (3) payload canonicalized via `json.dumps(..., separators=(',', ':'), sort_keys=True)`,
+  guaranteeing identical preimage bytes regardless of dict key insertion order on any MicroPython
+  target; (4) versioned preimage constructed as `1|node_id|timestamp|sequence|algorithm|canonical_payload`;
   (5) preimage signed by driver returning raw binary bytes; (6) signature hex-encoded via
   `binascii.hexlify`; (7) all fields serialized into a 7-key ultra-minified JSON frame
   `{"v", "n", "t", "q", "alg", "d", "s"}`.
@@ -361,8 +362,10 @@ wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 2
   driver using `hashlib` and `hmac`; reads key material from the VFS path supplied at
   construction during `initialize_hardware()`; falls back to a fixed deterministic stub
   (`_MOCK_KEY`) when the key file is absent (`OSError`), keeping desktop CI operational without
-  a provisioned key store; returns raw 32-byte HMAC-SHA256 digest bytes (no encoding); declares
-  `algorithm() -> "hmac-sha256"`; not suitable for production custody chains.
+  a provisioned key store; `sign()` guards against uninitialized calls via `if not self._initialized`
+  and raises `RuntimeError` immediately; returns raw 32-byte HMAC-SHA256 digest bytes (no encoding);
+  declares `algorithm() -> "hmac-sha256"`; uses package-relative import (`from ..interface`);
+  not suitable for production custody chains.
 * [ ] `ESP32HardwareDriver` (`drivers/esp32_hardware.py`) — v0.1 HAL skeleton establishing
   the class contract and import surface for the ESP32 on-chip ECC accelerator; declares
   `algorithm() -> "ecdsa-p256"` as a forward-looking algorithm identifier; `sign()` raises
@@ -371,18 +374,22 @@ wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 2
 * [x] `packages/sovereign-sensor/pyproject.toml` — zero runtime dependencies; targets Python 3.12
   for desktop test compatibility; restricts internal library code to standard MicroPython built-ins
   (`json`, `sys`, `machine`, `hashlib`, `binascii`).
-* [x] 21-case desktop validation test suite (`tests/test_sensor.py`) across two classes
-  (`TestBootstrap`: 3 cases, `TestEnvelopeSeal`: 18 cases) verifying platform auto-detection via
-  public `algorithm()` contract, driver initialization confirmation, bytes return type, valid JSON
-  parse, exact 7-key envelope structure (`v`, `n`, `t`, `q`, `alg`, `d`, `s`), protocol version
-  integer type, sequence counter starts at 1 (isolated via `tmp_path` sequence file), monotonic
-  sequence increment across 3 consecutive calls (isolated via `tmp_path`), algorithm field value,
-  field identity preservation, HMAC-SHA256 hex signature length (64 chars), ultra-minified output,
-  cross-instance determinism (two fresh instances at q=1 produce identical output),
-  payload-isolated signature divergence, hex-only character set, HMAC signature divergence when
-  distinct key files supply different secret material (key material participation verified), and
-  sequence counter resumption from the persisted VFS value after a simulated hardware reboot
-  (replay-protection continuity across power cycles). **21 passed, 0 failed.**
+* [x] 23-case desktop validation test suite (`tests/test_sensor.py`) across three classes
+  (`TestBootstrap`: 3 cases, `TestDriverGuard`: 1 case, `TestEnvelopeSeal`: 19 cases) verifying
+  platform auto-detection via public `algorithm()` contract, driver initialization confirmation,
+  `sign()` raises `RuntimeError` before `initialize_hardware()` is called, bytes return type,
+  valid JSON parse, exact 7-key envelope structure (`v`, `n`, `t`, `q`, `alg`, `d`, `s`),
+  protocol version integer type, sequence counter starts at 1 (isolated via `tmp_path` sequence
+  file), monotonic sequence increment across 3 consecutive calls (isolated via `tmp_path`),
+  algorithm field value, field identity preservation, HMAC-SHA256 hex signature length (64 chars),
+  ultra-minified output, cross-instance determinism (two fresh instances at q=1 produce identical
+  output), payload-isolated signature divergence, hex-only character set, `sort_keys=True`
+  canonicalization produces byte-identical signatures for semantically equivalent payloads with
+  inverted key insertion order (preimage invariance across all MicroPython targets), HMAC
+  signature divergence when distinct key files supply different secret material (key material
+  participation verified), and sequence counter resumption from the persisted VFS value after a
+  simulated hardware reboot (replay-protection continuity across power cycles).
+  **23 passed, 0 failed.**
 
 ---
 

@@ -257,6 +257,28 @@ class TestEnvelopeSeal:
         parsed = json.loads(envelope.seal(_TIMESTAMP, _PAYLOAD))
         assert all(c in _HEX_ALPHABET for c in parsed["s"])
 
+    def test_seal_payload_key_order_does_not_affect_signature(self, tmp_path: Path) -> None:
+        """sort_keys=True canonicalization must produce identical signatures for
+        semantically equivalent payloads regardless of key insertion order.
+
+        On constrained MicroPython targets, dict insertion order is not
+        guaranteed stable across firmware versions or allocation events.
+        Two instances sealing payloads with identical key-value pairs but
+        inverted construction order must produce byte-identical signature
+        fields, proving that alphabetical key sorting makes the HMAC
+        preimage invariant to insertion order across all target platforms.
+        """
+        seq_file = str(tmp_path / ".sovereign_sequence")
+        payload_ab: dict = {"a": 1, "b": 2}
+        payload_ba: dict = {"b": 2, "a": 1}
+
+        envelope_a = bootstrap_sensor_node(_NODE_ID, _KEY_PATH, sequence_file=seq_file)
+        envelope_b = bootstrap_sensor_node(_NODE_ID, _KEY_PATH, sequence_file=seq_file)
+
+        sig_a = json.loads(envelope_a.seal(_TIMESTAMP, payload_ab))["s"]
+        sig_b = json.loads(envelope_b.seal(_TIMESTAMP, payload_ba))["s"]
+        assert sig_a == sig_b
+
     def test_software_driver_signature_changes_with_different_key_files(
         self, tmp_path: Path
     ) -> None:
