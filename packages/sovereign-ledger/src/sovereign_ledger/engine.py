@@ -106,10 +106,48 @@ class SovereignLedger:
     level, preventing sibling-fork ``parent_hash`` collisions without requiring
     a Python-layer mutex.
 
+    **Threading Caveat for In-Memory Databases**
+
+    When ``db_path=":memory:"`` is used with a shared ``SovereignLedger``
+    instance across multiple threads, SQLite's per-connection isolation
+    architecture creates a fundamentally different runtime topology than the
+    file-backed case.  Each thread-local ``sqlite3.Connection`` opened against
+    ``":memory:"`` maps to a completely independent, empty SQLite in-memory
+    store.  The DDL is bootstrapped correctly on every new thread-local
+    connection (see :meth:`_get_conn`), so worker threads never encounter
+    ``OperationalError: no such table``.  However, **writes committed from one
+    thread are visible only within that thread's own isolated in-memory
+    database**.  No single unified hash chain exists across threads: each
+    thread appends its receipts to its own private chain rooted at the genesis
+    constant, completely invisible to all other threads.  ``BEGIN IMMEDIATE``
+    has no cross-thread serialisation effect because there is no shared database
+    file to lock.
+
+    Consequences for operators and test authors:
+
+    * In-memory instances are appropriate for single-threaded unit tests, fast
+      schema-bootstrap validation, and lifecycle correctness checks where chain
+      continuity across threads is not required.
+    * ``verify_ledger_integrity()`` called from the main thread after a
+      multi-thread in-memory append sequence inspects only the main thread's
+      private in-memory database, **not** the aggregate of all thread writes.
+    * For concurrent write serialisation testing, multi-producer chain-linearity
+      assertions, and production audit workloads, a file-backed database path
+      must be used.  File-backed instances share a single SQLite WAL file across
+      all thread-local connections, enabling true cross-thread append ordering
+      and a single verifiable chain.
+
     :param db_path: Filesystem path to the SQLite database file.  Pass
-        ``":memory:"`` for an ephemeral in-process store (useful in tests).
+        ``":memory:"`` for an ephemeral in-process store (useful in tests,
+        subject to the per-thread isolation caveat described above).
     :type db_path: str
     """
+
+    _db_path: str
+    _closed: bool
+    _thread_local: threading.local
+    _connections: list[sqlite3.Connection]
+    _connections_lock: threading.Lock
 
     def __init__(self, db_path: str = ".keys/sovereign_audit.db") -> None:
         if db_path != ":memory:":

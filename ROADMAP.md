@@ -311,9 +311,11 @@ assert ledger.verify_ledger_integrity()  # → True on an untampered chain
   percentage, sieved content), field-boundary delimiter collision resistance, mid-chain
   deletion detection, injected-row detection, full lifecycle correctness, closed-instance
   guard (`SovereignStorageError` on post-`close()` access), concurrent write serialisation
-  via `BEGIN IMMEDIATE` (8-thread stress tests across separate-instance, shared-instance
-  file-backed, and shared-instance in-memory scenarios confirming zero chain fragmentation
-  and correct per-thread DDL bootstrapping), and connection-registry purge verification
+  via `BEGIN IMMEDIATE` (8-thread stress tests across separate-instance and
+  shared-instance file-backed scenarios confirming zero chain fragmentation; plus a
+  shared-instance in-memory scenario confirming correct per-thread DDL bootstrapping —
+  each thread obtains an independent isolated SQLite store, so chain linearity
+  assertions apply only to file-backed topologies), and connection-registry purge verification
   (`close()` releases all thread-local handles to zero).
 
 ---

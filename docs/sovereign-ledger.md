@@ -145,7 +145,7 @@ The following pragmas are applied at every connection initialization:
 | Pragma | Value | Effect |
 |---|---|---|
 | `journal_mode` | `WAL` | Write-Ahead Logging for concurrent read access |
-| `synchronous` | `NORMAL` | Durable on OS crash; fast on power failure |
+| `synchronous` | `NORMAL` | Durable on application crash. In WAL mode, transactions may be lost on OS crash or sudden power failure before a checkpoint occurs. |
 | `foreign_keys` | `ON` | Enforce relational integrity constraints |
 
 ---

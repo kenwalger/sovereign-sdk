@@ -54,10 +54,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     close-and-reopen lifecycle correctness, connection-registry purge verification
     (`close()` releases all thread-local handles and empties the registry to zero), and
     `test_out_of_band_tax_savings_percentage_tamper_breaks_chain` covering the
-    remaining column isolation gap, concurrent stress tests (`TestConcurrentAppend`)
-    covering separate-instance, shared-instance file-backed, and shared-instance
-    in-memory scenarios, and closed-instance lifecycle hardening verifying that
-    `SovereignStorageError` is raised immediately on any post-`close()` access.
+    remaining column isolation gap, concurrent write stress tests
+    (`TestConcurrentAppend`) covering separate-instance and shared-instance
+    file-backed scenarios (8-thread chain-linearity assertions) plus a
+    shared-instance in-memory scenario validating per-thread DDL bootstrap
+    correctness (each thread receives an independent isolated SQLite in-memory
+    store; writes are not aggregated into a single unified chain), and
+    closed-instance lifecycle hardening verifying that `SovereignStorageError`
+    is raised immediately on any post-`close()` access.
 
 - **Phase 7 — `sovereign-sieve` standalone micro-utility package** (new workspace member
   `packages/sovereign-sieve/`): Extracted `sovereign-sieve` into a zero-dependency
