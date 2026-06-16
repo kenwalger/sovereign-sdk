@@ -133,15 +133,30 @@ class SovereignLedger:
     # ------------------------------------------------------------------
 
     def _get_conn(self) -> sqlite3.Connection:
-        # Returns the calling thread's dedicated sqlite3.Connection, creating
-        # and registering a new one on first access from this thread.
-        if self._closed:
-            raise SovereignStorageError(
-                "Cannot acquire connection; SovereignLedger instance has been"
-                " explicitly closed."
-            )
+        # Returns the calling thread's dedicated sqlite3.Connection.
+        #
+        # Fast path: the thread already has a registered handle.  A bare read
+        # of self._closed is sufficient here — CPython's GIL makes bool reads
+        # atomic, and the only risk is using a handle during the brief teardown
+        # window, which sqlite3 itself surfaces as a ProgrammingError.
         conn: sqlite3.Connection | None = getattr(self._thread_local, "conn", None)
-        if conn is None:
+        if conn is not None:
+            if self._closed:
+                raise SovereignStorageError(
+                    "Cannot acquire connection; SovereignLedger instance has been"
+                    " explicitly closed."
+                )
+            return conn
+        # Slow path: first access from this thread.  The closed check, connection
+        # creation, and registry append are all performed under _connections_lock
+        # so that close() cannot set _closed and clear the registry between the
+        # guard check and the append, which would leave the new handle untracked.
+        with self._connections_lock:
+            if self._closed:
+                raise SovereignStorageError(
+                    "Cannot acquire connection; SovereignLedger instance has been"
+                    " explicitly closed."
+                )
             conn = sqlite3.connect(
                 self._db_path, check_same_thread=False, isolation_level=None
             )
@@ -154,8 +169,7 @@ class SovereignLedger:
                 # handle immediately so workers never hit "no such table".
                 conn.executescript(_DDL)
             self._thread_local.conn = conn
-            with self._connections_lock:
-                self._connections.append(conn)
+            self._connections.append(conn)
         return conn
 
     @property
@@ -377,20 +391,22 @@ class SovereignLedger:
     def close(self) -> None:
         """Release all thread-local SQLite connection handles tracked by this instance.
 
-        Sets the instance's closed flag before releasing connections so that any
-        concurrent or subsequent call to :meth:`_get_conn` raises
-        :exc:`SovereignStorageError` immediately rather than attempting to use
-        a partially or fully released connection pool.  Iterates every connection
-        registered across all threads and closes each one, ensuring no file
-        descriptors are leaked regardless of how many producer threads have
-        accessed the ledger.  Called automatically by :meth:`__exit__` when the
-        instance is used as a context manager.
+        Acquires :attr:`_connections_lock` and sets ``_closed = True`` as the
+        first operation inside the lock, making the flag transition and the
+        connection-pool teardown a single atomic unit.  Any thread that attempts
+        :meth:`_get_conn` after the lock is released will observe ``_closed``
+        as ``True`` and raise :exc:`SovereignStorageError` before touching any
+        connection object.  Any thread that holds the lock waiting to register a
+        new connection will see ``_closed = True`` immediately on lock acquisition
+        and raise without appending, eliminating the dangling-handle accumulation
+        window.  Called automatically by :meth:`__exit__` when the instance is
+        used as a context manager.
 
         :return: None
         :rtype: None
         """
-        self._closed = True
         with self._connections_lock:
+            self._closed = True
             for conn in self._connections:
                 try:
                     conn.close()
