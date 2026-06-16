@@ -29,13 +29,13 @@ class ESP32HardwareDriver(SovereignCryptoDriver):
     def initialize_hardware(self) -> None:
         """Configure the ESP32 hardware crypto accelerator subsystem.
 
-        Next sprint: invoke ``machine`` peripheral bindings to enable the
-        SHA hardware engine and load key material from the secure partition.
-
         :rtype: None
+        :raises NotImplementedError: Until low-level register engineering is complete.
         """
-        # Placeholder: hardware accelerator configuration deferred to next sprint.
-        self._initialized = True
+        raise NotImplementedError(
+            "ESP32 hardware crypto drivers are pending low-level register engineering "
+            "in the next sprint."
+        )
 
     def algorithm(self) -> str:
         """Return the canonical algorithm identifier for this driver.
