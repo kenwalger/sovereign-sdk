@@ -2,6 +2,7 @@
 import hashlib
 import sqlite3
 from pathlib import Path
+from types import TracebackType
 from typing import Any
 
 
@@ -79,6 +80,13 @@ class SovereignLedger:
 
     The public interface is strictly append-only: :meth:`append_receipt` and
     :meth:`verify_ledger_integrity`.  No update or deletion methods exist.
+
+    Supports the Python context manager protocol.  Use a ``with`` block to
+    guarantee connection release even when an unhandled exception terminates
+    the application ring::
+
+        with SovereignLedger(db_path=".keys/sovereign_audit.db") as ledger:
+            ledger.append_receipt(receipt, sieved_content)
 
     Concurrent writers are serialised through ``BEGIN IMMEDIATE`` transactions,
     which acquire an exclusive reserved lock before the chain tip is read.
@@ -180,8 +188,8 @@ class SovereignLedger:
             acquired within the configured ``busy_timeout`` (transient write
             collision under high concurrency).
         """
-        metadata: dict[str, Any] = receipt.get("metadata") or {}
-        prose_tax: dict[str, Any] = metadata.get("prose_tax_summary") or {}
+        metadata: dict[str, Any] = receipt.get("metadata") or {}  # :type: Any — caller-defined JSON sub-object; field keys are producer-specific and cannot be statically narrowed at the ledger boundary.
+        prose_tax: dict[str, Any] = metadata.get("prose_tax_summary") or {}  # :type: Any — optional telemetry bag with no enforced schema; field presence varies per producing gateway.
 
         raw_tokens: int | None = prose_tax.get("raw_token_count")
         optimized_tokens: int | None = prose_tax.get("optimized_token_count")
@@ -323,9 +331,47 @@ class SovereignLedger:
         return True
 
     def close(self) -> None:
-        """Release the SQLite connection.
+        """Release the underlying SQLite connection handle.
+
+        Called automatically by :meth:`__exit__` when the instance is used as
+        a context manager.  Safe to call after the connection is already closed
+        (``sqlite3`` silently ignores redundant close calls).
 
         :return: None
         :rtype: None
         """
         self._conn.close()
+
+    def __enter__(self) -> "SovereignLedger":
+        """Enter the runtime context, returning the ledger instance.
+
+        :return: The ``SovereignLedger`` instance itself, bound by the ``with``
+            statement target.
+        :rtype: SovereignLedger
+        """
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        """Exit the runtime context, releasing the SQLite connection.
+
+        Called automatically at the close of a ``with`` block regardless of
+        whether an exception was raised, ensuring the file descriptor is never
+        leaked in long-running production server lifecycles.  Exceptions are
+        not suppressed; they propagate normally after the connection is closed.
+
+        :param exc_type: Exception class raised inside the ``with`` block, or
+            ``None`` if the block exited cleanly.
+        :type exc_type: type[BaseException] | None
+        :param exc_val: Exception instance, or ``None``.
+        :type exc_val: BaseException | None
+        :param exc_tb: Traceback object, or ``None``.
+        :type exc_tb: TracebackType | None
+        :return: None (exceptions are not suppressed).
+        :rtype: None
+        """
+        self.close()

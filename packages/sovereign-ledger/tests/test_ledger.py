@@ -150,6 +150,19 @@ class TestSovereignLedgerInit:
         assert cur.fetchone()[0] == 1
         l2.close()
 
+    def test_context_manager_closes_connection_on_exit(self, tmp_path):
+        """SovereignLedger must support the context manager protocol so that
+        the underlying SQLite file descriptor is released automatically on
+        __exit__, preventing leaks in long-running production server lifecycles.
+        """
+        db_path = str(tmp_path / "ctx_mgr.db")
+        with SovereignLedger(db_path) as ledger:
+            ledger.append_receipt(_make_receipt("hash_CTX", "sig_CTX"), "ctx content")
+            assert ledger.verify_ledger_integrity() is True
+        # After __exit__ the connection is closed; any further operation raises.
+        with pytest.raises(sqlite3.ProgrammingError):
+            ledger._conn.execute("SELECT 1")
+
 
 # ---------------------------------------------------------------------------
 # TestAppendReceipt

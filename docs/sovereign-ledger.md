@@ -208,6 +208,7 @@ Releases the SQLite connection.
 | Fabricated row injected with wrong parent | Parent pointer diverges from re-derived chain; sweep returns `False` |
 | Tail-row deletion (no anchor) | Surviving prefix chain is internally consistent; undetectable by sweep alone — requires external tip-hash anchor |
 | Tail-row deletion with `expected_tip_hash` | `last_payload_hash != expected_tip_hash` → `verify_ledger_integrity()` returns `False` |
+| Tail-row injection (attacker computes valid parent hash for fabricated row) | Interior chain sweep passes because the appended row is cryptographically consistent; requires `expected_tip_hash` anchor — unauthorized extension detected when last `payload_hash` diverges from the operator-held tip |
 | Replay / reorder attack | `AUTOINCREMENT` id sequence + chained parent hash prevents silent reordering |
 
 ---
