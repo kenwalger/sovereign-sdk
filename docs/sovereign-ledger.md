@@ -17,18 +17,17 @@ detectable.
 ```python
 from sovereign_ledger import SovereignLedger
 
-# Open (or create) the audit database
-ledger = SovereignLedger(db_path=".keys/sovereign_audit.db")
+# Open (or create) the audit database — context manager guarantees connection release
+with SovereignLedger(db_path=".keys/sovereign_audit.db") as ledger:
+    # Append a signed ForensicReceipt after a sieve-and-sign pass
+    ledger.append_receipt(receipt, sieved_content)
 
-# Append a signed ForensicReceipt after a sieve-and-sign pass
-ledger.append_receipt(receipt, sieved_content)
+    # Verify the full chain integrity at any time
+    ok = ledger.verify_ledger_integrity()                       # True on an untampered ledger
 
-# Verify the full chain integrity at any time
-ok = ledger.verify_ledger_integrity()                       # True on an untampered ledger
-
-# Pin the sweep to a known tip to detect tail-truncation attacks
-tip = ledger.append_receipt(receipt, sieved_content)        # capture after last append
-ok  = ledger.verify_ledger_integrity(expected_tip_hash=tip) # False if last row was deleted
+    # Pin the sweep to a known tip to detect tail-truncation attacks
+    tip = ledger.append_receipt(receipt, sieved_content)        # capture after last append
+    ok  = ledger.verify_ledger_integrity(expected_tip_hash=tip) # False if last row was deleted
 ```
 
 ---
@@ -234,9 +233,9 @@ from sovereign_core import SovereignGateway
 from sovereign_ledger import SovereignLedger
 
 gateway = SovereignGateway(signing_key=".keys/sovereign_identity.pem")
-ledger  = SovereignLedger(db_path=".keys/sovereign_audit.db")
 
-response = await gateway.sieve_and_sign(raw_payload)
-ledger.append_receipt(response.receipt, response.content)
+with SovereignLedger(db_path=".keys/sovereign_audit.db") as ledger:
+    response = await gateway.sieve_and_sign(raw_payload)
+    ledger.append_receipt(response.receipt, response.content)
 ```
 

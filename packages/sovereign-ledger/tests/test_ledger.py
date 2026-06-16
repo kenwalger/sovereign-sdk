@@ -14,6 +14,7 @@ Invariants verified across every test class:
 import hashlib
 import sqlite3
 import threading
+import warnings
 from typing import Any
 from unittest.mock import patch
 
@@ -989,6 +990,7 @@ class TestConcurrentAppend:
         assert ledger.verify_ledger_integrity() is True
         ledger.close()
 
+    @pytest.mark.filterwarnings("ignore::RuntimeWarning")
     def test_in_memory_shared_instance_multi_thread(self):
         """A single SovereignLedger(":memory:") shared across N concurrent threads
         must bootstrap the forensic_ledger schema on each new thread-local
@@ -1000,6 +1002,10 @@ class TestConcurrentAppend:
         the DDL on every new in-memory connection so workers never hit a missing
         schema.  The primary invariant verified here is that no thread raises an
         exception and all N append operations return valid payload hashes.
+
+        RuntimeWarning is suppressed here because cross-thread in-memory access
+        is the explicit subject under test; the dedicated warning test covers
+        that emission path.
         """
         N = 4
         errors: list[Exception] = []
@@ -1033,6 +1039,44 @@ class TestConcurrentAppend:
         )
         assert len(results) == N
         ledger.close()
+
+    def test_in_memory_cross_thread_emits_runtime_warning(self):
+        """_get_conn() must emit a RuntimeWarning when a worker thread (whose
+        thread identifier differs from the creator's) opens an in-memory
+        connection for the first time.
+
+        The warning is captured inside the worker thread using
+        warnings.catch_warnings(record=True) so that it can be asserted from
+        the main thread after joining, without relying on global warning state.
+        """
+        ledger = SovereignLedger(":memory:")
+        captured: list[tuple[type, str]] = []
+        barrier = threading.Barrier(2)
+        errors: list[Exception] = []
+
+        def worker() -> None:
+            try:
+                barrier.wait()
+                with warnings.catch_warnings(record=True) as w:
+                    warnings.simplefilter("always")
+                    ledger.append_receipt(
+                        _make_receipt("hash_WRN", "sig_WRN"), "warning content"
+                    )
+                for entry in w:
+                    captured.append((entry.category, str(entry.message)))
+            except Exception as exc:
+                errors.append(exc)
+
+        t = threading.Thread(target=worker)
+        t.start()
+        barrier.wait()
+        t.join()
+        ledger.close()
+
+        assert not errors, f"Worker thread raised unexpectedly: {errors}"
+        runtime_msgs = [msg for cat, msg in captured if issubclass(cat, RuntimeWarning)]
+        assert runtime_msgs, "Expected RuntimeWarning was not emitted for cross-thread in-memory access"
+        assert any("in-memory instance" in msg for msg in runtime_msgs)
 
     def test_close_purges_all_registered_connections(self, tmp_path):
         """close() must release every connection registered across all threads

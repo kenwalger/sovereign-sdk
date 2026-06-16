@@ -2,6 +2,7 @@
 import hashlib
 import sqlite3
 import threading
+import warnings
 from pathlib import Path
 from types import TracebackType
 from typing import Any
@@ -145,6 +146,7 @@ class SovereignLedger:
 
     _db_path: str
     _closed: bool
+    _creator_thread_id: int
     _thread_local: threading.local
     _connections: list[sqlite3.Connection]
     _connections_lock: threading.Lock
@@ -157,6 +159,7 @@ class SovereignLedger:
         self._thread_local = threading.local()
         # Tracks every per-thread connection so close() can release all file
         # descriptors regardless of which thread calls it.
+        self._creator_thread_id = threading.get_ident()
         self._connections: list[sqlite3.Connection] = []
         self._connections_lock = threading.Lock()
         # Bootstrap the forensic_ledger schema and triggers on the initialising
@@ -201,6 +204,14 @@ class SovereignLedger:
             conn.row_factory = sqlite3.Row
             self._apply_pragmas(conn)
             if self._db_path == ":memory:":
+                if threading.get_ident() != self._creator_thread_id:
+                    warnings.warn(
+                        "SovereignLedger in-memory instance shared across distinct execution threads. "
+                        "SQLite isolated memory architecture creates independent thread-local memory spaces; "
+                        "appends from this worker thread will not be visible on the primary thread ledger chain.",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
                 # Each in-memory connection is an independent empty SQLite store;
                 # the schema written by _bootstrap_schema() on the initialising
                 # thread does not carry over.  Hydrate every new thread-local
@@ -216,7 +227,12 @@ class SovereignLedger:
         return self._get_conn()
 
     def _apply_pragmas(self, conn: sqlite3.Connection) -> None:
-        conn.execute("PRAGMA journal_mode = WAL;")
+        journal_mode: str = conn.execute("PRAGMA journal_mode = WAL;").fetchone()[0]
+        if self._db_path != ":memory:" and str(journal_mode).lower() != "wal":
+            raise SovereignStorageError(
+                f"Failed to initialize WAL journal mode; engine returned '{journal_mode}'. "
+                "The underlying file system configuration may not support write-ahead logging."
+            )
         conn.execute("PRAGMA synchronous = NORMAL;")
         conn.execute("PRAGMA foreign_keys = ON;")
         # Retry for up to 5 seconds before surfacing a lock error, supporting
