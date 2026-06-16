@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
+  member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing
+  sensor observations into tamper-evident, minified JSON transmission envelopes at the exact
+  point of data genesis on bare-metal microcontrollers (ESP32, Raspberry Pi Pico).
+  Zero runtime dependencies; internal library code restricted to standard MicroPython built-ins
+  (`json`, `sys`, `machine`, `hashlib`, `binascii`).
+
+  - **`SovereignCryptoDriver`** (`interface.py`): Lightweight HAL base class with explicit
+    `NotImplementedError` stubs for `initialize_hardware() -> None` and
+    `sign(payload: bytes) -> bytes`.  Intentionally avoids the standard-library `abc` module
+    to remain compatible with constrained MicroPython heap environments.
+  - **`SovereignEnvelope`** (`envelope.py`): Seals observations in a four-step deterministic
+    pipeline: (1) payload canonicalization via `json.dumps(..., separators=(',', ':'))`;
+    (2) strict preimage construction as `node_id|timestamp|canonical_payload`;
+    (3) preimage dispatch across the driver's `sign()` boundary;
+    (4) ultra-minified JSON serialization of the transmission dict `{"n", "t", "d", "s"}`.
+    Returns raw bytes safe for constrained transport channels.
+  - **`bootstrap_sensor_node(node_id, private_key_path) -> SovereignEnvelope`** (`__init__.py`):
+    Inspects `sys.platform.lower()` at runtime; routes to `ESP32HardwareDriver` when `"esp32"`
+    is present in the platform string, otherwise binds `SoftwareFallbackDriver`.  Calls
+    `initialize_hardware()` on the selected driver before returning the configured envelope.
+  - **`SoftwareFallbackDriver`** (`drivers/software_fallback.py`): Pure-Python SHA-256 signing
+    driver using only `hashlib` and `binascii`.  Returns 64-byte hex-encoded digest bytes.
+    Suitable for desktop CI validation and any MicroPython platform without on-chip crypto
+    acceleration.  Not intended for production custody chains.
+  - **`ESP32HardwareDriver`** (`drivers/esp32_hardware.py`): Placeholder shell class
+    establishing the class contract and import surface for the ESP32 on-chip SHA/ECC
+    accelerator via MicroPython `machine` and `hashlib` HAL bindings.  Full low-level
+    register-level engineering deferred to the next sprint.
+
+  - **`packages/sovereign-sensor/tests/test_sensor.py`** — 14 test cases across two classes
+    (`TestBootstrap`: 3 cases; `TestEnvelopeSeal`: 11 cases) verifying: platform auto-detection
+    binds `SoftwareFallbackDriver` on non-ESP32 hosts; `initialize_hardware()` is called before
+    `bootstrap_sensor_node` returns; `seal()` returns `bytes`; output parses as valid JSON;
+    transmission envelope contains exactly the four keys `n`, `t`, `d`, `s`; `n` and `t` are
+    preserved verbatim; payload dict round-trips without mutation; signature is a non-empty
+    ASCII string; software driver signature is exactly 64 hex characters (SHA-256 digest);
+    output is ultra-minified (no whitespace after separators); identical inputs produce
+    byte-identical output (determinism); distinct payloads produce distinct signatures.
+
 - **Phase 8 — `sovereign-ledger` immutable provenance engine** (new workspace member
   `packages/sovereign-ledger/`): Introduces a local-first, SQLite-backed, append-only
   audit ledger that enforces Write-Side Custody for all `ForensicReceipt` transactions.

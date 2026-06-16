@@ -321,7 +321,52 @@ assert ledger.verify_ledger_integrity()  # → True on an untampered chain
 
 ---
 
-## Phase 9 — Isolated Context Vault & Governance Server (`sovereign-vault`)
+## Phase 9 — Bare-Metal Write-Side Custody Sensor Layer (`sovereign-sensor`) — Shipped ✓
+
+**Target:** Extend Write-Side Custody enforcement to bare-metal microcontroller sensor nodes
+running MicroPython, sealing each observation at the exact point of data genesis before any
+network transit or cloud ingestion occurs.
+
+```python
+from sovereign_sensor import bootstrap_sensor_node
+
+# Auto-selects hardware or software crypto driver at runtime
+envelope = bootstrap_sensor_node("node-temperature-01", "/flash/keys/node.key")
+wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 21.4})
+# → b'{"n":"node-temperature-01","t":"2026-06-16T00:00:00Z","d":{"sensor":"temp","value":21.4},"s":"<hex-sig>"}'
+```
+
+**Delivered:**
+
+* [x] `SovereignCryptoDriver` HAL base class (`interface.py`) — enforces `initialize_hardware()`
+  and `sign(payload: bytes) -> bytes` contract stubs via `NotImplementedError` without importing
+  the `abc` module, keeping the MicroPython heap footprint minimal.
+* [x] `SovereignEnvelope` (`envelope.py`) — canonicalizes payload via
+  `json.dumps(..., separators=(',', ':'))`, constructs the strict preimage
+  `node_id|timestamp|canonical_payload`, dispatches across the driver signing boundary,
+  and packs all fields into an ultra-minified JSON wire envelope `{"n", "t", "d", "s"}`.
+* [x] `bootstrap_sensor_node(node_id, private_key_path) -> SovereignEnvelope` (`__init__.py`) —
+  inspects `sys.platform.lower()` to route between `ESP32HardwareDriver` (on `"esp32"` targets)
+  and `SoftwareFallbackDriver` (all other platforms); calls `initialize_hardware()` before returning.
+* [x] `SoftwareFallbackDriver` (`drivers/software_fallback.py`) — pure-Python SHA-256 signing
+  driver using only `hashlib` and `binascii`; returns hex-encoded digest bytes; suitable for
+  desktop CI and any MicroPython platform without on-chip crypto acceleration.
+* [x] `ESP32HardwareDriver` (`drivers/esp32_hardware.py`) — placeholder shell class establishing
+  the class contract and import surface for the ESP32 on-chip accelerator; full register-level
+  engineering deferred to the next sprint.
+* [x] `packages/sovereign-sensor/pyproject.toml` — zero runtime dependencies; targets Python 3.12
+  for desktop test compatibility; restricts internal library code to standard MicroPython built-ins
+  (`json`, `sys`, `machine`, `hashlib`, `binascii`).
+* [x] 14-case desktop validation test suite (`tests/test_sensor.py`) across two classes
+  (`TestBootstrap`, `TestEnvelopeSeal`) verifying platform auto-detection to software fallback,
+  driver initialization confirmation, bytes return type, valid JSON parse, exact 4-key envelope
+  structure (`n`, `t`, `d`, `s`), field identity preservation, SHA-256 hex signature length (64
+  chars), ultra-minified output (no whitespace after separators), determinism, and cross-payload
+  signature divergence. **14 passed, 0 failed.**
+
+---
+
+## Phase 10 — Isolated Context Vault & Governance Server (`sovereign-vault`)
 
 **Target:** Implement the "Sovereign Vault" architecture as an isolated local orchestration
 boundary, delivering a first-class Model Context Protocol (MCP) server for enterprise
