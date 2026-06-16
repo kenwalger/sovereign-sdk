@@ -884,6 +884,39 @@ class TestEdgeCases:
         assert cur.fetchone()[0] == 2
         l2.close()
 
+    def test_verify_integrity_handles_concurrent_close_without_exception_explosion(self, mem_ledger):
+        """SovereignStorageError raised by _get_conn() during the finally COMMIT
+        cleanup in verify_ledger_integrity() must be swallowed so that the sweep's
+        True return value propagates to the caller unmodified.
+
+        Race reproduced without threading: _get_conn() is patched so that the
+        third call — the COMMIT in the finally block — raises SovereignStorageError,
+        simulating close() racing between sweep completion and transaction teardown.
+        The guarded except clause must catch it; the original True result must be
+        what the caller sees.
+
+        Call sequence for verify_ledger_integrity() on an empty ledger:
+          1. self._conn.execute("BEGIN DEFERRED")
+          2. self._conn.execute("SELECT ...")   — row sweep (no rows)
+          3. self._conn.execute("COMMIT")       — finally cleanup ← race injected here
+        """
+        original_get_conn = mem_ledger._get_conn
+        call_count = 0
+
+        def get_conn_with_simulated_close_race() -> sqlite3.Connection:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 3:
+                raise SovereignStorageError(
+                    "simulated concurrent close between sweep completion and COMMIT"
+                )
+            return original_get_conn()
+
+        with patch.object(mem_ledger, "_get_conn", side_effect=get_conn_with_simulated_close_race):
+            result = mem_ledger.verify_ledger_integrity()
+
+        assert result is True
+
 
 # ---------------------------------------------------------------------------
 # TestConcurrentAppend

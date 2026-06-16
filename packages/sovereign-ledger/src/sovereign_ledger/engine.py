@@ -431,8 +431,10 @@ class SovereignLedger:
             has been closed via :meth:`close` prior to the call; raised by
             :meth:`_get_conn` before any database operation is attempted.
         """
-        self._conn.execute("BEGIN DEFERRED")
+        read_started: bool = False
         try:
+            self._conn.execute("BEGIN DEFERRED")
+            read_started = True
             expected_parent = _GENESIS_HASH
             last_payload_hash: str | None = None
             for row in self._conn.execute(
@@ -462,7 +464,17 @@ class SovereignLedger:
 
             return True
         finally:
-            self._conn.execute("COMMIT")
+            if read_started:
+                try:
+                    self._conn.execute("COMMIT")
+                except (sqlite3.Error, SovereignStorageError):
+                    # SovereignStorageError is caught here because close() can race
+                    # with an active sweep: if _closed is set between the sweep
+                    # completing and this COMMIT attempt, _get_conn() raises
+                    # SovereignStorageError (a RuntimeError, not a sqlite3.Error).
+                    # Swallowing it here ensures the sweep's return value —
+                    # True or False — propagates to the caller unmasked.
+                    pass
 
     def close(self) -> None:
         """Release all thread-local SQLite connection handles tracked by this instance.
