@@ -39,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     collapses the sequence, and injected rows whose `parent_hash` does not match the
     re-derived value.
 
-  - **`packages/sovereign-ledger/tests/test_ledger.py`** — 48 test cases across seven
+  - **`packages/sovereign-ledger/tests/test_ledger.py`** — 50 test cases across seven
     classes (`TestSovereignLedgerInit`, `TestAppendReceipt`, `TestHashChain`,
     `TestImmutabilityTriggers`, `TestVerifyLedgerIntegrity`, `TestEdgeCases`,
     `TestConcurrentAppend`) covering schema assertion, WAL mode verification,

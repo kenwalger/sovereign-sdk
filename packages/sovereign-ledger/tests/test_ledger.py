@@ -14,6 +14,7 @@ Invariants verified across every test class:
 import hashlib
 import sqlite3
 import threading
+from typing import Any
 
 import pytest
 
@@ -35,7 +36,7 @@ def _make_receipt(
     raw_tokens: int = 100,
     optimized_tokens: int = 75,
     savings_pct: float = 25.0,
-) -> dict:
+) -> dict[str, Any]:
     return {
         "timestamp": timestamp,
         "payload_hash": payload_hash,
@@ -49,6 +50,23 @@ def _make_receipt(
             }
         },
     }
+
+
+def _expected_parent(row: sqlite3.Row) -> str:
+    """Re-derive the expected parent_hash from a sqlite3.Row using the same
+    eight-field NUL-delimited canonical preimage as the production engine."""
+    return hashlib.sha256(
+        "\x00".join([
+            row["signature"],
+            row["payload_hash"],
+            row["parent_hash"],
+            row["timestamp"],
+            "NULL" if row["raw_token_count"] is None else str(row["raw_token_count"]),
+            "NULL" if row["optimized_token_count"] is None else str(row["optimized_token_count"]),
+            "NULL" if row["tax_savings_percentage"] is None else str(row["tax_savings_percentage"]),
+            row["sieved_content"],
+        ]).encode("utf-8")
+    ).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -241,22 +259,12 @@ class TestHashChain:
         mem_ledger.append_receipt(_make_receipt("hash_B2", "sig_B2"), "content2")
 
         cur = mem_ledger._conn.execute(
-            "SELECT signature, payload_hash, parent_hash, "
-            "sieved_content, timestamp, tax_savings_percentage "
+            "SELECT signature, payload_hash, parent_hash, timestamp, "
+            "raw_token_count, optimized_token_count, tax_savings_percentage, sieved_content "
             "FROM forensic_ledger WHERE id = 1"
         )
         row1 = cur.fetchone()
-        pct = row1["tax_savings_percentage"]
-        expected = hashlib.sha256(
-            (
-                row1["signature"]
-                + row1["payload_hash"]
-                + row1["parent_hash"]
-                + row1["sieved_content"]
-                + row1["timestamp"]
-                + ("" if pct is None else str(pct))
-            ).encode()
-        ).hexdigest()
+        expected = _expected_parent(row1)
 
         cur2 = mem_ledger._conn.execute(
             "SELECT parent_hash FROM forensic_ledger WHERE id = 2"
@@ -268,27 +276,56 @@ class TestHashChain:
             mem_ledger.append_receipt(_make_receipt(f"hash_C{i}", f"sig_C{i}"), "c")
 
         cur = mem_ledger._conn.execute(
-            "SELECT signature, payload_hash, parent_hash, "
-            "sieved_content, timestamp, tax_savings_percentage "
+            "SELECT signature, payload_hash, parent_hash, timestamp, "
+            "raw_token_count, optimized_token_count, tax_savings_percentage, sieved_content "
             "FROM forensic_ledger WHERE id = 2"
         )
         row2 = cur.fetchone()
-        pct = row2["tax_savings_percentage"]
-        expected = hashlib.sha256(
-            (
-                row2["signature"]
-                + row2["payload_hash"]
-                + row2["parent_hash"]
-                + row2["sieved_content"]
-                + row2["timestamp"]
-                + ("" if pct is None else str(pct))
-            ).encode()
-        ).hexdigest()
+        expected = _expected_parent(row2)
 
         cur3 = mem_ledger._conn.execute(
             "SELECT parent_hash FROM forensic_ledger WHERE id = 3"
         )
         assert cur3.fetchone()[0] == expected
+
+    def test_field_boundary_delimiter_prevents_preimage_collision(self, tmp_path):
+        """Two row-0 preimages that are byte-identical under naive string
+        concatenation must produce distinct SHA-256 digests — and therefore
+        distinct row-1 parent_hash values — under the NUL-delimited preimage.
+
+        "AAA" + "BBBsuffix" == "AAABBB" + "suffix" without delimiters.
+        "AAA\\x00BBBsuffix" != "AAABBB\\x00suffix" with delimiters.
+        This closes the length-substitution field-boundary attack.
+        """
+        common_ts = "2026-06-15T12:00:00Z"
+        common_content = "shared sieved content"
+
+        def _raw(sig: str, ph: str) -> dict[str, Any]:
+            return {
+                "timestamp": common_ts,
+                "payload_hash": ph,
+                "public_key": "key==",
+                "signature": sig,
+                "metadata": {},
+            }
+
+        db1 = SovereignLedger(str(tmp_path / "boundary_1.db"))
+        db2 = SovereignLedger(str(tmp_path / "boundary_2.db"))
+
+        # Both row-0 preimages concatenate to "AAABBBsuffix<common_fields>"
+        # without delimiters; with NUL delimiters they diverge immediately.
+        db1.append_receipt(_raw("AAA", "BBBsuffix"), common_content)
+        db2.append_receipt(_raw("AAABBB", "suffix"), common_content)
+
+        # A second identical row forces parent_hash derivation from row 0.
+        db1.append_receipt(_make_receipt("hash_bd2", "sig_bd2"), "c2")
+        db2.append_receipt(_make_receipt("hash_bd2", "sig_bd2"), "c2")
+
+        cur1 = db1._conn.execute("SELECT parent_hash FROM forensic_ledger WHERE id = 2")
+        cur2 = db2._conn.execute("SELECT parent_hash FROM forensic_ledger WHERE id = 2")
+        assert cur1.fetchone()[0] != cur2.fetchone()[0]
+        db1.close()
+        db2.close()
 
     def test_hash_chain_is_deterministic_across_instances(self, tmp_path):
         parent_hashes = []
@@ -574,6 +611,28 @@ class TestVerifyLedgerIntegrity:
         raw.execute("DROP TRIGGER IF EXISTS prevent_update_forensic_ledger")
         raw.execute(
             "UPDATE forensic_ledger SET timestamp = '1970-01-01T00:00:00Z' WHERE id = 1"
+        )
+        raw.commit()
+        raw.close()
+
+        assert ledger.verify_ledger_integrity() is False
+
+    def test_outofband_token_count_tamper_breaks_chain(self, file_ledger):
+        """Mutating only the raw_token_count and optimized_token_count columns
+        of a historical row — leaving all hash and signature columns intact —
+        must break the chain because all eight data columns are sealed inside
+        the NUL-delimited SHA-256 parent_hash preimage.
+        """
+        ledger, db_path = file_ledger
+        ledger.append_receipt(_make_receipt("hash_TC1", "sig_TC1"), "content 1")
+        ledger.append_receipt(_make_receipt("hash_TC2", "sig_TC2"), "content 2")
+        assert ledger.verify_ledger_integrity() is True
+
+        raw = sqlite3.connect(db_path)
+        raw.execute("DROP TRIGGER IF EXISTS prevent_update_forensic_ledger")
+        raw.execute(
+            "UPDATE forensic_ledger "
+            "SET raw_token_count = 9999, optimized_token_count = 1 WHERE id = 1"
         )
         raw.commit()
         raw.close()

@@ -65,29 +65,42 @@ END;
 Any client that opens the `.db` file — including desktop SQL browsers — will receive
 a hard `OperationalError` on any mutation attempt.
 
-### 3. SHA-256 hash chain — full-row payload sealing
+### 3. SHA-256 hash chain — full-row payload sealing with field delimiters
 
 Every row stores a `parent_hash` field that is the SHA-256 digest of the immediately
-preceding row's **complete six-column canonical preimage**.  The first row uses a
-hardcoded genesis constant as its parent:
+preceding row's **complete eight-column canonical preimage**, assembled with a NUL byte
+(`\x00`) delimiter between every field.  The first row uses a hardcoded genesis
+constant as its parent:
 
 ```
 parent_hash[0]  = SHA-256("SOVEREIGN_LEDGER_GENESIS_BLOCK_v1.0")
 
 parent_hash[N]  = SHA-256(
-                      row[N-1].signature
-                    + row[N-1].payload_hash
-                    + row[N-1].parent_hash
-                    + row[N-1].sieved_content
-                    + row[N-1].timestamp
-                    + str(row[N-1].tax_savings_percentage)   ← "" when NULL
+                      "\x00".join([
+                          row[N-1].signature,
+                          row[N-1].payload_hash,
+                          row[N-1].parent_hash,
+                          row[N-1].timestamp,
+                          str(row[N-1].raw_token_count),         ← "NULL" when NULL
+                          str(row[N-1].optimized_token_count),   ← "NULL" when NULL
+                          str(row[N-1].tax_savings_percentage),  ← "NULL" when NULL
+                          row[N-1].sieved_content,
+                      ])
                   )
 ```
 
-Sealing all six columns in the preimage means that **any out-of-band mutation of
-any stored value** — including the textual payload (`sieved_content`), the ingestion
-timestamp, or the Prose Tax savings metric — immediately breaks the chain at the point
-of corruption and is detected by `verify_ledger_integrity()`.
+Sealing all eight data columns in the NUL-delimited preimage provides two layers of
+tamper evidence:
+
+- **Complete row coverage** — any out-of-band mutation of any stored value, including
+  the textual payload (`sieved_content`), the ingestion timestamp, FinOps telemetry
+  (`raw_token_count`, `optimized_token_count`, `tax_savings_percentage`), or
+  cryptographic fields, immediately breaks the chain and is detected by
+  `verify_ledger_integrity()`.
+- **Field-boundary protection** — the NUL delimiter closes length-substitution attacks
+  where an adversary shifts content between adjacent fields while keeping their
+  concatenation identical (e.g. `"AB"+"CDEF"` vs `"ABC"+"DEF"` produce identical
+  naive concatenations but distinct delimited preimages).
 
 ### 4. Zero network calls
 
@@ -165,9 +178,12 @@ Releases the SQLite connection.
 | `UPDATE` via ORM or admin tool | `BEFORE UPDATE` trigger raises `RAISE(FAIL, ...)` |
 | `DELETE` via ORM or admin tool | `BEFORE DELETE` trigger raises `RAISE(FAIL, ...)` |
 | Raw binary file edit (hex editor) | Hash chain breaks; `verify_ledger_integrity()` returns `False` |
-| Out-of-band `sieved_content` edit | 6-field preimage seals textual payload; successor `parent_hash` mismatches |
-| Out-of-band `timestamp` edit | 6-field preimage seals ingestion timestamp; successor `parent_hash` mismatches |
-| Out-of-band `tax_savings_percentage` edit | 6-field preimage seals FinOps metric; successor `parent_hash` mismatches |
+| Out-of-band `sieved_content` edit | 8-field NUL-delimited preimage seals textual payload; successor `parent_hash` mismatches |
+| Out-of-band `timestamp` edit | 8-field NUL-delimited preimage seals ingestion timestamp; successor `parent_hash` mismatches |
+| Out-of-band `raw_token_count` edit | 8-field NUL-delimited preimage seals FinOps token count; successor `parent_hash` mismatches |
+| Out-of-band `optimized_token_count` edit | 8-field NUL-delimited preimage seals FinOps token count; successor `parent_hash` mismatches |
+| Out-of-band `tax_savings_percentage` edit | 8-field NUL-delimited preimage seals FinOps savings metric; successor `parent_hash` mismatches |
+| Field-boundary / length-substitution attack | NUL `\x00` delimiter between every field makes shifted splits produce a distinct preimage byte stream |
 | Mid-chain row deletion (trigger dropped) | Successor row's `parent_hash` mismatches; sweep returns `False` |
 | Fabricated row injected with wrong parent | Parent pointer diverges from re-derived chain; sweep returns `False` |
 | Replay / reorder attack | `AUTOINCREMENT` id sequence + chained parent hash prevents silent reordering |

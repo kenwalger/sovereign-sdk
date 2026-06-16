@@ -36,6 +36,30 @@ END;
 """
 
 
+def _canonical_preimage(
+    signature: str,
+    payload_hash: str,
+    parent_hash: str,
+    timestamp: str,
+    raw_token_count: int | None,
+    optimized_token_count: int | None,
+    tax_savings_percentage: float | None,
+    sieved_content: str,
+) -> str:
+    # NUL delimiter closes length-substitution field-boundary attacks; naive
+    # concatenation allows "AB"+"CDEF" to collide with "ABC"+"DEF".
+    return "\x00".join([
+        signature,
+        payload_hash,
+        parent_hash,
+        timestamp,
+        "NULL" if raw_token_count is None else str(raw_token_count),
+        "NULL" if optimized_token_count is None else str(optimized_token_count),
+        "NULL" if tax_savings_percentage is None else str(tax_savings_percentage),
+        sieved_content,
+    ])
+
+
 class SovereignLedger:
     """Append-only, hash-chained SQLite ledger for ForensicReceipt provenance.
 
@@ -109,24 +133,31 @@ class SovereignLedger:
         values.
 
         The rolling ``parent_hash`` is the SHA-256 digest of the preceding
-        row's full-payload canonical preimage::
+        row's full eight-column canonical preimage, assembled with a NUL byte
+        (``\\x00``) field delimiter to close length-substitution boundary
+        attacks::
 
             SHA-256(
-                prev.signature
-                + prev.payload_hash
-                + prev.parent_hash
-                + prev.sieved_content
-                + prev.timestamp
-                + str(prev.tax_savings_percentage)   # "" when NULL
+                "\\x00".join([
+                    prev.signature,
+                    prev.payload_hash,
+                    prev.parent_hash,
+                    prev.timestamp,
+                    str(prev.raw_token_count),          # "NULL" when NULL
+                    str(prev.optimized_token_count),    # "NULL" when NULL
+                    str(prev.tax_savings_percentage),   # "NULL" when NULL
+                    prev.sieved_content,
+                ])
             )
 
-        Sealing all six columns in the preimage means that any out-of-band
-        mutation of textual content or temporal metadata breaks the chain,
-        not only mutations of the cryptographic fields.  The genesis constant
-        is used as the parent for the first entry.  Prose Tax token-economy
-        metrics are extracted from ``receipt["metadata"]["prose_tax_summary"]``
-        when present; the three metric columns store ``NULL`` when the key is
-        absent.
+        Sealing all eight data columns in the delimited preimage means that any
+        out-of-band mutation of any stored value — textual payload, ingestion
+        timestamp, FinOps telemetry, or cryptographic fields — immediately breaks
+        the chain at the point of corruption and is detected by
+        :meth:`verify_ledger_integrity`.  The genesis constant is used as the
+        parent for the first entry.  Prose Tax token-economy metrics are
+        extracted from ``receipt["metadata"]["prose_tax_summary"]`` when present;
+        the three metric columns store ``NULL`` when the key is absent.
 
         :param receipt: A ``ForensicReceipt``-compatible mapping containing at
             minimum ``payload_hash``, ``timestamp``, ``signature``, and
@@ -147,33 +178,35 @@ class SovereignLedger:
         metadata: dict[str, Any] = receipt.get("metadata") or {}
         prose_tax: dict[str, Any] = metadata.get("prose_tax_summary") or {}
 
-        raw_tokens = prose_tax.get("raw_token_count")
-        optimized_tokens = prose_tax.get("optimized_token_count")
-        savings_pct = prose_tax.get("tax_savings_percentage")
+        raw_tokens: int | None = prose_tax.get("raw_token_count")
+        optimized_tokens: int | None = prose_tax.get("optimized_token_count")
+        savings_pct: float | None = prose_tax.get("tax_savings_percentage")
         payload_hash: str = receipt["payload_hash"]
 
         committed = False
         self._conn.execute("BEGIN IMMEDIATE")
         try:
             tip = self._conn.execute(
-                "SELECT signature, payload_hash, parent_hash, "
-                "sieved_content, timestamp, tax_savings_percentage "
+                "SELECT signature, payload_hash, parent_hash, timestamp, "
+                "raw_token_count, optimized_token_count, tax_savings_percentage, sieved_content "
                 "FROM forensic_ledger ORDER BY id DESC LIMIT 1"
             ).fetchone()
 
             if tip is None:
                 parent_hash = _GENESIS_HASH
             else:
-                pct = tip["tax_savings_percentage"]
-                chain_input = (
-                    tip["signature"]
-                    + tip["payload_hash"]
-                    + tip["parent_hash"]
-                    + tip["sieved_content"]
-                    + tip["timestamp"]
-                    + ("" if pct is None else str(pct))
-                )
-                parent_hash = hashlib.sha256(chain_input.encode("utf-8")).hexdigest()
+                parent_hash = hashlib.sha256(
+                    _canonical_preimage(
+                        tip["signature"],
+                        tip["payload_hash"],
+                        tip["parent_hash"],
+                        tip["timestamp"],
+                        tip["raw_token_count"],
+                        tip["optimized_token_count"],
+                        tip["tax_savings_percentage"],
+                        tip["sieved_content"],
+                    ).encode("utf-8")
+                ).hexdigest()
 
             self._conn.execute(
                 """
@@ -207,18 +240,26 @@ class SovereignLedger:
     def verify_ledger_integrity(self) -> bool:
         """Perform a full hash-chain sweep to detect any historical tampering.
 
-        Iterates every row in insertion order, re-deriving the expected
-        ``parent_hash`` for each entry from the same six-column canonical
-        preimage used at insertion time::
+        Streams every row in insertion order via an iterator cursor, re-deriving
+        the expected ``parent_hash`` for each entry from the same eight-column
+        NUL-delimited canonical preimage used at insertion time::
 
             SHA-256(
-                row.signature
-                + row.payload_hash
-                + row.parent_hash
-                + row.sieved_content
-                + row.timestamp
-                + str(row.tax_savings_percentage)   # "" when NULL
+                "\\x00".join([
+                    row.signature,
+                    row.payload_hash,
+                    row.parent_hash,
+                    row.timestamp,
+                    str(row.raw_token_count),          # "NULL" when NULL
+                    str(row.optimized_token_count),    # "NULL" when NULL
+                    str(row.tax_savings_percentage),   # "NULL" when NULL
+                    row.sieved_content,
+                ])
             )
+
+        Iterating via the cursor directly rather than ``fetchall()`` keeps memory
+        overhead at O(1) regardless of ledger size; no full row-set is ever
+        materialised in Python heap.
 
         The first row is validated against the static genesis hash constant.
         Any discrepancy — whether caused by an ``UPDATE`` to any column,
@@ -231,28 +272,25 @@ class SovereignLedger:
             breach.
         :rtype: bool
         """
-        cursor = self._conn.execute(
-            "SELECT payload_hash, parent_hash, signature, "
-            "sieved_content, timestamp, tax_savings_percentage "
-            "FROM forensic_ledger ORDER BY id ASC"
-        )
-        rows = cursor.fetchall()
-
         expected_parent = _GENESIS_HASH
-        for row in rows:
+        for row in self._conn.execute(
+            "SELECT signature, payload_hash, parent_hash, timestamp, "
+            "raw_token_count, optimized_token_count, tax_savings_percentage, sieved_content "
+            "FROM forensic_ledger ORDER BY id ASC"
+        ):
             if row["parent_hash"] != expected_parent:
                 return False
-            pct = row["tax_savings_percentage"]
-            chain_input = (
-                row["signature"]
-                + row["payload_hash"]
-                + row["parent_hash"]
-                + row["sieved_content"]
-                + row["timestamp"]
-                + ("" if pct is None else str(pct))
-            )
             expected_parent = hashlib.sha256(
-                chain_input.encode("utf-8")
+                _canonical_preimage(
+                    row["signature"],
+                    row["payload_hash"],
+                    row["parent_hash"],
+                    row["timestamp"],
+                    row["raw_token_count"],
+                    row["optimized_token_count"],
+                    row["tax_savings_percentage"],
+                    row["sieved_content"],
+                ).encode("utf-8")
             ).hexdigest()
 
         return True
