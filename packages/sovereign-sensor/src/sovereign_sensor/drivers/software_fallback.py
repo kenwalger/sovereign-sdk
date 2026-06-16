@@ -19,15 +19,23 @@ class SoftwareFallbackDriver(SovereignCryptoDriver):
     """HMAC-SHA256–based software signing driver for non-accelerated platforms.
 
     Key material is loaded from ``private_key_path`` during ``initialize_hardware()``.
-    If the key file is absent (e.g. lightweight mock desktop tests without a
-    provisioned key store), a fixed deterministic stub is substituted so the test
-    harness remains operational without external secret provisioning.
+    If ``private_key_path`` equals ``_MOCK_KEY_SENTINEL``, the fixed deterministic
+    ``_MOCK_KEY`` stub is substituted so lightweight desktop tests can operate without
+    a provisioned key store.  Any other path that cannot be opened raises
+    ``RuntimeError`` immediately — there is no silent key substitution for
+    non-sentinel paths.
 
-    :param private_key_path: Filesystem path to the binary HMAC key material.
+    :param private_key_path: Filesystem path to the binary HMAC key material, or
+        ``SoftwareFallbackDriver._MOCK_KEY_SENTINEL`` to opt into the deterministic
+        mock key for desktop testing.
     :type private_key_path: str
     """
 
-    # Fixed stub used only when the key file cannot be opened.  Never deploy in
+    # Explicit opt-in sentinel for desktop testing without a provisioned key store.
+    # Any path other than this that cannot be opened raises RuntimeError immediately.
+    _MOCK_KEY_SENTINEL: str = "/mock/test_gateway.key"
+
+    # Fixed stub keyed exclusively to _MOCK_KEY_SENTINEL paths.  Never deploy in
     # production — this value provides zero cryptographic uniqueness guarantees.
     _MOCK_KEY: bytes = b"sovereign-sensor-mock-key-v1-do-not-use-in-production"
 
@@ -39,20 +47,27 @@ class SoftwareFallbackDriver(SovereignCryptoDriver):
     def initialize_hardware(self) -> None:
         """Load HMAC key material from the VFS and mark the driver ready.
 
-        Attempts to open ``private_key_path`` in read-binary mode.  If the file
-        does not exist or cannot be read (``OSError``), falls back to the class-level
-        ``_MOCK_KEY`` stub so lightweight desktop tests without a provisioned key
-        store continue to operate.
+        If ``private_key_path`` equals ``_MOCK_KEY_SENTINEL``, substitutes the
+        fixed deterministic ``_MOCK_KEY`` stub so lightweight desktop tests operate
+        without a provisioned key store.  For all other paths, opens the file in
+        read-binary mode and re-raises any ``OSError`` as ``RuntimeError``, forcing
+        the node to fail fast rather than signing with absent key material.
 
         :rtype: None
+        :raises RuntimeError: If ``private_key_path`` is not the mock sentinel and
+            the key file cannot be opened or read.
         """
+        if self._key_path == self._MOCK_KEY_SENTINEL:
+            self._secret_key = self._MOCK_KEY
+            self._initialized = True
+            return
         try:
             with open(self._key_path, "rb") as f:
                 self._secret_key = f.read()
-        except OSError:
-            # Key file absent; substitute a fixed deterministic stub for mock
-            # desktop testing only.  Production deployments must provision a real key.
-            self._secret_key = self._MOCK_KEY
+        except OSError as exc:
+            raise RuntimeError(
+                f"Key material loading failed: '{self._key_path}' could not be read: {exc}"
+            ) from exc
         self._initialized = True
 
     def algorithm(self) -> str:

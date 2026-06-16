@@ -34,9 +34,17 @@ def bootstrap_sensor_node(
     envelope is constructed, guaranteeing the signing subsystem is ready on
     the first ``seal()`` call.
 
+    If the selected driver's ``initialize_hardware()`` raises
+    ``NotImplementedError`` — indicating that hardware crypto acceleration is
+    still a skeleton placeholder — a warning is printed and the node falls back
+    to ``SoftwareFallbackDriver`` so that the sealing, sequencing, and VFS
+    serialization layers remain exercisable on the workbench before
+    register-level engineering is complete.
+
     :param node_id: Immutable identifier string for this sensor node.
     :type node_id: str
-    :param private_key_path: Filesystem path to the node's private signing key.
+    :param private_key_path: Filesystem path to the node's private signing key,
+        or ``SoftwareFallbackDriver._MOCK_KEY_SENTINEL`` for desktop testing.
     :type private_key_path: str
     :param sequence_file: VFS path used to persist the monotonic sequence
         counter across reboots.  Defaults to ``".sovereign_sequence"`` in the
@@ -52,5 +60,15 @@ def bootstrap_sensor_node(
     else:
         from .drivers.software_fallback import SoftwareFallbackDriver
         driver = SoftwareFallbackDriver(private_key_path)
-    driver.initialize_hardware()
+    try:
+        driver.initialize_hardware()
+    except NotImplementedError:
+        print(
+            "WARNING: Hardware crypto accelerator is not yet implemented "
+            "(pending low-level register engineering in the next sprint). "
+            "Falling back to SoftwareFallbackDriver for this node instance."
+        )
+        from .drivers.software_fallback import SoftwareFallbackDriver
+        driver = SoftwareFallbackDriver(private_key_path)
+        driver.initialize_hardware()
     return SovereignEnvelope(node_id, driver, sequence_file=sequence_file)

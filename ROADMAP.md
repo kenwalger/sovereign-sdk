@@ -361,16 +361,20 @@ wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 2
 * [x] `bootstrap_sensor_node(node_id, private_key_path, sequence_file) -> SovereignEnvelope`
   (`__init__.py`) — inspects `sys.platform.lower()` to route between `ESP32HardwareDriver`
   (on `"esp32"` targets) and `SoftwareFallbackDriver` (all other platforms); calls
-  `initialize_hardware()` before returning; forwards `sequence_file` to the constructed
-  `SovereignEnvelope` for VFS counter persistence across reboots.
+  `initialize_hardware()` inside a `try/except NotImplementedError` block — if the selected
+  hardware driver raises (skeleton placeholder not yet implemented), a warning is printed and
+  the factory rebinds to `SoftwareFallbackDriver` so sealing, sequencing, and VFS layers remain
+  exercisable on the workbench; forwards `sequence_file` to the constructed `SovereignEnvelope`
+  for VFS counter persistence across reboots.
 * [x] `SoftwareFallbackDriver` (`drivers/software_fallback.py`) — HMAC-SHA256 keyed signing
   driver using `hashlib` and `hmac`; reads key material from the VFS path supplied at
-  construction during `initialize_hardware()`; falls back to a fixed deterministic stub
-  (`_MOCK_KEY`) when the key file is absent (`OSError`), keeping desktop CI operational without
-  a provisioned key store; `sign()` guards against uninitialized calls via `if not self._initialized`
-  and raises `RuntimeError` immediately; returns raw 32-byte HMAC-SHA256 digest bytes (no encoding);
-  declares `algorithm() -> "hmac-sha256"`; uses package-relative import (`from ..interface`);
-  not suitable for production custody chains.
+  construction during `initialize_hardware()`; `_MOCK_KEY_SENTINEL = "/mock/test_gateway.key"`
+  is the only path that opts into the fixed deterministic `_MOCK_KEY` stub — any other path
+  that cannot be opened raises `RuntimeError` immediately, eliminating silent key substitution
+  for production key paths; `sign()` guards against uninitialized calls via
+  `if not self._initialized` and raises `RuntimeError` immediately; returns raw 32-byte
+  HMAC-SHA256 digest bytes (no encoding); declares `algorithm() -> "hmac-sha256"`; uses
+  package-relative import (`from ..interface`); not suitable for production custody chains.
 * [ ] `ESP32HardwareDriver` (`drivers/esp32_hardware.py`) — v0.1 HAL skeleton establishing
   the class contract and import surface for the ESP32 on-chip ECC accelerator; declares
   `algorithm() -> "ecdsa-p256"` as a forward-looking algorithm identifier; `sign()` raises
@@ -379,24 +383,28 @@ wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 2
 * [x] `packages/sovereign-sensor/pyproject.toml` — zero runtime dependencies; targets Python 3.12
   for desktop test compatibility; restricts internal library code to standard MicroPython built-ins
   (`json`, `sys`, `machine`, `hashlib`, `binascii`).
-* [x] 25-case desktop validation test suite (`tests/test_sensor.py`) across three classes
-  (`TestBootstrap`: 3 cases, `TestDriverGuard`: 1 case, `TestEnvelopeSeal`: 21 cases) verifying
+* [x] 27-case desktop validation test suite (`tests/test_sensor.py`) across three classes
+  (`TestBootstrap`: 4 cases, `TestDriverGuard`: 2 cases, `TestEnvelopeSeal`: 21 cases) verifying
   platform auto-detection via public `algorithm()` contract, driver initialization confirmation,
-  `sign()` raises `RuntimeError` before `initialize_hardware()` is called, bytes return type,
-  valid JSON parse, exact 7-key envelope structure (`v`, `n`, `t`, `q`, `alg`, `d`, `s`),
-  protocol version integer type, sequence counter starts at 1 (isolated via `tmp_path` sequence
-  file), monotonic sequence increment across 3 consecutive calls (isolated via `tmp_path`),
-  algorithm field value, field identity preservation, HMAC-SHA256 hex signature length (64 chars),
-  ultra-minified output, cross-instance determinism (two fresh instances at q=1 produce identical
-  output), payload-isolated signature divergence, hex-only character set, `sort_keys=True`
-  canonicalization produces byte-identical signatures for semantically equivalent payloads with
-  inverted key insertion order (preimage invariance), full raw wire-frame byte equality for
-  payloads with inverted key insertion order (transport-layer determinism independent of
-  allocator ordering), HMAC signature divergence when distinct key files supply different secret
-  material (key material participation verified), graceful recovery from a 0-byte sequence file
-  left by a mid-write power interruption (counter resets to 0 without aborting initialization),
-  and sequence counter resumption from the persisted VFS value after a simulated hardware reboot
-  (replay-protection continuity across power cycles). **25 passed, 0 failed.**
+  bootstrap falls back to `SoftwareFallbackDriver` (with warning) when hardware driver raises
+  `NotImplementedError` (simulated via `sys.platform` patch to `"esp32"`), `sign()` raises
+  `RuntimeError` before `initialize_hardware()` is called, `initialize_hardware()` raises
+  `RuntimeError` for any non-sentinel path that cannot be opened (silent key substitution
+  eliminated), bytes return type, valid JSON parse, exact 7-key envelope structure (`v`, `n`,
+  `t`, `q`, `alg`, `d`, `s`), protocol version integer type, sequence counter starts at 1
+  (isolated via `tmp_path` sequence file), monotonic sequence increment across 3 consecutive
+  calls (isolated via `tmp_path`), algorithm field value, field identity preservation,
+  HMAC-SHA256 hex signature length (64 chars), ultra-minified output, cross-instance
+  determinism (two fresh instances at q=1 produce identical output), payload-isolated signature
+  divergence, hex-only character set, `sort_keys=True` canonicalization produces byte-identical
+  signatures for semantically equivalent payloads with inverted key insertion order (preimage
+  invariance), full raw wire-frame byte equality for payloads with inverted key insertion order
+  (transport-layer determinism independent of allocator ordering), HMAC signature divergence
+  when distinct key files supply different secret material (key material participation verified),
+  graceful recovery from a 0-byte sequence file left by a mid-write power interruption (counter
+  resets to 0 without aborting initialization), and sequence counter resumption from the
+  persisted VFS value after a simulated hardware reboot (replay-protection continuity across
+  power cycles). **27 passed, 0 failed.**
 
 ---
 

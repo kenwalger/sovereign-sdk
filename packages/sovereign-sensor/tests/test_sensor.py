@@ -17,6 +17,11 @@ Invariants verified across every test:
   UnicodeDecodeError on constrained MicroPython silicon.
 - sign() raises RuntimeError if called before initialize_hardware(), preventing
   silent keyless HMAC packets from bad setup sequencing.
+- initialize_hardware() raises RuntimeError for any non-sentinel path that cannot
+  be opened, eliminating silent key substitution for production key paths.
+- bootstrap_sensor_node() falls back to SoftwareFallbackDriver with a printed
+  warning when the selected hardware driver raises NotImplementedError, keeping
+  the sealing and VFS layers exercisable before hardware acceleration is complete.
 - Every test uses an isolated tmp_path sequence file so no test run pollutes
   the workspace VFS state or interferes with concurrent test execution.
 """
@@ -30,7 +35,7 @@ from sovereign_sensor.drivers.software_fallback import SoftwareFallbackDriver
 
 
 _NODE_ID = "node-sensor-001"
-_KEY_PATH = "/nonexistent/key.pem"
+_KEY_PATH = "/mock/test_gateway.key"  # SoftwareFallbackDriver._MOCK_KEY_SENTINEL
 _TIMESTAMP = "2026-06-16T00:00:00Z"
 _PAYLOAD: dict = {"sensor": "temperature", "value": 42, "unit": "C"}
 
@@ -73,6 +78,33 @@ class TestBootstrap:
         assert isinstance(result, bytes)
 
 
+    def test_bootstrap_falls_back_to_software_driver_when_hardware_not_implemented(
+        self, tmp_path: Path
+    ) -> None:
+        """bootstrap_sensor_node must fall back to SoftwareFallbackDriver when the
+        selected hardware driver raises NotImplementedError from initialize_hardware().
+
+        Patches ``sys.platform`` to ``"esp32"`` so the factory routes to
+        ``ESP32HardwareDriver``, whose ``initialize_hardware()`` raises
+        ``NotImplementedError``.  The factory must catch that exception, emit a
+        warning, and rebind to ``SoftwareFallbackDriver`` so the node can exercise
+        the sealing, sequencing, and VFS serialization layers on the workbench
+        before register-level crypto acceleration is complete.  The sealed envelope
+        ``"alg"`` field confirms the software driver is active.
+
+        :type tmp_path: Path
+        """
+        import unittest.mock
+
+        with unittest.mock.patch("sys.platform", "esp32"):
+            result = bootstrap_sensor_node(
+                _NODE_ID, _KEY_PATH, sequence_file=str(tmp_path / ".sovereign_sequence")
+            )
+        assert isinstance(result, SovereignEnvelope)
+        parsed = json.loads(result.seal(_TIMESTAMP, _PAYLOAD))
+        assert parsed["alg"] == "hmac-sha256"
+
+
 class TestDriverGuard:
     """Verify that SoftwareFallbackDriver enforces its initialization contract."""
 
@@ -87,6 +119,20 @@ class TestDriverGuard:
         driver = SoftwareFallbackDriver(_KEY_PATH)
         with pytest.raises(RuntimeError, match="initialize_hardware"):
             driver.sign(b"test-preimage")
+
+    def test_initialize_hardware_raises_on_non_sentinel_missing_path(self) -> None:
+        """initialize_hardware() must raise RuntimeError for any non-sentinel path
+        that cannot be opened, eliminating the silent _MOCK_KEY substitution defect.
+
+        A ``SoftwareFallbackDriver`` pointed at a real but absent key file must
+        fail fast with a descriptive ``RuntimeError`` rather than substituting the
+        fixed stub and silently producing signatures under an unknown key.  Only
+        the explicit ``_MOCK_KEY_SENTINEL`` path opts into deterministic mock
+        signing; every other missing path is a hard boot failure.
+        """
+        driver = SoftwareFallbackDriver("/nonexistent/production.key")
+        with pytest.raises(RuntimeError, match="Key material loading failed"):
+            driver.initialize_hardware()
 
 
 class TestEnvelopeSeal:

@@ -44,15 +44,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **`bootstrap_sensor_node(node_id, private_key_path, sequence_file) -> SovereignEnvelope`**
     (`__init__.py`): Inspects `sys.platform.lower()` at runtime; routes to `ESP32HardwareDriver`
     when `"esp32"` is present in the platform string, otherwise binds `SoftwareFallbackDriver`.
-    Calls `initialize_hardware()` on the selected driver before returning the configured envelope.
+    Calls `initialize_hardware()` inside a `try/except NotImplementedError` block — when the
+    selected hardware driver raises (skeleton placeholder not yet implemented), a warning is
+    printed and the factory rebinds to `SoftwareFallbackDriver` so sealing, sequencing, and VFS
+    layers remain exercisable on the workbench before register-level engineering is complete.
     Accepts an optional `sequence_file` path (default `".sovereign_sequence"`) forwarded to
     `SovereignEnvelope` for VFS-based counter persistence across reboots.
   - **`SoftwareFallbackDriver`** (`drivers/software_fallback.py`): HMAC-SHA256 keyed signing
-    driver using `hashlib` and `hmac`.  On `initialize_hardware()`, reads key material from the
-    VFS path supplied at construction; if the file is absent (`OSError`), substitutes a fixed
-    deterministic stub (`_MOCK_KEY`) so desktop CI tests operate without a provisioned key store.
-    Returns raw 32-byte HMAC-SHA256 digest bytes (no encoding applied; hex encoding is the
-    envelope layer's exclusive responsibility).  Declares `algorithm() -> "hmac-sha256"`.
+    driver using `hashlib` and `hmac`.  On `initialize_hardware()`, checks whether
+    `private_key_path` equals `_MOCK_KEY_SENTINEL = "/mock/test_gateway.key"` — if so,
+    substitutes the fixed deterministic `_MOCK_KEY` stub so desktop CI tests operate without
+    a provisioned key store; for all other paths, opens the file in read-binary mode and
+    re-raises any `OSError` as `RuntimeError`, eliminating the prior silent key substitution
+    defect where any absent file silently resolved to the mock key.  Returns raw 32-byte
+    HMAC-SHA256 digest bytes (no encoding applied; hex encoding is the envelope layer's
+    exclusive responsibility).  Declares `algorithm() -> "hmac-sha256"`.
     Not intended for production custody chains.
   - **`ESP32HardwareDriver`** (`drivers/esp32_hardware.py`): v0.1 HAL skeleton class
     establishing the class contract and import surface for the ESP32 on-chip ECC accelerator
@@ -61,33 +67,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `NotImplementedError`; full register-level engineering is deferred to the next sprint.
     This driver must not be wired into any production custody chain in its current state.
 
-  - **`packages/sovereign-sensor/tests/test_sensor.py`** — 25 test cases across three classes
-    (`TestBootstrap`: 3 cases; `TestDriverGuard`: 1 case; `TestEnvelopeSeal`: 21 cases)
+  - **`packages/sovereign-sensor/tests/test_sensor.py`** — 27 test cases across three classes
+    (`TestBootstrap`: 4 cases; `TestDriverGuard`: 2 cases; `TestEnvelopeSeal`: 21 cases)
     verifying: platform auto-detection confirmed via the public `algorithm()` contract (sealed
     `"alg"` field equals `"hmac-sha256"`) rather than private attribute access; driver
-    initialization confirmed via successful `seal()` completion; `sign()` raises `RuntimeError`
-    when called before `initialize_hardware()`, preventing silent keyless HMAC packets from bad
-    setup sequencing; `seal()` returns `bytes`; output parses as valid JSON; transmission envelope
-    contains exactly the seven keys `v`, `n`, `t`, `q`, `alg`, `d`, `s`; `v` is integer `1`;
-    `n` and `t` are preserved verbatim; `q` starts at `1` on the first call (isolated via
-    `tmp_path` sequence file); three consecutive calls on the same instance produce `q` values
-    `[1, 2, 3]` (monotonic increment, isolated via `tmp_path`); `"alg"` equals `"hmac-sha256"`;
-    payload dict round-trips without mutation; signature is a non-empty ASCII string; software
-    driver signature is exactly 64 hex characters (HMAC-SHA256 digest); output is ultra-minified
-    (no whitespace after separators); two independent fresh instances produce byte-identical first
-    seals for identical inputs (cross-instance determinism); distinct payloads at the same
-    sequence position produce distinct signatures; `"s"` field contains only characters from the
-    set `{0–9, a–f}`; `sort_keys=True` canonicalization produces byte-identical signatures for
-    semantically equivalent payloads with inverted key insertion order, proving preimage invariance
-    across all MicroPython targets; full raw wire-frame byte arrays are identical for semantically
-    equivalent payloads with inverted key insertion order, proving transport-layer byte determinism
-    independent of allocator-driven dict ordering (complements the signature-only check by
-    asserting the outer frame `"d"` sub-object is also sorted on the wire); HMAC signatures
-    diverge when distinct key files supply different secret material (key material participation);
-    a 0-byte sequence file (power-loss truncation artifact) is caught as `ValueError` and resets
-    the counter to 0 without aborting device initialization; sequence counter correctly resumes
-    from the persisted VFS value after a simulated hardware reboot (replay-protection continuity).
-    **25 passed, 0 failed.**
+    initialization confirmed via successful `seal()` completion; bootstrap falls back to
+    `SoftwareFallbackDriver` (with printed warning) when the selected hardware driver raises
+    `NotImplementedError` (simulated by patching `sys.platform` to `"esp32"`), confirming the
+    workbench fallback contract; `sign()` raises `RuntimeError` when called before
+    `initialize_hardware()`, preventing silent keyless HMAC packets from bad setup sequencing;
+    `initialize_hardware()` raises `RuntimeError` for any non-sentinel path that cannot be
+    opened, eliminating the prior silent `_MOCK_KEY` substitution defect for production key
+    paths; `seal()` returns `bytes`; output parses as valid JSON; transmission envelope contains
+    exactly the seven keys `v`, `n`, `t`, `q`, `alg`, `d`, `s`; `v` is integer `1`; `n` and
+    `t` are preserved verbatim; `q` starts at `1` on the first call (isolated via `tmp_path`
+    sequence file); three consecutive calls on the same instance produce `q` values `[1, 2, 3]`
+    (monotonic increment, isolated via `tmp_path`); `"alg"` equals `"hmac-sha256"`; payload dict
+    round-trips without mutation; signature is a non-empty ASCII string; software driver signature
+    is exactly 64 hex characters (HMAC-SHA256 digest); output is ultra-minified (no whitespace
+    after separators); two independent fresh instances produce byte-identical first seals for
+    identical inputs (cross-instance determinism); distinct payloads at the same sequence position
+    produce distinct signatures; `"s"` field contains only characters from the set `{0–9, a–f}`;
+    `sort_keys=True` canonicalization produces byte-identical signatures for semantically
+    equivalent payloads with inverted key insertion order, proving preimage invariance across all
+    MicroPython targets; full raw wire-frame byte arrays are identical for semantically equivalent
+    payloads with inverted key insertion order, proving transport-layer byte determinism
+    independent of allocator-driven dict ordering; HMAC signatures diverge when distinct key files
+    supply different secret material (key material participation); a 0-byte sequence file
+    (power-loss truncation artifact) is caught as `ValueError` and resets the counter to 0
+    without aborting device initialization; sequence counter correctly resumes from the persisted
+    VFS value after a simulated hardware reboot (replay-protection continuity).
+    **27 passed, 0 failed.**
 
 - **Phase 8 — `sovereign-ledger` immutable provenance engine** (new workspace member
   `packages/sovereign-ledger/`): Introduces a local-first, SQLite-backed, append-only
@@ -226,6 +236,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matched — breaking byte-exact deduplication, frame-level checksumming, and any transport
   consumer that compares raw wire content rather than parsed JSON.  The flag freezes the
   alphabetical key sequence at both the outer frame and the inner `"d"` sub-object level.
+
+- **`SoftwareFallbackDriver.initialize_hardware()` — silent key substitution eliminated** (`drivers/software_fallback.py`):
+  The previous `except OSError` fallback substituted `_MOCK_KEY` for any key path that could
+  not be opened, including real production paths that simply had a permissions error, wrong
+  path, or transient mount failure.  A node would boot and begin sealing observations with a
+  fixed, publicly known stub key indistinguishable from an authenticated one.  The method now
+  checks `self._key_path == _MOCK_KEY_SENTINEL` first: only the explicit sentinel
+  `"/mock/test_gateway.key"` opts into the deterministic mock key.  Any other path that cannot
+  be opened re-raises the `OSError` wrapped in a descriptive `RuntimeError`, halting the node
+  at the bootstrap phase rather than emitting silently-weakened custody frames.
+
+- **`bootstrap_sensor_node()` — `NotImplementedError` guard added** (`__init__.py`):
+  `driver.initialize_hardware()` is now called inside a `try/except NotImplementedError`
+  block.  When the selected driver raises — as `ESP32HardwareDriver` does while hardware crypto
+  acceleration is still a skeleton — the factory prints a loud warning and rebinds to a fully
+  functional `SoftwareFallbackDriver` so the node can exercise the sealing, sequencing, and
+  VFS serialization layers on the workbench.  Without this guard, an ESP32 boot would silently
+  succeed initialization and then crash on the first `seal()` call, hiding the missing
+  implementation behind an opaque `NotImplementedError` deep in the custody chain.
 
 ### Fixed
 
