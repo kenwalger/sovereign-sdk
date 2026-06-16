@@ -62,12 +62,15 @@ file itself:
 CREATE TRIGGER prevent_update_forensic_ledger
 BEFORE UPDATE ON forensic_ledger
 BEGIN
-    SELECT RAISE(FAIL, 'Write-Side Custody violation: UPDATE operations are prohibited on forensic_ledger.');
+    SELECT RAISE(ROLLBACK, 'Write-Side Custody violation: UPDATE operations are prohibited on forensic_ledger.');
 END;
 ```
 
 Any client that opens the `.db` file — including desktop SQL browsers — will receive
-a hard `OperationalError` on any mutation attempt.
+a `sqlite3.IntegrityError` (SQLITE_CONSTRAINT) on any mutation attempt.
+`RAISE(ROLLBACK, ...)` additionally terminates and rolls back the entire enclosing
+transaction, preventing post-hoc injection via a subsequent `COMMIT` after catching
+the trigger error.
 
 ### 3. SHA-256 hash chain — full-row payload sealing with field delimiters
 
@@ -187,7 +190,9 @@ Returns `False` if the ledger is empty when an anchor is supplied.
 
 ### `close()`
 
-Releases the SQLite connection.
+Releases all thread-local SQLite connection handles tracked by this instance.  Iterates
+every connection registered across all threads and closes each one, ensuring no file
+descriptors are leaked regardless of how many producer threads have accessed the ledger.
 
 ---
 
@@ -195,8 +200,8 @@ Releases the SQLite connection.
 
 | Attack vector | Defense |
 |---|---|
-| `UPDATE` via ORM or admin tool | `BEFORE UPDATE` trigger raises `RAISE(FAIL, ...)` |
-| `DELETE` via ORM or admin tool | `BEFORE DELETE` trigger raises `RAISE(FAIL, ...)` |
+| `UPDATE` via ORM or admin tool | `BEFORE UPDATE` trigger fires `RAISE(ROLLBACK, ...)`, raising `sqlite3.IntegrityError` and aborting the entire enclosing transaction |
+| `DELETE` via ORM or admin tool | `BEFORE DELETE` trigger fires `RAISE(ROLLBACK, ...)`, raising `sqlite3.IntegrityError` and aborting the entire enclosing transaction |
 | Raw binary file edit (hex editor) | Hash chain breaks; `verify_ledger_integrity()` returns `False` |
 | Out-of-band `sieved_content` edit | 8-field NUL-delimited preimage seals textual payload; successor `parent_hash` mismatches |
 | Out-of-band `timestamp` edit | 8-field NUL-delimited preimage seals ingestion timestamp; successor `parent_hash` mismatches |

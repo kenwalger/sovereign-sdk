@@ -27,13 +27,13 @@ CREATE TABLE IF NOT EXISTS forensic_ledger (
 CREATE TRIGGER IF NOT EXISTS prevent_update_forensic_ledger
 BEFORE UPDATE ON forensic_ledger
 BEGIN
-    SELECT RAISE(FAIL, 'Write-Side Custody violation: UPDATE operations are prohibited on forensic_ledger.');
+    SELECT RAISE(ROLLBACK, 'Write-Side Custody violation: UPDATE operations are prohibited on forensic_ledger.');
 END;
 
 CREATE TRIGGER IF NOT EXISTS prevent_delete_forensic_ledger
 BEFORE DELETE ON forensic_ledger
 BEGIN
-    SELECT RAISE(FAIL, 'Write-Side Custody violation: DELETE operations are prohibited on forensic_ledger.');
+    SELECT RAISE(ROLLBACK, 'Write-Side Custody violation: DELETE operations are prohibited on forensic_ledger.');
 END;
 """
 

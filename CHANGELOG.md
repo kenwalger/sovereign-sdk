@@ -22,9 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (`id`, `payload_hash` UNIQUE, `parent_hash`, `timestamp`, `sieved_content`,
     `signature`, `raw_token_count`, `optimized_token_count`,
     `tax_savings_percentage`) and installs two engine-level `BEFORE UPDATE` /
-    `BEFORE DELETE` SQL triggers that call `RAISE(FAIL, 'Write-Side Custody
-    violation: ...')`, aborting any mutation attempt regardless of which SQLite
-    client opens the file.
+    `BEFORE DELETE` SQL triggers that call `RAISE(ROLLBACK, 'Write-Side Custody
+    violation: ...')`, aborting any mutation attempt and rolling back the entire
+    enclosing transaction regardless of which SQLite client opens the file.
   - **`append_receipt(receipt, sieved_content) -> str`**: Derives a rolling SHA-256
     `parent_hash` chained from the immediately preceding row's `signature`,
     `payload_hash`, and `parent_hash` (or the static genesis constant
@@ -39,19 +39,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     collapses the sequence, and injected rows whose `parent_hash` does not match the
     re-derived value.
 
-  - **`packages/sovereign-ledger/tests/test_ledger.py`** — 54 test cases across seven
+  - **`packages/sovereign-ledger/tests/test_ledger.py`** — 56 test cases across seven
     classes (`TestSovereignLedgerInit`, `TestAppendReceipt`, `TestHashChain`,
     `TestImmutabilityTriggers`, `TestVerifyLedgerIntegrity`, `TestEdgeCases`,
     `TestConcurrentAppend`) covering schema assertion, WAL mode verification,
     hash-chain arithmetic from the genesis root through multi-row sequences,
     determinism across independent instances, adversarial trigger tests using both the
-    ledger's own connection and an external raw `sqlite3` client connection, out-of-band
-    signature/payload/parent-hash corruption detection, mid-chain deletion detection,
-    fabricated-row injection detection, Unicode payload round-trip, duplicate
-    `payload_hash` rejection, close-and-reopen lifecycle correctness, and a concurrent
-    stress test (`TestConcurrentAppend`) that spawns 8 threads each holding a separate
-    connection, synchronised at a `threading.Barrier` for maximum lock contention, then
-    asserts 100% chain linearity after all writers complete.
+    ledger's own connection and an external raw `sqlite3` client connection,
+    `RAISE(ROLLBACK)` transaction-abort semantics verifying that an INSERT staged
+    inside an explicit `BEGIN` is rolled back when the trigger fires (closing post-hoc
+    injection via a subsequent `COMMIT`), out-of-band signature/payload/parent-hash
+    corruption detection, mid-chain deletion detection, fabricated-row injection
+    detection, Unicode payload round-trip, duplicate `payload_hash` rejection,
+    close-and-reopen lifecycle correctness, connection-registry purge verification
+    (`close()` releases all thread-local handles and empties the registry to zero), and
+    concurrent stress tests (`TestConcurrentAppend`) covering both separate-instance and
+    shared-instance scenarios with 8 threads synchronised at a `threading.Barrier` for
+    maximum lock contention.
 
 - **Phase 7 — `sovereign-sieve` standalone micro-utility package** (new workspace member
   `packages/sovereign-sieve/`): Extracted `sovereign-sieve` into a zero-dependency

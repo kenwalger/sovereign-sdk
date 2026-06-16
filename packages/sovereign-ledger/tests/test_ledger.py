@@ -388,11 +388,12 @@ class TestImmutabilityTriggers:
     mutation attempts against forensic_ledger, whether the attempt originates
     from the ledger's own connection or from an independent raw sqlite3 client.
 
-    SQLite maps RAISE(FAIL, ...) to SQLITE_CONSTRAINT, which Python's sqlite3
-    module raises as sqlite3.IntegrityError.  All trigger tests therefore match
-    against sqlite3.DatabaseError — the common base class — to remain portable
-    across SQLite builds regardless of whether a given version surfaces the
-    trigger abort as OperationalError or IntegrityError.
+    SQLite maps RAISE(ROLLBACK, ...) to SQLITE_CONSTRAINT, which Python's
+    sqlite3 module raises as sqlite3.IntegrityError.  All trigger tests
+    therefore match against sqlite3.DatabaseError — the common base class —
+    to remain portable across SQLite builds.  RAISE(ROLLBACK) additionally
+    terminates the entire enclosing transaction, preventing post-hoc injection
+    via a COMMIT issued after catching the trigger error.
     """
 
     def test_update_via_ledger_connection_raises(self, mem_ledger):
@@ -462,6 +463,43 @@ class TestImmutabilityTriggers:
             mem_ledger._conn.execute("DELETE FROM forensic_ledger WHERE id = 2")
         cur = mem_ledger._conn.execute("SELECT COUNT(*) FROM forensic_ledger")
         assert cur.fetchone()[0] == 3
+
+    def test_raise_rollback_aborts_enclosing_transaction(self, file_ledger):
+        """RAISE(ROLLBACK) must unwind the entire active transaction, not just
+        the triggering statement.
+
+        A raw connection opens an explicit BEGIN, performs a valid INSERT, then
+        fires the BEFORE UPDATE trigger.  With RAISE(ROLLBACK) the whole
+        transaction is aborted — the INSERT is discarded — so a subsequent
+        COMMIT has no work to persist.  Only the row appended via the ledger
+        API must survive.
+        """
+        ledger, db_path = file_ledger
+        ledger.append_receipt(_make_receipt("hash_RB1", "sig_RB1"), "content 1")
+
+        raw = sqlite3.connect(db_path, isolation_level=None)
+        raw.execute("BEGIN")
+        raw.execute(
+            "INSERT INTO forensic_ledger "
+            "(payload_hash, parent_hash, timestamp, sieved_content, signature) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("injected_hash", "0" * 64, "2026-01-01T00:00:00Z", "injected", "evil_sig"),
+        )
+        with pytest.raises(sqlite3.DatabaseError):
+            raw.execute(
+                "UPDATE forensic_ledger SET signature = 'tampered' WHERE id = 1"
+            )
+        # RAISE(ROLLBACK) aborts the enclosing transaction; COMMIT is either a
+        # no-op or raises OperationalError depending on the SQLite version.
+        try:
+            raw.execute("COMMIT")
+        except sqlite3.OperationalError:
+            pass
+        raw.close()
+
+        # The injected INSERT must have been rolled back — only the original row survives.
+        cur = ledger._conn.execute("SELECT COUNT(*) FROM forensic_ledger")
+        assert cur.fetchone()[0] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -890,3 +928,29 @@ class TestConcurrentAppend:
         # Thread-local isolation + BEGIN IMMEDIATE — chain must be perfectly linear.
         assert ledger.verify_ledger_integrity() is True
         ledger.close()
+
+    def test_close_purges_all_registered_connections(self, tmp_path):
+        """close() must release every connection registered across all threads
+        and clear the internal registry to zero, ensuring no file descriptors
+        are leaked in thread-per-request production environments.
+        """
+        db_path = str(tmp_path / "registry_purge.db")
+        N = 3
+        ledger = SovereignLedger(db_path)
+
+        def worker(i: int) -> None:
+            ledger.append_receipt(
+                _make_receipt(f"hash_RP{i}", f"sig_RP{i}"), f"content_{i}"
+            )
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(N)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Main thread (bootstrap) + N worker threads each open one connection.
+        assert len(ledger._connections) == N + 1
+        ledger.close()
+        # All handles released; registry must be empty.
+        assert len(ledger._connections) == 0

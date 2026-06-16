@@ -294,19 +294,22 @@ assert ledger.verify_ledger_integrity()  # → True on an untampered chain
 * [x] `forensic_ledger` table with nine typed columns and a `UNIQUE` constraint on
   `payload_hash` to guarantee single-ingestion invariant.
 * [x] Engine-level `BEFORE UPDATE` and `BEFORE DELETE` SQL triggers that call
-  `RAISE(FAIL, 'Write-Side Custody violation: ...')`, aborting mutation from any
-  SQLite client regardless of whether it uses the Python class or opens the file raw.
+  `RAISE(ROLLBACK, 'Write-Side Custody violation: ...')`, aborting mutation and
+  rolling back the entire enclosing transaction from any SQLite client regardless
+  of whether it uses the Python class or opens the file raw.
 * [x] SHA-256 parent-hash chain rooted at a static genesis constant, linking every
   appended row to its cryptographic predecessor.
 * [x] `verify_ledger_integrity() -> bool` — O(n) sweep that re-derives the expected
   parent hash for each row and returns `False` on any detected breach.
-* [x] 54-case adversarial test suite covering trigger enforcement (internal and external
-  client), out-of-band corruption detection across all eight data columns (signature,
-  payload hash, parent hash, timestamp, raw/optimized token counts, savings percentage,
-  sieved content), field-boundary delimiter collision resistance, mid-chain deletion
-  detection, injected-row detection, full lifecycle correctness, and concurrent write
+* [x] 56-case adversarial test suite covering trigger enforcement (internal and external
+  client), `RAISE(ROLLBACK)` transaction-abort semantics confirming post-hoc injection
+  via COMMIT is impossible, out-of-band corruption detection across all eight data columns
+  (signature, payload hash, parent hash, timestamp, raw/optimized token counts, savings
+  percentage, sieved content), field-boundary delimiter collision resistance, mid-chain
+  deletion detection, injected-row detection, full lifecycle correctness, concurrent write
   serialisation via `BEGIN IMMEDIATE` (8-thread stress test confirming zero chain
-  fragmentation).
+  fragmentation), and connection-registry purge verification (`close()` releases all
+  thread-local handles to zero).
 
 ---
 
