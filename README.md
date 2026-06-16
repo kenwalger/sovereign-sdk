@@ -136,7 +136,7 @@ assert ledger.verify_ledger_integrity()  # False if any row was tampered
 
 Two mechanisms enforce immutability:
 
-1. **Engine-level SQL triggers** — `BEFORE UPDATE` and `BEFORE DELETE` triggers stored inside the `.db` file call `RAISE(FAIL, 'Write-Side Custody violation: ...')`. Any client that opens the database file — Python code, a desktop SQL browser, a raw `sqlite3.connect()` call — is aborted at the SQLite engine layer before a mutation can land.
+1. **Engine-level SQL triggers** — `BEFORE UPDATE` and `BEFORE DELETE` triggers stored inside the `.db` file call `RAISE(ROLLBACK, 'Write-Side Custody violation: ...')`. Any client that opens the database file — Python code, a desktop SQL browser, a raw `sqlite3.connect()` call — receives a `sqlite3.IntegrityError` and has its entire enclosing transaction rolled back at the SQLite engine layer before any mutation can land.
 
 2. **SHA-256 hash chain** — each row's `parent_hash` is derived from the preceding row's `signature + payload_hash + parent_hash`. Modifying any field of any historical row, deleting a middle row, or injecting a fabricated row breaks the chain; `verify_ledger_integrity()` returns `False` on the first detected discrepancy.
 

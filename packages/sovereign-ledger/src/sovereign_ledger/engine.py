@@ -111,8 +111,10 @@ class SovereignLedger:
         self._connections: list[sqlite3.Connection] = []
         self._connections_lock = threading.Lock()
         # Bootstrap the forensic_ledger schema and triggers on the initialising
-        # thread's connection.  Subsequent thread connections share the schema
-        # already present in the database file and require only pragma application.
+        # thread's connection.  File-backed databases persist the schema so
+        # subsequent thread connections require only pragma application.
+        # In-memory databases are bootstrapped per-connection inside _get_conn()
+        # because each thread-local handle maps to a distinct empty SQLite store.
         self._bootstrap_schema()
 
     # ------------------------------------------------------------------
@@ -129,6 +131,12 @@ class SovereignLedger:
             )
             conn.row_factory = sqlite3.Row
             self._apply_pragmas(conn)
+            if self._db_path == ":memory:":
+                # Each in-memory connection is an independent empty SQLite store;
+                # the schema written by _bootstrap_schema() on the initialising
+                # thread does not carry over.  Hydrate every new thread-local
+                # handle immediately so workers never hit "no such table".
+                conn.executescript(_DDL)
             self._thread_local.conn = conn
             with self._connections_lock:
                 self._connections.append(conn)

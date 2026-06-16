@@ -929,6 +929,51 @@ class TestConcurrentAppend:
         assert ledger.verify_ledger_integrity() is True
         ledger.close()
 
+    def test_in_memory_shared_instance_multi_thread(self):
+        """A single SovereignLedger(":memory:") shared across N concurrent threads
+        must bootstrap the forensic_ledger schema on each new thread-local
+        connection, preventing OperationalError("no such table") under concurrent
+        in-memory access.
+
+        SQLite in-memory databases are per-connection — each thread-local handle
+        maps to a completely independent empty store.  _get_conn() must hydrate
+        the DDL on every new in-memory connection so workers never hit a missing
+        schema.  The primary invariant verified here is that no thread raises an
+        exception and all N append operations return valid payload hashes.
+        """
+        N = 4
+        errors: list[Exception] = []
+        results: list[str] = []
+        results_lock = threading.Lock()
+        barrier = threading.Barrier(N)
+
+        ledger = SovereignLedger(":memory:")
+
+        def worker(i: int) -> None:
+            try:
+                barrier.wait()
+                receipt_hash = ledger.append_receipt(
+                    _make_receipt(f"hash_IM_{i:03d}", f"sig_IM_{i:03d}"),
+                    f"in_memory_content_{i}",
+                )
+                with results_lock:
+                    results.append(receipt_hash)
+            except Exception as exc:
+                with results_lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(N)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, (
+            f"Thread-local in-memory schema not bootstrapped correctly: {errors}"
+        )
+        assert len(results) == N
+        ledger.close()
+
     def test_close_purges_all_registered_connections(self, tmp_path):
         """close() must release every connection registered across all threads
         and clear the internal registry to zero, ensuring no file descriptors

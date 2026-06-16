@@ -39,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     collapses the sequence, and injected rows whose `parent_hash` does not match the
     re-derived value.
 
-  - **`packages/sovereign-ledger/tests/test_ledger.py`** — 56 test cases across seven
+  - **`packages/sovereign-ledger/tests/test_ledger.py`** — 57 test cases across seven
     classes (`TestSovereignLedgerInit`, `TestAppendReceipt`, `TestHashChain`,
     `TestImmutabilityTriggers`, `TestVerifyLedgerIntegrity`, `TestEdgeCases`,
     `TestConcurrentAppend`) covering schema assertion, WAL mode verification,
@@ -53,9 +53,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     detection, Unicode payload round-trip, duplicate `payload_hash` rejection,
     close-and-reopen lifecycle correctness, connection-registry purge verification
     (`close()` releases all thread-local handles and empties the registry to zero), and
-    concurrent stress tests (`TestConcurrentAppend`) covering both separate-instance and
-    shared-instance scenarios with 8 threads synchronised at a `threading.Barrier` for
-    maximum lock contention.
+    concurrent stress tests (`TestConcurrentAppend`) covering separate-instance,
+    shared-instance file-backed, and shared-instance in-memory scenarios, all
+    synchronised at a `threading.Barrier` for maximum lock contention; the in-memory
+    test specifically validates per-thread DDL bootstrapping in `_get_conn()`.
 
 - **Phase 7 — `sovereign-sieve` standalone micro-utility package** (new workspace member
   `packages/sovereign-sieve/`): Extracted `sovereign-sieve` into a zero-dependency
