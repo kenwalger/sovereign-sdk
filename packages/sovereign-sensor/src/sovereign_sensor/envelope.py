@@ -81,9 +81,12 @@ class SovereignEnvelope:
            minified JSON with no inter-token whitespace, guaranteeing an identical
            preimage regardless of key insertion order on any MicroPython target.
         4. A versioned, hardened preimage string is constructed as
-           ``1|node_id|timestamp|sequence|algorithm|canonical_payload``,
-           binding the protocol version, identity, time, ordering, and algorithm
-           into a single signed surface.
+           ``1|{len(node_id)}:{node_id}|{len(timestamp)}:{timestamp}|sequence|algorithm|canonical_payload``.
+           Length-prefixing ``node_id`` and ``timestamp`` before joining with ``|``
+           eliminates delimiter injection: without prefixes, ``node="a|b"`` with
+           ``ts="c"`` and ``node="a"`` with ``ts="b|c"`` collapse to the same
+           pipe-joined string, enabling cross-identity signature reuse.  Length
+           prefixes make each field boundary unambiguous regardless of field content.
         5. Preimage bytes traverse the driver's signing boundary, returning
            raw binary output from the underlying cryptographic primitive.
         6. Raw signature bytes are hex-encoded via ``binascii.hexlify``,
@@ -115,8 +118,10 @@ class SovereignEnvelope:
             pass  # Degrade gracefully to RAM-only sequence tracking.
         algo: str = self._driver.algorithm()
         canonical: str = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+        node_prefix: str = f"{len(self._node_id)}:{self._node_id}"
+        time_prefix: str = f"{len(timestamp)}:{timestamp}"
         preimage: bytes = (
-            f"1|{self._node_id}|{timestamp}|{self._sequence}|{algo}|{canonical}"
+            f"1|{node_prefix}|{time_prefix}|{self._sequence}|{algo}|{canonical}"
             .encode("utf-8")
         )
         sig_bytes: bytes = self._driver.sign(preimage)

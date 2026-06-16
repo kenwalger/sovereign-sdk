@@ -353,7 +353,10 @@ wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 2
   (2) algorithm identifier queried from driver; (3) payload keys alphabetically sorted and serialized
   via `json.dumps(..., separators=(',', ':'), sort_keys=True)`, guaranteeing identical preimage bytes
   regardless of dict key insertion order on any MicroPython target; (4) versioned preimage constructed
-  as `1|node_id|timestamp|sequence|algorithm|canonical_payload`; (5) preimage signed by driver
+  as `1|{len(node_id)}:{node_id}|{len(timestamp)}:{timestamp}|sequence|algorithm|canonical_payload`,
+  length-prefixing `node_id` and `timestamp` to close the delimiter injection surface where naive
+  pipe-joining allows two distinct `(node_id, timestamp)` pairs to collapse to the same preimage
+  string, enabling cross-identity signature reuse; (5) preimage signed by driver
   returning raw binary bytes; (6) signature hex-encoded via `binascii.hexlify`; (7) all fields
   serialized into a 7-key ultra-minified JSON frame `{"v", "n", "t", "q", "alg", "d", "s"}` via
   `json.dumps(..., sort_keys=True)`, freezing the alphabetical key sequence in the raw
@@ -371,7 +374,10 @@ wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 2
   construction during `initialize_hardware()`; `_MOCK_KEY_SENTINEL = "/mock/test_gateway.key"`
   is the only path that opts into the fixed deterministic `_MOCK_KEY` stub — any other path
   that cannot be opened raises `RuntimeError` immediately, eliminating silent key substitution
-  for production key paths; `sign()` guards against uninitialized calls via
+  for production key paths; read bytes are stored in a local `key_bytes: bytes` variable before
+  assignment — if zero bytes are read, `ValueError` is raised immediately rather than keying HMAC
+  with `b""`, which would be deterministic across all nodes sharing the same empty-file failure
+  and provide no cryptographic uniqueness; `sign()` guards against uninitialized calls via
   `if not self._initialized` and raises `RuntimeError` immediately; returns raw 32-byte
   HMAC-SHA256 digest bytes (no encoding); declares `algorithm() -> "hmac-sha256"`; uses
   package-relative import (`from ..interface`); not suitable for production custody chains.
@@ -383,18 +389,19 @@ wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 2
 * [x] `packages/sovereign-sensor/pyproject.toml` — zero runtime dependencies; targets Python 3.12
   for desktop test compatibility; restricts internal library code to standard MicroPython built-ins
   (`json`, `sys`, `machine`, `hashlib`, `binascii`).
-* [x] 27-case desktop validation test suite (`tests/test_sensor.py`) across three classes
-  (`TestBootstrap`: 4 cases, `TestDriverGuard`: 2 cases, `TestEnvelopeSeal`: 21 cases) verifying
+* [x] 29-case desktop validation test suite (`tests/test_sensor.py`) across three classes
+  (`TestBootstrap`: 4 cases, `TestDriverGuard`: 3 cases, `TestEnvelopeSeal`: 22 cases) verifying
   platform auto-detection via public `algorithm()` contract, driver initialization confirmation,
   bootstrap falls back to `SoftwareFallbackDriver` (with warning) when hardware driver raises
   `NotImplementedError` (simulated via `sys.platform` patch to `"esp32"`), `sign()` raises
   `RuntimeError` before `initialize_hardware()` is called, `initialize_hardware()` raises
   `RuntimeError` for any non-sentinel path that cannot be opened (silent key substitution
-  eliminated), bytes return type, valid JSON parse, exact 7-key envelope structure (`v`, `n`,
-  `t`, `q`, `alg`, `d`, `s`), protocol version integer type, sequence counter starts at 1
-  (isolated via `tmp_path` sequence file), monotonic sequence increment across 3 consecutive
-  calls (isolated via `tmp_path`), algorithm field value, field identity preservation,
-  HMAC-SHA256 hex signature length (64 chars), ultra-minified output, cross-instance
+  eliminated), `initialize_hardware()` raises `ValueError` when the key file exists but contains
+  zero bytes (empty-key guard), bytes return type, valid JSON parse, exact 7-key envelope
+  structure (`v`, `n`, `t`, `q`, `alg`, `d`, `s`), protocol version integer type, sequence
+  counter starts at 1 (isolated via `tmp_path` sequence file), monotonic sequence increment
+  across 3 consecutive calls (isolated via `tmp_path`), algorithm field value, field identity
+  preservation, HMAC-SHA256 hex signature length (64 chars), ultra-minified output, cross-instance
   determinism (two fresh instances at q=1 produce identical output), payload-isolated signature
   divergence, hex-only character set, `sort_keys=True` canonicalization produces byte-identical
   signatures for semantically equivalent payloads with inverted key insertion order (preimage
@@ -402,9 +409,11 @@ wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 2
   (transport-layer determinism independent of allocator ordering), HMAC signature divergence
   when distinct key files supply different secret material (key material participation verified),
   graceful recovery from a 0-byte sequence file left by a mid-write power interruption (counter
-  resets to 0 without aborting initialization), and sequence counter resumption from the
+  resets to 0 without aborting initialization), sequence counter resumption from the
   persisted VFS value after a simulated hardware reboot (replay-protection continuity across
-  power cycles). **27 passed, 0 failed.**
+  power cycles), and length-prefixed preimage delimiter injection immunity — `("abc|def", "ghi")`
+  and `("abc", "def|ghi")` are verified to produce distinct HMAC signatures, confirming that
+  cross-identity preimage collision is closed. **29 passed, 0 failed.**
 
 ---
 

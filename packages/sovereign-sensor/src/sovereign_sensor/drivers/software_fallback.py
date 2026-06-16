@@ -50,12 +50,16 @@ class SoftwareFallbackDriver(SovereignCryptoDriver):
         If ``private_key_path`` equals ``_MOCK_KEY_SENTINEL``, substitutes the
         fixed deterministic ``_MOCK_KEY`` stub so lightweight desktop tests operate
         without a provisioned key store.  For all other paths, opens the file in
-        read-binary mode and re-raises any ``OSError`` as ``RuntimeError``, forcing
-        the node to fail fast rather than signing with absent key material.
+        read-binary mode, re-raises any ``OSError`` as ``RuntimeError``, and raises
+        ``ValueError`` if the file exists but contains zero bytes — a zero-length
+        key produces an HMAC keyed with ``b""``, which is deterministic across all
+        nodes that share the same empty-file failure and provides no cryptographic
+        uniqueness.
 
         :rtype: None
         :raises RuntimeError: If ``private_key_path`` is not the mock sentinel and
             the key file cannot be opened or read.
+        :raises ValueError: If the key file exists but contains zero bytes.
         """
         if self._key_path == self._MOCK_KEY_SENTINEL:
             self._secret_key = self._MOCK_KEY
@@ -63,11 +67,17 @@ class SoftwareFallbackDriver(SovereignCryptoDriver):
             return
         try:
             with open(self._key_path, "rb") as f:
-                self._secret_key = f.read()
+                key_bytes: bytes = f.read()
         except OSError as exc:
             raise RuntimeError(
                 f"Key material loading failed: '{self._key_path}' could not be read: {exc}"
             ) from exc
+        if not key_bytes:
+            raise ValueError(
+                f"Key material at '{self._key_path}' is empty; a non-zero-byte key is "
+                "strictly required for secure HMAC authentication."
+            )
+        self._secret_key = key_bytes
         self._initialized = True
 
     def algorithm(self) -> str:

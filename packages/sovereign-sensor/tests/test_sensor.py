@@ -134,6 +134,23 @@ class TestDriverGuard:
         with pytest.raises(RuntimeError, match="Key material loading failed"):
             driver.initialize_hardware()
 
+    def test_initialize_hardware_raises_on_empty_key_file(self, tmp_path: Path) -> None:
+        """initialize_hardware() must raise ValueError when the key file is zero bytes.
+
+        A 0-byte key file produces an HMAC keyed with ``b""``, which is identical
+        across every node that encounters the same empty-file failure and provides
+        no cryptographic uniqueness — indistinguishable from another node with the
+        same defect.  The driver must refuse to initialize rather than silently
+        producing authentication tags under a keyless primitive.
+
+        :type tmp_path: Path
+        """
+        empty_key = tmp_path / "empty.key"
+        empty_key.write_bytes(b"")
+        driver = SoftwareFallbackDriver(str(empty_key))
+        with pytest.raises(ValueError, match="empty"):
+            driver.initialize_hardware()
+
 
 class TestEnvelopeSeal:
     """Verify structural and semantic correctness of sealed envelopes."""
@@ -401,6 +418,34 @@ class TestEnvelopeSeal:
         envelope = SovereignEnvelope(_NODE_ID, driver, sequence_file=str(seq_file))
 
         assert envelope._sequence == 0
+
+    def test_preimage_delimiter_injection_is_immunized(self, tmp_path: Path) -> None:
+        """Length-prefixed preimage fields must produce distinct signatures for inputs
+        that are identical under naive pipe-joining but differ by field boundary.
+
+        Without length prefixes, ``node_id="abc|def"`` with ``timestamp="ghi"`` and
+        ``node_id="abc"`` with ``timestamp="def|ghi"`` collapse to the same
+        ``1|abc|def|ghi|...`` pipe-joined string, enabling a cross-identity
+        signature reuse attack.  With length prefixes (``3:abc|3:def|3:ghi|...``
+        vs ``7:abc|def|3:ghi|...``), the two preimage strings are distinct and
+        the HMAC outputs must diverge.
+
+        :type tmp_path: Path
+        """
+        seq_file_a = str(tmp_path / "seq_a")
+        seq_file_b = str(tmp_path / "seq_b")
+
+        driver_a = SoftwareFallbackDriver(_KEY_PATH)
+        driver_a.initialize_hardware()
+        envelope_a = SovereignEnvelope("abc|def", driver_a, sequence_file=seq_file_a)
+
+        driver_b = SoftwareFallbackDriver(_KEY_PATH)
+        driver_b.initialize_hardware()
+        envelope_b = SovereignEnvelope("abc", driver_b, sequence_file=seq_file_b)
+
+        sig_a = json.loads(envelope_a.seal("ghi", _PAYLOAD))["s"]
+        sig_b = json.loads(envelope_b.seal("def|ghi", _PAYLOAD))["s"]
+        assert sig_a != sig_b
 
     def test_sequence_counter_resumes_after_reboot_simulation(
         self, tmp_path: Path
