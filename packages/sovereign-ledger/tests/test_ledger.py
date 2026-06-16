@@ -15,6 +15,7 @@ import hashlib
 import sqlite3
 import threading
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -253,6 +254,41 @@ class TestAppendReceipt:
             ("hash_007",),
         )
         assert cur.fetchone()[0] is None
+
+    def test_rollback_storage_error_does_not_mask_original_exception(self, mem_ledger):
+        """SovereignStorageError raised by _get_conn() during the finally ROLLBACK
+        cleanup must be swallowed so that the primary sqlite3.IntegrityError on a
+        duplicate payload_hash reaches the caller unmodified.
+
+        Race reproduced without threading: _get_conn() is patched so that the
+        fourth call — the ROLLBACK attempt in the finally block — raises
+        SovereignStorageError, simulating close() racing between a failed INSERT
+        and the cleanup path.  The widened except clause must catch it; the
+        original IntegrityError must be what the caller sees.
+
+        Call sequence for a failing append_receipt (duplicate hash):
+          1. self._conn.execute("BEGIN IMMEDIATE")
+          2. self._conn.execute("SELECT ...")       — tip read
+          3. self._conn.execute("INSERT ...")       — raises IntegrityError
+          4. self._conn.execute("ROLLBACK")         — finally cleanup
+        """
+        mem_ledger.append_receipt(_make_receipt("hash_MASK", "sig_MASK"), "content")
+
+        original_get_conn = mem_ledger._get_conn
+        call_count = 0
+
+        def get_conn_with_simulated_close_race() -> sqlite3.Connection:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 4:
+                raise SovereignStorageError(
+                    "simulated concurrent close between INSERT failure and ROLLBACK"
+                )
+            return original_get_conn()
+
+        with patch.object(mem_ledger, "_get_conn", side_effect=get_conn_with_simulated_close_race):
+            with pytest.raises(sqlite3.IntegrityError):
+                mem_ledger.append_receipt(_make_receipt("hash_MASK", "sig_MASK"), "duplicate")
 
 
 # ---------------------------------------------------------------------------

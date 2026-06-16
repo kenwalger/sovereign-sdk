@@ -303,7 +303,14 @@ class SovereignLedger:
             if not committed:
                 try:
                     self._conn.execute("ROLLBACK")
-                except sqlite3.Error:
+                except (sqlite3.Error, SovereignStorageError):
+                    # SovereignStorageError is caught here because close() can race
+                    # with a failed INSERT: if _closed is set between the INSERT
+                    # raising and this ROLLBACK attempt, _get_conn() raises
+                    # SovereignStorageError (a RuntimeError, not a sqlite3.Error).
+                    # Swallowing it here ensures the original INSERT exception —
+                    # most commonly sqlite3.IntegrityError on a duplicate
+                    # payload_hash — propagates to the caller unmasked.
                     pass
 
         return payload_hash

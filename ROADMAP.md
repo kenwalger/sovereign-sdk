@@ -304,7 +304,7 @@ assert ledger.verify_ledger_integrity()  # → True on an untampered chain
 * [x] `SovereignStorageError` exception (exported from `sovereign_ledger`) raised by
   `_get_conn()` when called on a closed instance, preventing use-after-close access to
   released connection handles.
-* [x] 58-case adversarial test suite covering trigger enforcement (internal and external
+* [x] 59-case adversarial test suite covering trigger enforcement (internal and external
   client), `RAISE(ROLLBACK)` transaction-abort semantics confirming post-hoc injection
   via COMMIT is impossible, out-of-band corruption detection across all eight data columns
   (signature, payload hash, parent hash, timestamp, raw/optimized token counts, savings
