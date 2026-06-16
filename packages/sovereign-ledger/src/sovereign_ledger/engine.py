@@ -148,9 +148,9 @@ class SovereignLedger:
                     prev.payload_hash,
                     prev.parent_hash,
                     prev.timestamp,
-                    str(prev.raw_token_count),          # "NULL" when NULL
-                    str(prev.optimized_token_count),    # "NULL" when NULL
-                    str(prev.tax_savings_percentage),   # "NULL" when NULL
+                    str(prev.raw_token_count),                    # "NULL" when NULL
+                    str(prev.optimized_token_count),              # "NULL" when NULL
+                    f"{float(prev.tax_savings_percentage):.4f}",  # "NULL" when NULL
                     prev.sieved_content,
                 ])
             )
@@ -242,7 +242,9 @@ class SovereignLedger:
 
         return payload_hash
 
-    def verify_ledger_integrity(self) -> bool:
+    def verify_ledger_integrity(
+        self, expected_tip_hash: str | None = None
+    ) -> bool:
         """Perform a full hash-chain sweep to detect any historical tampering.
 
         Streams every row in insertion order via an iterator cursor, re-deriving
@@ -255,9 +257,9 @@ class SovereignLedger:
                     row.payload_hash,
                     row.parent_hash,
                     row.timestamp,
-                    str(row.raw_token_count),          # "NULL" when NULL
-                    str(row.optimized_token_count),    # "NULL" when NULL
-                    str(row.tax_savings_percentage),   # "NULL" when NULL
+                    str(row.raw_token_count),                    # "NULL" when NULL
+                    str(row.optimized_token_count),              # "NULL" when NULL
+                    f"{float(row.tax_savings_percentage):.4f}",  # "NULL" when NULL
                     row.sieved_content,
                 ])
             )
@@ -272,12 +274,27 @@ class SovereignLedger:
         fabricated row with an incorrect parent pointer — causes an immediate
         ``False`` return.
 
+        If ``expected_tip_hash`` is supplied, the sweep additionally asserts
+        that the ``payload_hash`` of the final ledger row matches the provided
+        anchor.  This closes the tail-truncation blind spot: without the anchor,
+        an adversary who drops the ``BEFORE DELETE`` trigger and removes one or
+        more trailing rows leaves the remaining prefix chain internally
+        consistent, so the chain sweep alone cannot detect the deletion.  Pass
+        the value returned by the last :meth:`append_receipt` call as the
+        anchor.  Returns ``False`` if the ledger is empty when an anchor is
+        supplied.
+
+        :param expected_tip_hash: The ``payload_hash`` of the expected last row,
+            used as an external anchor to detect tail-truncation attacks.  Pass
+            ``None`` (default) to skip the anchor check.
+        :type expected_tip_hash: str | None
         :return: ``True`` if every row's recorded ``parent_hash`` matches the
-            mathematically re-derived value; ``False`` on the first detected
-            breach.
+            mathematically re-derived value and the optional tip anchor matches;
+            ``False`` on the first detected breach.
         :rtype: bool
         """
         expected_parent = _GENESIS_HASH
+        last_payload_hash: str | None = None
         for row in self._conn.execute(
             "SELECT signature, payload_hash, parent_hash, timestamp, "
             "raw_token_count, optimized_token_count, tax_savings_percentage, sieved_content "
@@ -297,6 +314,11 @@ class SovereignLedger:
                     row["sieved_content"],
                 ).encode("utf-8")
             ).hexdigest()
+            last_payload_hash = row["payload_hash"]
+
+        if expected_tip_hash is not None:
+            if last_payload_hash is None or last_payload_hash != expected_tip_hash:
+                return False
 
         return True
 

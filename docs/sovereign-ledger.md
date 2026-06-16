@@ -24,7 +24,11 @@ ledger = SovereignLedger(db_path=".keys/sovereign_audit.db")
 ledger.append_receipt(receipt, sieved_content)
 
 # Verify the full chain integrity at any time
-ok = ledger.verify_ledger_integrity()   # True on an untampered ledger
+ok = ledger.verify_ledger_integrity()                       # True on an untampered ledger
+
+# Pin the sweep to a known tip to detect tail-truncation attacks
+tip = ledger.append_receipt(receipt, sieved_content)        # capture after last append
+ok  = ledger.verify_ledger_integrity(expected_tip_hash=tip) # False if last row was deleted
 ```
 
 ---
@@ -81,9 +85,9 @@ parent_hash[N]  = SHA-256(
                           row[N-1].payload_hash,
                           row[N-1].parent_hash,
                           row[N-1].timestamp,
-                          str(row[N-1].raw_token_count),         ← "NULL" when NULL
-                          str(row[N-1].optimized_token_count),   ← "NULL" when NULL
-                          str(row[N-1].tax_savings_percentage),  ← "NULL" when NULL
+                          str(row[N-1].raw_token_count),                    ← "NULL" when NULL
+                          str(row[N-1].optimized_token_count),              ← "NULL" when NULL
+                          f"{float(row[N-1].tax_savings_percentage):.4f}",  ← "NULL" when NULL
                           row[N-1].sieved_content,
                       ])
                   )
@@ -159,11 +163,27 @@ Computes the rolling `parent_hash`, inserts a new row, and returns the
 Raises `sqlite3.IntegrityError` if `receipt["payload_hash"]` is already present
 (UNIQUE constraint).
 
-### `verify_ledger_integrity() -> bool`
+### `verify_ledger_integrity(expected_tip_hash=None) -> bool`
 
 Performs an O(n) cursor sweep, re-deriving the expected `parent_hash` for every row
 from its predecessor.  Returns `True` if every entry is intact; `False` on the first
 detected breach.
+
+If `expected_tip_hash` is supplied, the sweep additionally asserts that the
+`payload_hash` of the final ledger row matches the provided anchor.  This closes the
+**tail-truncation blind spot**: without the anchor, an adversary who drops the
+`BEFORE DELETE` trigger and removes trailing rows leaves the surviving prefix chain
+internally consistent, so the chain sweep alone cannot detect the deletion.
+
+```python
+# Capture the tip after the last append.
+tip = ledger.append_receipt(receipt, sieved_content)
+
+# Later: verify with the anchor to detect any tail-row deletion.
+ok = ledger.verify_ledger_integrity(expected_tip_hash=tip)
+```
+
+Returns `False` if the ledger is empty when an anchor is supplied.
 
 ### `close()`
 
@@ -186,6 +206,8 @@ Releases the SQLite connection.
 | Field-boundary / length-substitution attack | NUL `\x00` delimiter between every field makes shifted splits produce a distinct preimage byte stream |
 | Mid-chain row deletion (trigger dropped) | Successor row's `parent_hash` mismatches; sweep returns `False` |
 | Fabricated row injected with wrong parent | Parent pointer diverges from re-derived chain; sweep returns `False` |
+| Tail-row deletion (no anchor) | Surviving prefix chain is internally consistent; undetectable by sweep alone — requires external tip-hash anchor |
+| Tail-row deletion with `expected_tip_hash` | `last_payload_hash != expected_tip_hash` → `verify_ledger_integrity()` returns `False` |
 | Replay / reorder attack | `AUTOINCREMENT` id sequence + chained parent hash prevents silent reordering |
 
 ---

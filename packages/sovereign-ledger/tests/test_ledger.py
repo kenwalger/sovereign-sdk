@@ -639,6 +639,34 @@ class TestVerifyLedgerIntegrity:
 
         assert ledger.verify_ledger_integrity() is False
 
+    def test_tail_row_deletion_detected_via_anchor(self, file_ledger):
+        """Deleting the final row via a raw connection while supplying the
+        captured tip hash as an external anchor must cause
+        verify_ledger_integrity to return False.
+
+        Without an expected_tip_hash the sweep cannot detect the truncation
+        because the surviving prefix chain is internally consistent.  The
+        anchor closes this tail-truncation blind spot by asserting the last
+        stored payload_hash equals the one observed at the tip.
+        """
+        ledger, db_path = file_ledger
+        ledger.append_receipt(_make_receipt("hash_TT1", "sig_TT1"), "content 1")
+        ledger.append_receipt(_make_receipt("hash_TT2", "sig_TT2"), "content 2")
+        tip = ledger.append_receipt(_make_receipt("hash_TT3", "sig_TT3"), "content 3")
+
+        assert ledger.verify_ledger_integrity(expected_tip_hash=tip) is True
+
+        raw = sqlite3.connect(db_path)
+        raw.execute("DROP TRIGGER IF EXISTS prevent_delete_forensic_ledger")
+        raw.execute("DELETE FROM forensic_ledger WHERE id = 3")
+        raw.commit()
+        raw.close()
+
+        # Without the anchor the prefix chain passes; the tail deletion is invisible.
+        assert ledger.verify_ledger_integrity() is True
+        # With the anchor the mismatch is detected immediately.
+        assert ledger.verify_ledger_integrity(expected_tip_hash=tip) is False
+
     def test_closed_and_reopened_ledger_verifies_correctly(self, tmp_path):
         db_path = str(tmp_path / "reopen.db")
         ledger = SovereignLedger(db_path)

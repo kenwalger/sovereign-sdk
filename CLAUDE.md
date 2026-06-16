@@ -57,4 +57,4 @@ Before declaring an engineering task or phase update complete, you must execute 
 ### Commit Tracking
 
 - `commit-message.txt` generation: At the conclusion of a successful test execution pass, generate a pristine, technical Git commit message following Conventional Commits (e.g., `feat(ledger): implement hash-chained append-only storage engine`). Write this text directly into `commit-message.txt` at the root directory. Do not execute the git commit command yourself.
-` `uv` Workspace Compliance: After altering dependencies or adding new workspace members, always run `uv lock` to keep the monorepo's dependency layout completely verified and synchronized.
+- `uv` Workspace Compliance: After altering dependencies or adding new workspace members, always run `uv lock` to keep the monorepo's dependency layout completely verified and synchronized.
