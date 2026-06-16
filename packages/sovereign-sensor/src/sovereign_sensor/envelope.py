@@ -91,7 +91,9 @@ class SovereignEnvelope:
            alphanumeric characters ``0–9``, ``a–f`` without ``UnicodeDecodeError``
            on constrained MicroPython runtimes.
         7. All fields are packed into a versioned transmission dict and
-           serialized to ultra-minified UTF-8 JSON bytes.
+           serialized to ultra-minified UTF-8 JSON bytes with ``sort_keys=True``,
+           guaranteeing a fixed alphabetical key sequence in the raw wire frame
+           independent of dict insertion order on any MicroPython target.
 
         :param timestamp: ISO-8601 observation timestamp string.
         :type timestamp: str
@@ -128,4 +130,4 @@ class SovereignEnvelope:
             "d": payload,
             "s": signature_string,
         }
-        return json.dumps(frame, separators=(",", ":")).encode("utf-8")
+        return json.dumps(frame, separators=(",", ":"), sort_keys=True).encode("utf-8")

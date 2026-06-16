@@ -38,7 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (5) preimage dispatched across the driver's `sign()` boundary, returning raw binary bytes;
     (6) raw bytes hex-encoded via `binascii.hexlify`, guaranteeing all values `0x00–0xFF` map
     safely without `UnicodeDecodeError` on MicroPython silicon; (7) seven-key frame
-    `{"v":1, "n", "t", "q", "alg", "d", "s"}` serialized to ultra-minified UTF-8 JSON bytes.
+    `{"v":1, "n", "t", "q", "alg", "d", "s"}` serialized to ultra-minified UTF-8 JSON bytes via
+    `json.dumps(..., sort_keys=True)`, freezing the alphabetical key sequence in the raw
+    transmission bytes independently of MicroPython allocator-driven insertion order.
   - **`bootstrap_sensor_node(node_id, private_key_path, sequence_file) -> SovereignEnvelope`**
     (`__init__.py`): Inspects `sys.platform.lower()` at runtime; routes to `ESP32HardwareDriver`
     when `"esp32"` is present in the platform string, otherwise binds `SoftwareFallbackDriver`.
@@ -59,8 +61,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `NotImplementedError`; full register-level engineering is deferred to the next sprint.
     This driver must not be wired into any production custody chain in its current state.
 
-  - **`packages/sovereign-sensor/tests/test_sensor.py`** — 24 test cases across three classes
-    (`TestBootstrap`: 3 cases; `TestDriverGuard`: 1 case; `TestEnvelopeSeal`: 20 cases)
+  - **`packages/sovereign-sensor/tests/test_sensor.py`** — 25 test cases across three classes
+    (`TestBootstrap`: 3 cases; `TestDriverGuard`: 1 case; `TestEnvelopeSeal`: 21 cases)
     verifying: platform auto-detection confirmed via the public `algorithm()` contract (sealed
     `"alg"` field equals `"hmac-sha256"`) rather than private attribute access; driver
     initialization confirmed via successful `seal()` completion; `sign()` raises `RuntimeError`
@@ -77,11 +79,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     sequence position produce distinct signatures; `"s"` field contains only characters from the
     set `{0–9, a–f}`; `sort_keys=True` canonicalization produces byte-identical signatures for
     semantically equivalent payloads with inverted key insertion order, proving preimage invariance
-    across all MicroPython targets; HMAC signatures diverge when distinct key files supply
-    different secret material (key material participation); a 0-byte sequence file (power-loss
-    truncation artifact) is caught as `ValueError` and resets the counter to 0 without aborting
-    device initialization; sequence counter correctly resumes from the persisted VFS value after
-    a simulated hardware reboot (replay-protection continuity). **24 passed, 0 failed.**
+    across all MicroPython targets; full raw wire-frame byte arrays are identical for semantically
+    equivalent payloads with inverted key insertion order, proving transport-layer byte determinism
+    independent of allocator-driven dict ordering (complements the signature-only check by
+    asserting the outer frame `"d"` sub-object is also sorted on the wire); HMAC signatures
+    diverge when distinct key files supply different secret material (key material participation);
+    a 0-byte sequence file (power-loss truncation artifact) is caught as `ValueError` and resets
+    the counter to 0 without aborting device initialization; sequence counter correctly resumes
+    from the persisted VFS value after a simulated hardware reboot (replay-protection continuity).
+    **25 passed, 0 failed.**
 
 - **Phase 8 — `sovereign-ledger` immutable provenance engine** (new workspace member
   `packages/sovereign-ledger/`): Introduces a local-first, SQLite-backed, append-only
@@ -209,6 +215,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a code bug under the appearance of a benign flash-write failure.  `OSError` covers
   every storage and filesystem media error class that legitimate flash degradation
   produces, while allowing all other exception types to propagate normally.
+
+- **`SovereignEnvelope.seal()` — wire-frame serialization frozen with `sort_keys=True`** (`envelope.py`):
+  The final `json.dumps(frame, ...)` call that produces the transmitted bytes now passes
+  `sort_keys=True`.  Without this flag, the seven envelope keys (`alg`, `d`, `n`, `q`, `s`,
+  `t`, `v`) and the nested payload sub-object under `"d"` were serialized in insertion order,
+  which CPython 3.7+ preserves but MicroPython does not guarantee stable across firmware
+  versions or heap-allocation patterns.  Two nodes on different firmware builds could therefore
+  produce different raw byte frames for the same observation even though their HMAC signatures
+  matched — breaking byte-exact deduplication, frame-level checksumming, and any transport
+  consumer that compares raw wire content rather than parsed JSON.  The flag freezes the
+  alphabetical key sequence at both the outer frame and the inner `"d"` sub-object level.
 
 ### Fixed
 

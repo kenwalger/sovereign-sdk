@@ -355,7 +355,9 @@ wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 2
   regardless of dict key insertion order on any MicroPython target; (4) versioned preimage constructed
   as `1|node_id|timestamp|sequence|algorithm|canonical_payload`; (5) preimage signed by driver
   returning raw binary bytes; (6) signature hex-encoded via `binascii.hexlify`; (7) all fields
-  serialized into a 7-key ultra-minified JSON frame `{"v", "n", "t", "q", "alg", "d", "s"}`.
+  serialized into a 7-key ultra-minified JSON frame `{"v", "n", "t", "q", "alg", "d", "s"}` via
+  `json.dumps(..., sort_keys=True)`, freezing the alphabetical key sequence in the raw
+  transmission bytes independently of MicroPython allocator-driven insertion order.
 * [x] `bootstrap_sensor_node(node_id, private_key_path, sequence_file) -> SovereignEnvelope`
   (`__init__.py`) — inspects `sys.platform.lower()` to route between `ESP32HardwareDriver`
   (on `"esp32"` targets) and `SoftwareFallbackDriver` (all other platforms); calls
@@ -377,8 +379,8 @@ wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 2
 * [x] `packages/sovereign-sensor/pyproject.toml` — zero runtime dependencies; targets Python 3.12
   for desktop test compatibility; restricts internal library code to standard MicroPython built-ins
   (`json`, `sys`, `machine`, `hashlib`, `binascii`).
-* [x] 24-case desktop validation test suite (`tests/test_sensor.py`) across three classes
-  (`TestBootstrap`: 3 cases, `TestDriverGuard`: 1 case, `TestEnvelopeSeal`: 20 cases) verifying
+* [x] 25-case desktop validation test suite (`tests/test_sensor.py`) across three classes
+  (`TestBootstrap`: 3 cases, `TestDriverGuard`: 1 case, `TestEnvelopeSeal`: 21 cases) verifying
   platform auto-detection via public `algorithm()` contract, driver initialization confirmation,
   `sign()` raises `RuntimeError` before `initialize_hardware()` is called, bytes return type,
   valid JSON parse, exact 7-key envelope structure (`v`, `n`, `t`, `q`, `alg`, `d`, `s`),
@@ -388,12 +390,13 @@ wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 2
   ultra-minified output, cross-instance determinism (two fresh instances at q=1 produce identical
   output), payload-isolated signature divergence, hex-only character set, `sort_keys=True`
   canonicalization produces byte-identical signatures for semantically equivalent payloads with
-  inverted key insertion order (preimage invariance across all MicroPython targets), HMAC
-  signature divergence when distinct key files supply different secret material (key material
-  participation verified), graceful recovery from a 0-byte sequence file left by a mid-write
-  power interruption (counter resets to 0 without aborting initialization), and sequence counter
-  resumption from the persisted VFS value after a simulated hardware reboot (replay-protection
-  continuity across power cycles). **24 passed, 0 failed.**
+  inverted key insertion order (preimage invariance), full raw wire-frame byte equality for
+  payloads with inverted key insertion order (transport-layer determinism independent of
+  allocator ordering), HMAC signature divergence when distinct key files supply different secret
+  material (key material participation verified), graceful recovery from a 0-byte sequence file
+  left by a mid-write power interruption (counter resets to 0 without aborting initialization),
+  and sequence counter resumption from the persisted VFS value after a simulated hardware reboot
+  (replay-protection continuity across power cycles). **25 passed, 0 failed.**
 
 ---
 

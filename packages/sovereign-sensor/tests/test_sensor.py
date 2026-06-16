@@ -311,6 +311,30 @@ class TestEnvelopeSeal:
         sig_b = json.loads(envelope_b.seal(_TIMESTAMP, _PAYLOAD))["s"]
         assert sig_a != sig_b
 
+    def test_wire_frame_serialization_is_order_independent(self, tmp_path: Path) -> None:
+        """sort_keys=True on the outer frame serialization must produce byte-identical
+        wire output for semantically equivalent payloads regardless of insertion order.
+
+        This is distinct from ``test_seal_payload_key_order_does_not_affect_signature``,
+        which only verifies the ``"s"`` field.  This test compares the complete raw byte
+        arrays emitted by ``seal()``, confirming that the ``"d"`` sub-object is also
+        serialized in alphabetical key order in the transmitted frame — not merely in the
+        signed preimage — so every byte on the wire is deterministic regardless of how
+        the MicroPython allocator ordered the payload dict in memory.
+
+        :type tmp_path: Path
+        """
+        seq_file = str(tmp_path / ".sovereign_sequence")
+        payload_ab: dict = {"a": 1, "b": 2}
+        payload_ba: dict = {"b": 2, "a": 1}
+
+        envelope_a = bootstrap_sensor_node(_NODE_ID, _KEY_PATH, sequence_file=seq_file)
+        envelope_b = bootstrap_sensor_node(_NODE_ID, _KEY_PATH, sequence_file=seq_file)
+
+        wire_a: bytes = envelope_a.seal(_TIMESTAMP, payload_ab)
+        wire_b: bytes = envelope_b.seal(_TIMESTAMP, payload_ba)
+        assert wire_a == wire_b
+
     def test_envelope_recovers_gracefully_from_truncated_empty_sequence_file(
         self, tmp_path: Path
     ) -> None:
