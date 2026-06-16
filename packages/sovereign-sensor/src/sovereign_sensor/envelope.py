@@ -2,9 +2,10 @@
 """Tamper-evident transmission envelope for sovereign sensor telemetry.
 
 Canonicalizes, signs, and packs sensor payloads into a versioned, minified
-JSON wire format with monotonic sequence-counter replay protection.  The
-driver instance carries all key-material state; the envelope instance owns
-the per-node sequence monotonic counter.
+JSON wire format with monotonic sequence-counter replay protection that
+survives hardware reboots via VFS-persisted counter state.  The driver
+instance carries all key-material state; the envelope instance owns the
+per-node sequence counter and its persistence path.
 """
 import binascii
 import json
@@ -15,29 +16,49 @@ from .interface import SovereignCryptoDriver
 class SovereignEnvelope:
     """Constructs and seals authenticated sensor transmission envelopes.
 
-    Each instance maintains an independent monotonic sequence counter that
-    is incremented on every ``seal()`` call, binding observations to a
-    strict ordering that prevents replay attacks.
+    Each instance maintains a monotonic sequence counter that is incremented
+    and persisted to the VFS on every ``seal()`` call.  On construction, any
+    previously persisted counter is restored from the sequence file, enabling
+    the counter to resume monotonically after a hardware reboot rather than
+    resetting to zero and opening a replay window.  File I/O failures degrade
+    gracefully to RAM-only tracking without raising.
 
     :param node_id: Immutable identifier for the originating sensor node.
     :type node_id: str
     :param driver: Initialized HAL driver supplying the signing primitive.
     :type driver: SovereignCryptoDriver
+    :param sequence_file: VFS path used to persist the monotonic sequence
+        counter across reboots.  Defaults to ``".sovereign_sequence"`` in the
+        current working directory.
+    :type sequence_file: str
     """
 
-    def __init__(self, node_id: str, driver: SovereignCryptoDriver) -> None:
+    def __init__(
+        self,
+        node_id: str,
+        driver: SovereignCryptoDriver,
+        sequence_file: str = ".sovereign_sequence",
+    ) -> None:
         self._node_id: str = node_id
         self._driver: SovereignCryptoDriver = driver
+        self._sequence_file: str = sequence_file
         self._sequence: int = 0
+        try:
+            with open(self._sequence_file, "r") as f:
+                self._sequence = int(f.read().strip())
+        except Exception:
+            self._sequence = 0
 
     def seal(self, timestamp: str, payload: dict) -> bytes:
         """Canonicalize, sign, and serialize a sensor observation into a wire envelope.
 
         Sealing proceeds in seven deterministic steps:
 
-        1. Internal sequence counter is incremented monotonically, binding
-           this observation to a unique position in the node's emission history
-           and preventing replayed frames from being accepted as fresh.
+        1. Internal sequence counter is incremented monotonically and immediately
+           persisted to the configured VFS sequence file, binding this observation
+           to a unique position in the node's emission history and preventing
+           replayed frames from being accepted as fresh — including across hardware
+           reboots.  VFS write failures degrade gracefully to RAM-only tracking.
         2. Active algorithm identifier is queried from the driver, embedding
            the signing primitive into the authenticated preimage for protocol agility.
         3. Payload is canonicalized to minified JSON with no inter-token whitespace.
@@ -63,6 +84,11 @@ class SovereignEnvelope:
         :rtype: bytes
         """
         self._sequence += 1
+        try:
+            with open(self._sequence_file, "w") as f:
+                f.write(str(self._sequence))
+        except Exception:
+            pass  # Degrade gracefully to RAM-only sequence tracking.
         algo: str = self._driver.algorithm()
         canonical: str = json.dumps(payload, separators=(",", ":"))
         preimage: bytes = (

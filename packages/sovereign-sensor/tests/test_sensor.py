@@ -7,16 +7,20 @@ Invariants verified across every test:
 - seal() produces well-formed, ultra-minified JSON bytes carrying exactly
   seven keys: v (protocol version), n (node_id), t (timestamp), q (sequence
   counter), alg (algorithm identifier), d (payload dict), s (signature string).
-- Sequence counter increments monotonically on every seal() call, providing
-  replay protection by binding each frame to a unique position in the node's
-  emission history.
+- Sequence counter increments monotonically on every seal() call and is
+  persisted to the VFS sequence file, resuming correctly after a reboot
+  rather than resetting to zero and opening a replay window.
+- HMAC-SHA256 signatures change when the underlying key material changes,
+  proving that key bytes participate in the cryptographic signature math.
 - Signature is hex-encoded by the envelope layer (not the driver), guaranteeing
   that all bytes 0x00-0xFF map safely to alphanumeric characters without
   UnicodeDecodeError on constrained MicroPython silicon.
 """
 import json
+from pathlib import Path
 
 from sovereign_sensor import SovereignEnvelope, bootstrap_sensor_node
+from sovereign_sensor.drivers.software_fallback import SoftwareFallbackDriver
 
 
 _NODE_ID = "node-sensor-001"
@@ -98,15 +102,29 @@ class TestEnvelopeSeal:
         parsed = json.loads(envelope.seal(_TIMESTAMP, _PAYLOAD))
         assert parsed["t"] == _TIMESTAMP
 
-    def test_seal_sequence_counter_starts_at_one(self) -> None:
-        """First seal() on a fresh envelope must produce q=1."""
-        envelope = bootstrap_sensor_node(_NODE_ID, _KEY_PATH)
+    def test_seal_sequence_counter_starts_at_one(self, tmp_path: Path) -> None:
+        """First seal() on a fresh envelope with no prior state must produce q=1.
+
+        Uses an isolated tmp_path sequence file to guarantee the counter begins
+        at zero regardless of any state left by prior test runs.
+        """
+        seq_file = str(tmp_path / ".sovereign_sequence")
+        driver = SoftwareFallbackDriver(_KEY_PATH)
+        driver.initialize_hardware()
+        envelope = SovereignEnvelope(_NODE_ID, driver, sequence_file=seq_file)
         parsed = json.loads(envelope.seal(_TIMESTAMP, _PAYLOAD))
         assert parsed["q"] == 1
 
-    def test_seal_sequence_counter_increments_monotonically(self) -> None:
-        """Consecutive seal() calls must produce strictly increasing 'q' values."""
-        envelope = bootstrap_sensor_node(_NODE_ID, _KEY_PATH)
+    def test_seal_sequence_counter_increments_monotonically(self, tmp_path: Path) -> None:
+        """Consecutive seal() calls must produce strictly increasing 'q' values.
+
+        Uses an isolated tmp_path sequence file to guarantee the counter begins
+        at zero regardless of any state left by prior test runs.
+        """
+        seq_file = str(tmp_path / ".sovereign_sequence")
+        driver = SoftwareFallbackDriver(_KEY_PATH)
+        driver.initialize_hardware()
+        envelope = SovereignEnvelope(_NODE_ID, driver, sequence_file=seq_file)
         q_values = [
             json.loads(envelope.seal(_TIMESTAMP, _PAYLOAD))["q"]
             for _ in range(3)
@@ -134,7 +152,7 @@ class TestEnvelopeSeal:
         parsed["s"].encode("ascii")  # raises if non-ASCII
 
     def test_seal_signature_is_sha256_hex_length(self) -> None:
-        """Software fallback signature must be a 64-character SHA-256 hex digest."""
+        """Software fallback HMAC-SHA256 signature must be a 64-character hex digest."""
         envelope = bootstrap_sensor_node(_NODE_ID, _KEY_PATH)
         parsed = json.loads(envelope.seal(_TIMESTAMP, _PAYLOAD))
         assert len(parsed["s"]) == 64
@@ -147,12 +165,13 @@ class TestEnvelopeSeal:
         assert b", " not in result
 
     def test_seal_is_deterministic_across_independent_instances(self) -> None:
-        """Two fresh envelope instances must produce byte-identical first seals for identical inputs.
+        """Two envelope instances initialized from the same sequence file state
+        must produce byte-identical seals for identical inputs.
 
-        Determinism holds when the sequence counter, node_id, timestamp, payload,
-        and algorithm are all identical.  Each fresh instance starts at q=0, so the
-        first seal on both instances emits q=1 and produces the same preimage and
-        therefore the same signature.
+        Both instances read the same persisted counter value N at construction
+        time, so both increment to N+1 on their first seal() call.  With
+        identical node_id, timestamp, payload, key material, and sequence
+        position, the HMAC preimages are identical and the outputs match.
         """
         envelope_a = bootstrap_sensor_node(_NODE_ID, _KEY_PATH)
         envelope_b = bootstrap_sensor_node(_NODE_ID, _KEY_PATH)
@@ -161,9 +180,9 @@ class TestEnvelopeSeal:
     def test_seal_signature_changes_when_payload_changes(self) -> None:
         """Distinct payloads at the same sequence position must produce distinct signatures.
 
-        Two independent instances are used so that sequence number (q=1 for both)
-        and all other preimage fields are held constant, isolating payload as the
-        sole independent variable.
+        Two independent instances are used so that both seal at the same counter
+        value (both read N at init and increment to N+1 on their respective
+        first calls), isolating payload as the sole independent variable.
         """
         envelope_a = bootstrap_sensor_node(_NODE_ID, _KEY_PATH)
         envelope_b = bootstrap_sensor_node(_NODE_ID, _KEY_PATH)
@@ -183,3 +202,64 @@ class TestEnvelopeSeal:
         envelope = bootstrap_sensor_node(_NODE_ID, _KEY_PATH)
         parsed = json.loads(envelope.seal(_TIMESTAMP, _PAYLOAD))
         assert all(c in _HEX_ALPHABET for c in parsed["s"])
+
+    def test_software_driver_signature_changes_with_different_key_files(
+        self, tmp_path: Path
+    ) -> None:
+        """HMAC signatures must diverge when the underlying key material differs.
+
+        Two drivers are initialized from distinct key files containing different
+        secret bytes.  Both seal the same payload at q=1 (via separate, fresh
+        sequence files), so the sequence position and all other preimage fields
+        are held constant.  The signature difference proves that key bytes
+        participate directly in the HMAC computation rather than being ignored.
+        """
+        key_file_a = tmp_path / "key_alpha.bin"
+        key_file_b = tmp_path / "key_bravo.bin"
+        key_file_a.write_bytes(b"sovereign-key-material-alpha-node-identity-v1")
+        key_file_b.write_bytes(b"sovereign-key-material-bravo-node-identity-v1")
+
+        driver_a = SoftwareFallbackDriver(str(key_file_a))
+        driver_a.initialize_hardware()
+        envelope_a = SovereignEnvelope(
+            _NODE_ID, driver_a, sequence_file=str(tmp_path / "seq_a")
+        )
+
+        driver_b = SoftwareFallbackDriver(str(key_file_b))
+        driver_b.initialize_hardware()
+        envelope_b = SovereignEnvelope(
+            _NODE_ID, driver_b, sequence_file=str(tmp_path / "seq_b")
+        )
+
+        sig_a = json.loads(envelope_a.seal(_TIMESTAMP, _PAYLOAD))["s"]
+        sig_b = json.loads(envelope_b.seal(_TIMESTAMP, _PAYLOAD))["s"]
+        assert sig_a != sig_b
+
+    def test_sequence_counter_resumes_after_reboot_simulation(
+        self, tmp_path: Path
+    ) -> None:
+        """A fresh envelope bound to an existing sequence file must resume from the
+        persisted counter rather than resetting to zero.
+
+        Simulates a device reboot by discarding the pre-reboot envelope instance
+        and constructing a new one that shares the same VFS sequence file path.
+        After sealing three times pre-reboot (counter reaches 3), the post-reboot
+        envelope's first seal must produce q=4, proving that the counter restored
+        correctly from flash and that the monotonic replay-protection invariant
+        survives a full power cycle.
+        """
+        seq_file = str(tmp_path / ".sovereign_sequence")
+
+        driver_before = SoftwareFallbackDriver(_KEY_PATH)
+        driver_before.initialize_hardware()
+        envelope_before = SovereignEnvelope(_NODE_ID, driver_before, sequence_file=seq_file)
+        for _ in range(3):
+            envelope_before.seal(_TIMESTAMP, _PAYLOAD)
+
+        # Reboot: construct new driver and envelope instances from the persisted state.
+        driver_after = SoftwareFallbackDriver(_KEY_PATH)
+        driver_after.initialize_hardware()
+        envelope_after = SovereignEnvelope(_NODE_ID, driver_after, sequence_file=seq_file)
+
+        parsed = json.loads(envelope_after.seal(_TIMESTAMP, _PAYLOAD))
+        assert parsed["q"] == 4

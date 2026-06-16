@@ -23,45 +23,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     as a canonical identifier string (e.g. `"hmac-sha256"`, `"ecdsa-p256"`), which is embedded
     in the authenticated preimage and the wire frame.  Intentionally avoids the standard-library
     `abc` module to remain compatible with constrained MicroPython heap environments.
-  - **`SovereignEnvelope`** (`envelope.py`): Seals observations in a seven-step deterministic
-    pipeline: (1) per-instance monotonic sequence counter incremented, binding each frame to a
-    unique emission position for replay protection; (2) algorithm identifier queried from driver
-    via `algorithm()`; (3) payload canonicalized via `json.dumps(..., separators=(',', ':'))`;
+  - **`SovereignEnvelope`** (`envelope.py`): Accepts a `sequence_file` VFS path (default
+    `".sovereign_sequence"`) and restores any previously persisted counter from that file on
+    construction, enabling the monotonic sequence to resume across hardware reboots.  Seals
+    observations in a seven-step deterministic pipeline: (1) per-instance monotonic sequence
+    counter incremented and immediately persisted to the configured VFS path, binding each frame
+    to a unique emission position for replay protection across power cycles (degrades gracefully
+    to RAM-only tracking on VFS write failure); (2) algorithm identifier queried from driver via
+    `algorithm()`; (3) payload canonicalized via `json.dumps(..., separators=(',', ':'))`;
     (4) versioned preimage constructed as `1|node_id|timestamp|sequence|algorithm|canonical_payload`,
     binding protocol version, identity, time, ordering, and algorithm into a single signed surface;
     (5) preimage dispatched across the driver's `sign()` boundary, returning raw binary bytes;
     (6) raw bytes hex-encoded via `binascii.hexlify`, guaranteeing all values `0x00–0xFF` map
     safely without `UnicodeDecodeError` on MicroPython silicon; (7) seven-key frame
     `{"v":1, "n", "t", "q", "alg", "d", "s"}` serialized to ultra-minified UTF-8 JSON bytes.
-  - **`bootstrap_sensor_node(node_id, private_key_path) -> SovereignEnvelope`** (`__init__.py`):
-    Inspects `sys.platform.lower()` at runtime; routes to `ESP32HardwareDriver` when `"esp32"`
-    is present in the platform string, otherwise binds `SoftwareFallbackDriver`.  Calls
-    `initialize_hardware()` on the selected driver before returning the configured envelope.
-  - **`SoftwareFallbackDriver`** (`drivers/software_fallback.py`): Pure-Python SHA-256 signing
-    driver using only `hashlib`.  Returns raw 32-byte SHA-256 digest bytes (no encoding applied;
-    hex encoding is the envelope layer's exclusive responsibility).  Declares
-    `algorithm() -> "hmac-sha256"`.  Suitable for desktop CI validation and any MicroPython
-    platform without on-chip crypto acceleration.  Not intended for production custody chains.
+  - **`bootstrap_sensor_node(node_id, private_key_path, sequence_file) -> SovereignEnvelope`**
+    (`__init__.py`): Inspects `sys.platform.lower()` at runtime; routes to `ESP32HardwareDriver`
+    when `"esp32"` is present in the platform string, otherwise binds `SoftwareFallbackDriver`.
+    Calls `initialize_hardware()` on the selected driver before returning the configured envelope.
+    Accepts an optional `sequence_file` path (default `".sovereign_sequence"`) forwarded to
+    `SovereignEnvelope` for VFS-based counter persistence across reboots.
+  - **`SoftwareFallbackDriver`** (`drivers/software_fallback.py`): HMAC-SHA256 keyed signing
+    driver using `hashlib` and `hmac`.  On `initialize_hardware()`, reads key material from the
+    VFS path supplied at construction; if the file is absent (`OSError`), substitutes a fixed
+    deterministic stub (`_MOCK_KEY`) so desktop CI tests operate without a provisioned key store.
+    Returns raw 32-byte HMAC-SHA256 digest bytes (no encoding applied; hex encoding is the
+    envelope layer's exclusive responsibility).  Declares `algorithm() -> "hmac-sha256"`.
+    Not intended for production custody chains.
   - **`ESP32HardwareDriver`** (`drivers/esp32_hardware.py`): Placeholder shell class establishing
     the class contract and import surface for the ESP32 on-chip ECC accelerator via MicroPython
     `machine` and `hashlib` HAL bindings.  Declares `algorithm() -> "ecdsa-p256"` as a
     forward-looking identifier for the hardware signing primitive.  Full low-level register-level
     engineering deferred to the next sprint.
 
-  - **`packages/sovereign-sensor/tests/test_sensor.py`** — 19 test cases across two classes
-    (`TestBootstrap`: 3 cases; `TestEnvelopeSeal`: 16 cases) verifying: platform auto-detection
+  - **`packages/sovereign-sensor/tests/test_sensor.py`** — 21 test cases across two classes
+    (`TestBootstrap`: 3 cases; `TestEnvelopeSeal`: 18 cases) verifying: platform auto-detection
     confirmed via the public `algorithm()` contract (sealed `"alg"` field equals `"hmac-sha256"`)
     rather than private attribute access; driver initialization confirmed via successful `seal()`
     completion; `seal()` returns `bytes`; output parses as valid JSON; transmission envelope
     contains exactly the seven keys `v`, `n`, `t`, `q`, `alg`, `d`, `s`; `v` is integer `1`;
-    `n` and `t` are preserved verbatim; `q` starts at `1` on the first call; three consecutive
-    calls on the same instance produce `q` values `[1, 2, 3]` (monotonic increment); `"alg"` equals
-    `"hmac-sha256"`; payload dict round-trips without mutation; signature is a non-empty ASCII
-    string; software driver signature is exactly 64 hex characters (SHA-256 digest); output is
-    ultra-minified (no whitespace after separators); two independent fresh instances produce
-    byte-identical first seals for identical inputs (cross-instance determinism); distinct payloads
-    at the same sequence position produce distinct signatures; `"s"` field contains only
-    characters from the set `{0–9, a–f}`. **19 passed, 0 failed.**
+    `n` and `t` are preserved verbatim; `q` starts at `1` on the first call (isolated via
+    `tmp_path` sequence file); three consecutive calls on the same instance produce `q` values
+    `[1, 2, 3]` (monotonic increment, isolated via `tmp_path`); `"alg"` equals `"hmac-sha256"`;
+    payload dict round-trips without mutation; signature is a non-empty ASCII string; software
+    driver signature is exactly 64 hex characters (HMAC-SHA256 digest); output is ultra-minified
+    (no whitespace after separators); two independent fresh instances produce byte-identical first
+    seals for identical inputs (cross-instance determinism); distinct payloads at the same
+    sequence position produce distinct signatures; `"s"` field contains only characters from the
+    set `{0–9, a–f}`; HMAC signatures diverge when distinct key files supply different secret
+    material (key material participation); sequence counter correctly resumes from the persisted
+    VFS value after a simulated hardware reboot (replay-protection continuity). **21 passed, 0 failed.**
 
 - **Phase 8 — `sovereign-ledger` immutable provenance engine** (new workspace member
   `packages/sovereign-ledger/`): Introduces a local-first, SQLite-backed, append-only
