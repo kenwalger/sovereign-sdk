@@ -39,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     collapses the sequence, and injected rows whose `parent_hash` does not match the
     re-derived value.
 
-  - **`packages/sovereign-ledger/tests/test_ledger.py`** — 57 test cases across seven
+  - **`packages/sovereign-ledger/tests/test_ledger.py`** — 58 test cases across seven
     classes (`TestSovereignLedgerInit`, `TestAppendReceipt`, `TestHashChain`,
     `TestImmutabilityTriggers`, `TestVerifyLedgerIntegrity`, `TestEdgeCases`,
     `TestConcurrentAppend`) covering schema assertion, WAL mode verification,
@@ -53,10 +53,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     detection, Unicode payload round-trip, duplicate `payload_hash` rejection,
     close-and-reopen lifecycle correctness, connection-registry purge verification
     (`close()` releases all thread-local handles and empties the registry to zero), and
-    concurrent stress tests (`TestConcurrentAppend`) covering separate-instance,
-    shared-instance file-backed, and shared-instance in-memory scenarios, all
-    synchronised at a `threading.Barrier` for maximum lock contention; the in-memory
-    test specifically validates per-thread DDL bootstrapping in `_get_conn()`.
+    `test_out_of_band_tax_savings_percentage_tamper_breaks_chain` covering the
+    remaining column isolation gap, concurrent stress tests (`TestConcurrentAppend`)
+    covering separate-instance, shared-instance file-backed, and shared-instance
+    in-memory scenarios, and closed-instance lifecycle hardening verifying that
+    `SovereignStorageError` is raised immediately on any post-`close()` access.
 
 - **Phase 7 — `sovereign-sieve` standalone micro-utility package** (new workspace member
   `packages/sovereign-sieve/`): Extracted `sovereign-sieve` into a zero-dependency

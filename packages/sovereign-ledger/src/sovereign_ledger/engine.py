@@ -7,6 +7,16 @@ from types import TracebackType
 from typing import Any
 
 
+class SovereignStorageError(RuntimeError):
+    """Raised when a :class:`SovereignLedger` operation is attempted on an
+    instance whose resources have already been explicitly released via
+    :meth:`SovereignLedger.close`.
+
+    Extends :exc:`RuntimeError` and carries a human-readable message identifying
+    the specific lifecycle violation.
+    """
+
+
 # Root of the hash chain.  Hardcoded so that the genesis entry is verifiable
 # independently of any runtime state.
 _GENESIS_HASH: str = hashlib.sha256(b"SOVEREIGN_LEDGER_GENESIS_BLOCK_v1.0").hexdigest()
@@ -105,6 +115,7 @@ class SovereignLedger:
         if db_path != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._db_path = db_path
+        self._closed: bool = False
         self._thread_local = threading.local()
         # Tracks every per-thread connection so close() can release all file
         # descriptors regardless of which thread calls it.
@@ -124,6 +135,11 @@ class SovereignLedger:
     def _get_conn(self) -> sqlite3.Connection:
         # Returns the calling thread's dedicated sqlite3.Connection, creating
         # and registering a new one on first access from this thread.
+        if self._closed:
+            raise SovereignStorageError(
+                "Cannot acquire connection; SovereignLedger instance has been"
+                " explicitly closed."
+            )
         conn: sqlite3.Connection | None = getattr(self._thread_local, "conn", None)
         if conn is None:
             conn = sqlite3.connect(
@@ -361,14 +377,19 @@ class SovereignLedger:
     def close(self) -> None:
         """Release all thread-local SQLite connection handles tracked by this instance.
 
-        Iterates every connection registered across all threads and closes each
-        one, ensuring no file descriptors are leaked regardless of how many
-        producer threads have accessed the ledger.  Called automatically by
-        :meth:`__exit__` when the instance is used as a context manager.
+        Sets the instance's closed flag before releasing connections so that any
+        concurrent or subsequent call to :meth:`_get_conn` raises
+        :exc:`SovereignStorageError` immediately rather than attempting to use
+        a partially or fully released connection pool.  Iterates every connection
+        registered across all threads and closes each one, ensuring no file
+        descriptors are leaked regardless of how many producer threads have
+        accessed the ledger.  Called automatically by :meth:`__exit__` when the
+        instance is used as a context manager.
 
         :return: None
         :rtype: None
         """
+        self._closed = True
         with self._connections_lock:
             for conn in self._connections:
                 try:

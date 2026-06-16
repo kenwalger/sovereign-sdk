@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from sovereign_ledger import SovereignLedger
+from sovereign_ledger import SovereignLedger, SovereignStorageError
 
 # Mirror of the private constant so tests can assert the genesis root value
 # independently of the implementation module.
@@ -154,13 +154,16 @@ class TestSovereignLedgerInit:
         """SovereignLedger must support the context manager protocol so that
         the underlying SQLite file descriptor is released automatically on
         __exit__, preventing leaks in long-running production server lifecycles.
+
+        After __exit__ the instance is marked closed; _get_conn() raises
+        SovereignStorageError before any connection object is touched.
         """
         db_path = str(tmp_path / "ctx_mgr.db")
         with SovereignLedger(db_path) as ledger:
             ledger.append_receipt(_make_receipt("hash_CTX", "sig_CTX"), "ctx content")
             assert ledger.verify_ledger_integrity() is True
-        # After __exit__ the connection is closed; any further operation raises.
-        with pytest.raises(sqlite3.ProgrammingError):
+        # After __exit__ the closed flag is set; any further operation raises.
+        with pytest.raises(SovereignStorageError):
             ledger._conn.execute("SELECT 1")
 
 
@@ -684,6 +687,27 @@ class TestVerifyLedgerIntegrity:
         raw.execute(
             "UPDATE forensic_ledger "
             "SET raw_token_count = 9999, optimized_token_count = 1 WHERE id = 1"
+        )
+        raw.commit()
+        raw.close()
+
+        assert ledger.verify_ledger_integrity() is False
+
+    def test_out_of_band_tax_savings_percentage_tamper_breaks_chain(self, file_ledger):
+        """Mutating only the tax_savings_percentage column of a historical row —
+        leaving all hash and signature columns intact — must break the chain
+        because tax_savings_percentage is sealed inside the NUL-delimited SHA-256
+        parent_hash preimage with fixed-precision :.4f serialisation.
+        """
+        ledger, db_path = file_ledger
+        ledger.append_receipt(_make_receipt("hash_TAXP1", "sig_TAXP1"), "content 1")
+        ledger.append_receipt(_make_receipt("hash_TAXP2", "sig_TAXP2"), "content 2")
+        assert ledger.verify_ledger_integrity() is True
+
+        raw = sqlite3.connect(db_path)
+        raw.execute("DROP TRIGGER IF EXISTS prevent_update_forensic_ledger")
+        raw.execute(
+            "UPDATE forensic_ledger SET tax_savings_percentage = 99.9999 WHERE id = 1"
         )
         raw.commit()
         raw.close()

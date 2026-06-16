@@ -7,10 +7,11 @@ Custody enforcement.  Zero external dependencies beyond the Python standard
 library.
 """
 
-from .engine import SovereignLedger
+from .engine import SovereignLedger, SovereignStorageError
 
 __version__ = "1.1.0"
 
 __all__ = [
     "SovereignLedger",
+    "SovereignStorageError",
 ]

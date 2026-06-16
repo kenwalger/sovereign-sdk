@@ -301,16 +301,20 @@ assert ledger.verify_ledger_integrity()  # → True on an untampered chain
   appended row to its cryptographic predecessor.
 * [x] `verify_ledger_integrity() -> bool` — O(n) sweep that re-derives the expected
   parent hash for each row and returns `False` on any detected breach.
-* [x] 57-case adversarial test suite covering trigger enforcement (internal and external
+* [x] `SovereignStorageError` exception (exported from `sovereign_ledger`) raised by
+  `_get_conn()` when called on a closed instance, preventing use-after-close access to
+  released connection handles.
+* [x] 58-case adversarial test suite covering trigger enforcement (internal and external
   client), `RAISE(ROLLBACK)` transaction-abort semantics confirming post-hoc injection
   via COMMIT is impossible, out-of-band corruption detection across all eight data columns
   (signature, payload hash, parent hash, timestamp, raw/optimized token counts, savings
   percentage, sieved content), field-boundary delimiter collision resistance, mid-chain
-  deletion detection, injected-row detection, full lifecycle correctness, concurrent write
-  serialisation via `BEGIN IMMEDIATE` (8-thread stress tests across separate-instance,
-  shared-instance file-backed, and shared-instance in-memory scenarios confirming zero
-  chain fragmentation and correct per-thread DDL bootstrapping), and connection-registry
-  purge verification (`close()` releases all thread-local handles to zero).
+  deletion detection, injected-row detection, full lifecycle correctness, closed-instance
+  guard (`SovereignStorageError` on post-`close()` access), concurrent write serialisation
+  via `BEGIN IMMEDIATE` (8-thread stress tests across separate-instance, shared-instance
+  file-backed, and shared-instance in-memory scenarios confirming zero chain fragmentation
+  and correct per-thread DDL bootstrapping), and connection-registry purge verification
+  (`close()` releases all thread-local handles to zero).
 
 ---
 
