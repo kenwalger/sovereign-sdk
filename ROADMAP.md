@@ -333,36 +333,43 @@ from sovereign_sensor import bootstrap_sensor_node
 # Auto-selects hardware or software crypto driver at runtime
 envelope = bootstrap_sensor_node("node-temperature-01", "/flash/keys/node.key")
 wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 21.4})
-# → b'{"n":"node-temperature-01","t":"2026-06-16T00:00:00Z","d":{"sensor":"temp","value":21.4},"s":"<hex-sig>"}'
+# → b'{"v":1,"n":"node-temperature-01","t":"2026-06-16T00:00:00Z","q":1,"alg":"hmac-sha256","d":{"sensor":"temp","value":21.4},"s":"<hex-sig>"}'
 ```
 
 **Delivered:**
 
-* [x] `SovereignCryptoDriver` HAL base class (`interface.py`) — enforces `initialize_hardware()`
-  and `sign(payload: bytes) -> bytes` contract stubs via `NotImplementedError` without importing
-  the `abc` module, keeping the MicroPython heap footprint minimal.
-* [x] `SovereignEnvelope` (`envelope.py`) — canonicalizes payload via
-  `json.dumps(..., separators=(',', ':'))`, constructs the strict preimage
-  `node_id|timestamp|canonical_payload`, dispatches across the driver signing boundary,
-  and packs all fields into an ultra-minified JSON wire envelope `{"n", "t", "d", "s"}`.
+* [x] `SovereignCryptoDriver` HAL base class (`interface.py`) — enforces `initialize_hardware()`,
+  `sign(payload: bytes) -> bytes`, and `algorithm() -> str` contract stubs via `NotImplementedError`
+  without importing the `abc` module, keeping the MicroPython heap footprint minimal.
+* [x] `SovereignEnvelope` (`envelope.py`) — seals observations in a seven-step deterministic
+  pipeline: (1) monotonic sequence counter increment for replay protection; (2) algorithm
+  identifier queried from driver; (3) payload canonicalized via `json.dumps(..., separators=(',', ':'))`;
+  (4) versioned preimage constructed as `1|node_id|timestamp|sequence|algorithm|canonical_payload`;
+  (5) preimage signed by driver returning raw binary bytes; (6) signature hex-encoded via
+  `binascii.hexlify`; (7) all fields serialized into a 7-key ultra-minified JSON frame
+  `{"v", "n", "t", "q", "alg", "d", "s"}`.
 * [x] `bootstrap_sensor_node(node_id, private_key_path) -> SovereignEnvelope` (`__init__.py`) —
   inspects `sys.platform.lower()` to route between `ESP32HardwareDriver` (on `"esp32"` targets)
   and `SoftwareFallbackDriver` (all other platforms); calls `initialize_hardware()` before returning.
 * [x] `SoftwareFallbackDriver` (`drivers/software_fallback.py`) — pure-Python SHA-256 signing
-  driver using only `hashlib` and `binascii`; returns hex-encoded digest bytes; suitable for
-  desktop CI and any MicroPython platform without on-chip crypto acceleration.
+  driver using only `hashlib`; returns raw 32-byte SHA-256 digest bytes (no encoding);
+  declares `algorithm() -> "hmac-sha256"`; suitable for desktop CI and any MicroPython platform
+  without on-chip crypto acceleration.
 * [x] `ESP32HardwareDriver` (`drivers/esp32_hardware.py`) — placeholder shell class establishing
-  the class contract and import surface for the ESP32 on-chip accelerator; full register-level
+  the class contract and import surface for the ESP32 on-chip ECC accelerator; declares
+  `algorithm() -> "ecdsa-p256"` as a forward-looking identifier; full register-level
   engineering deferred to the next sprint.
 * [x] `packages/sovereign-sensor/pyproject.toml` — zero runtime dependencies; targets Python 3.12
   for desktop test compatibility; restricts internal library code to standard MicroPython built-ins
   (`json`, `sys`, `machine`, `hashlib`, `binascii`).
-* [x] 14-case desktop validation test suite (`tests/test_sensor.py`) across two classes
-  (`TestBootstrap`, `TestEnvelopeSeal`) verifying platform auto-detection to software fallback,
-  driver initialization confirmation, bytes return type, valid JSON parse, exact 4-key envelope
-  structure (`n`, `t`, `d`, `s`), field identity preservation, SHA-256 hex signature length (64
-  chars), ultra-minified output (no whitespace after separators), determinism, and cross-payload
-  signature divergence. **14 passed, 0 failed.**
+* [x] 19-case desktop validation test suite (`tests/test_sensor.py`) across two classes
+  (`TestBootstrap`: 3 cases, `TestEnvelopeSeal`: 16 cases) verifying platform auto-detection via
+  public `algorithm()` contract, driver initialization confirmation, bytes return type, valid JSON
+  parse, exact 7-key envelope structure (`v`, `n`, `t`, `q`, `alg`, `d`, `s`), protocol version
+  integer type, sequence counter starts at 1, monotonic sequence increment across 3 consecutive
+  calls, algorithm field value, field identity preservation, SHA-256 hex signature length (64 chars),
+  ultra-minified output, cross-instance determinism (two fresh instances at q=1 produce identical
+  output), payload-isolated signature divergence, and hex-only character set. **19 passed, 0 failed.**
 
 ---
 

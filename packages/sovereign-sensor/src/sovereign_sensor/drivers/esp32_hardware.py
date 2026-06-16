@@ -37,15 +37,28 @@ class ESP32HardwareDriver(SovereignCryptoDriver):
         # Placeholder: hardware accelerator configuration deferred to next sprint.
         self._initialized = True
 
+    def algorithm(self) -> str:
+        """Return the canonical algorithm identifier for this driver.
+
+        Next sprint: finalize the identifier once the hardware signing
+        primitive (ECDSA P-256 via the ESP32 ECC accelerator) is confirmed.
+
+        :return: ``"ecdsa-p256"`` — forward-looking placeholder for the
+                 ESP32 on-chip ECC accelerator signing primitive.
+        :rtype: str
+        """
+        return "ecdsa-p256"
+
     def sign(self, payload: bytes) -> bytes:
         """Produce a hardware-accelerated signature over ``payload``.
 
         Next sprint: delegate to the ESP32 SHA/ECC hardware engine via
-        MicroPython ``hashlib`` acceleration bindings.
+        MicroPython ``hashlib`` acceleration bindings.  Returns raw binary
+        signature bytes; hex encoding is the envelope layer's responsibility.
 
         :param payload: Raw preimage bytes to authenticate.
         :type payload: bytes
-        :return: Platform signature bytes (format finalized in next sprint).
+        :return: Raw binary signature bytes (no encoding applied).
         :rtype: bytes
         :raises NotImplementedError: Until hardware signing is implemented.
         """

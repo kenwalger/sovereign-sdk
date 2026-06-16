@@ -11,43 +11,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing
-  sensor observations into tamper-evident, minified JSON transmission envelopes at the exact
-  point of data genesis on bare-metal microcontrollers (ESP32, Raspberry Pi Pico).
-  Zero runtime dependencies; internal library code restricted to standard MicroPython built-ins
-  (`json`, `sys`, `machine`, `hashlib`, `binascii`).
+  sensor observations into versioned, tamper-evident, minified JSON transmission envelopes with
+  monotonic replay protection at the exact point of data genesis on bare-metal microcontrollers
+  (ESP32, Raspberry Pi Pico).  Zero runtime dependencies; internal library code restricted to
+  standard MicroPython built-ins (`json`, `sys`, `machine`, `hashlib`, `binascii`).
 
   - **`SovereignCryptoDriver`** (`interface.py`): Lightweight HAL base class with explicit
-    `NotImplementedError` stubs for `initialize_hardware() -> None` and
-    `sign(payload: bytes) -> bytes`.  Intentionally avoids the standard-library `abc` module
-    to remain compatible with constrained MicroPython heap environments.
-  - **`SovereignEnvelope`** (`envelope.py`): Seals observations in a four-step deterministic
-    pipeline: (1) payload canonicalization via `json.dumps(..., separators=(',', ':'))`;
-    (2) strict preimage construction as `node_id|timestamp|canonical_payload`;
-    (3) preimage dispatch across the driver's `sign()` boundary;
-    (4) ultra-minified JSON serialization of the transmission dict `{"n", "t", "d", "s"}`.
-    Returns raw bytes safe for constrained transport channels.
+    `NotImplementedError` stubs for `initialize_hardware() -> None`,
+    `sign(payload: bytes) -> bytes`, and `algorithm() -> str`.  The `algorithm()` method
+    enforces protocol agility by requiring every concrete driver to declare its signing primitive
+    as a canonical identifier string (e.g. `"hmac-sha256"`, `"ecdsa-p256"`), which is embedded
+    in the authenticated preimage and the wire frame.  Intentionally avoids the standard-library
+    `abc` module to remain compatible with constrained MicroPython heap environments.
+  - **`SovereignEnvelope`** (`envelope.py`): Seals observations in a seven-step deterministic
+    pipeline: (1) per-instance monotonic sequence counter incremented, binding each frame to a
+    unique emission position for replay protection; (2) algorithm identifier queried from driver
+    via `algorithm()`; (3) payload canonicalized via `json.dumps(..., separators=(',', ':'))`;
+    (4) versioned preimage constructed as `1|node_id|timestamp|sequence|algorithm|canonical_payload`,
+    binding protocol version, identity, time, ordering, and algorithm into a single signed surface;
+    (5) preimage dispatched across the driver's `sign()` boundary, returning raw binary bytes;
+    (6) raw bytes hex-encoded via `binascii.hexlify`, guaranteeing all values `0x00–0xFF` map
+    safely without `UnicodeDecodeError` on MicroPython silicon; (7) seven-key frame
+    `{"v":1, "n", "t", "q", "alg", "d", "s"}` serialized to ultra-minified UTF-8 JSON bytes.
   - **`bootstrap_sensor_node(node_id, private_key_path) -> SovereignEnvelope`** (`__init__.py`):
     Inspects `sys.platform.lower()` at runtime; routes to `ESP32HardwareDriver` when `"esp32"`
     is present in the platform string, otherwise binds `SoftwareFallbackDriver`.  Calls
     `initialize_hardware()` on the selected driver before returning the configured envelope.
   - **`SoftwareFallbackDriver`** (`drivers/software_fallback.py`): Pure-Python SHA-256 signing
-    driver using only `hashlib` and `binascii`.  Returns 64-byte hex-encoded digest bytes.
-    Suitable for desktop CI validation and any MicroPython platform without on-chip crypto
-    acceleration.  Not intended for production custody chains.
-  - **`ESP32HardwareDriver`** (`drivers/esp32_hardware.py`): Placeholder shell class
-    establishing the class contract and import surface for the ESP32 on-chip SHA/ECC
-    accelerator via MicroPython `machine` and `hashlib` HAL bindings.  Full low-level
-    register-level engineering deferred to the next sprint.
+    driver using only `hashlib`.  Returns raw 32-byte SHA-256 digest bytes (no encoding applied;
+    hex encoding is the envelope layer's exclusive responsibility).  Declares
+    `algorithm() -> "hmac-sha256"`.  Suitable for desktop CI validation and any MicroPython
+    platform without on-chip crypto acceleration.  Not intended for production custody chains.
+  - **`ESP32HardwareDriver`** (`drivers/esp32_hardware.py`): Placeholder shell class establishing
+    the class contract and import surface for the ESP32 on-chip ECC accelerator via MicroPython
+    `machine` and `hashlib` HAL bindings.  Declares `algorithm() -> "ecdsa-p256"` as a
+    forward-looking identifier for the hardware signing primitive.  Full low-level register-level
+    engineering deferred to the next sprint.
 
-  - **`packages/sovereign-sensor/tests/test_sensor.py`** — 14 test cases across two classes
-    (`TestBootstrap`: 3 cases; `TestEnvelopeSeal`: 11 cases) verifying: platform auto-detection
-    binds `SoftwareFallbackDriver` on non-ESP32 hosts; `initialize_hardware()` is called before
-    `bootstrap_sensor_node` returns; `seal()` returns `bytes`; output parses as valid JSON;
-    transmission envelope contains exactly the four keys `n`, `t`, `d`, `s`; `n` and `t` are
-    preserved verbatim; payload dict round-trips without mutation; signature is a non-empty
-    ASCII string; software driver signature is exactly 64 hex characters (SHA-256 digest);
-    output is ultra-minified (no whitespace after separators); identical inputs produce
-    byte-identical output (determinism); distinct payloads produce distinct signatures.
+  - **`packages/sovereign-sensor/tests/test_sensor.py`** — 19 test cases across two classes
+    (`TestBootstrap`: 3 cases; `TestEnvelopeSeal`: 16 cases) verifying: platform auto-detection
+    confirmed via the public `algorithm()` contract (sealed `"alg"` field equals `"hmac-sha256"`)
+    rather than private attribute access; driver initialization confirmed via successful `seal()`
+    completion; `seal()` returns `bytes`; output parses as valid JSON; transmission envelope
+    contains exactly the seven keys `v`, `n`, `t`, `q`, `alg`, `d`, `s`; `v` is integer `1`;
+    `n` and `t` are preserved verbatim; `q` starts at `1` on the first call; three consecutive
+    calls on the same instance produce `q` values `[1, 2, 3]` (monotonic increment); `"alg"` equals
+    `"hmac-sha256"`; payload dict round-trips without mutation; signature is a non-empty ASCII
+    string; software driver signature is exactly 64 hex characters (SHA-256 digest); output is
+    ultra-minified (no whitespace after separators); two independent fresh instances produce
+    byte-identical first seals for identical inputs (cross-instance determinism); distinct payloads
+    at the same sequence position produce distinct signatures; `"s"` field contains only
+    characters from the set `{0–9, a–f}`. **19 passed, 0 failed.**
 
 - **Phase 8 — `sovereign-ledger` immutable provenance engine** (new workspace member
   `packages/sovereign-ledger/`): Introduces a local-first, SQLite-backed, append-only

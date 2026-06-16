@@ -10,10 +10,10 @@ MicroPython heap environments.
 class SovereignCryptoDriver:
     """Abstract HAL contract for a platform-specific signing driver.
 
-    Concrete subclasses must override both ``initialize_hardware`` and
-    ``sign``.  Calling either method on the base class raises
-    ``NotImplementedError``, enforcing the contract without pulling in
-    the standard-library ``abc`` machinery.
+    Concrete subclasses must override ``initialize_hardware``, ``sign``, and
+    ``algorithm``.  Calling any method on the base class raises
+    ``NotImplementedError``, enforcing the contract without pulling in the
+    standard-library ``abc`` machinery.
     """
 
     def initialize_hardware(self) -> None:
@@ -43,4 +43,21 @@ class SovereignCryptoDriver:
         """
         raise NotImplementedError(
             f"{type(self).__name__} must implement sign()"
+        )
+
+    def algorithm(self) -> str:
+        """Return the canonical algorithm identifier for this driver's signing primitive.
+
+        The returned string is embedded verbatim in every sealed transmission
+        envelope under the ``alg`` key, enabling receivers to negotiate
+        verification strategy without out-of-band configuration.  Identifiers
+        must be lowercase, hyphen-delimited strings (e.g. ``"hmac-sha256"``,
+        ``"ecdsa-p256"``).
+
+        :return: Canonical algorithm identifier string.
+        :rtype: str
+        :raises NotImplementedError: Always; subclasses must override.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement algorithm()"
         )

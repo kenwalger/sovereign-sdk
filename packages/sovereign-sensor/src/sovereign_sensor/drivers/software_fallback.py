@@ -16,7 +16,7 @@ from sovereign_sensor.interface import SovereignCryptoDriver
 class SoftwareFallbackDriver(SovereignCryptoDriver):
     """SHA-256–based software signing driver for non-accelerated platforms.
 
-    :param private_key_path: Filesystem path reserved for a future HMAC key
+    :param private_key_path: Filesystem path reserved for future HMAC key
         material binding.  Stored but not read during this placeholder phase.
     :type private_key_path: str
     """
@@ -31,6 +31,15 @@ class SoftwareFallbackDriver(SovereignCryptoDriver):
         :rtype: None
         """
         self._initialized = True
+
+    def algorithm(self) -> str:
+        """Return the canonical algorithm identifier for this driver.
+
+        :return: ``"hmac-sha256"`` — the identifier for the SHA-256–based
+                 software signing primitive used by this fallback driver.
+        :rtype: str
+        """
+        return "hmac-sha256"
 
     def sign(self, payload: bytes) -> bytes:
         """Return the raw 32-byte SHA-256 digest of ``payload``.
