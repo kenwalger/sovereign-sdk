@@ -59,8 +59,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `NotImplementedError`; full register-level engineering is deferred to the next sprint.
     This driver must not be wired into any production custody chain in its current state.
 
-  - **`packages/sovereign-sensor/tests/test_sensor.py`** — 23 test cases across three classes
-    (`TestBootstrap`: 3 cases; `TestDriverGuard`: 1 case; `TestEnvelopeSeal`: 19 cases)
+  - **`packages/sovereign-sensor/tests/test_sensor.py`** — 24 test cases across three classes
+    (`TestBootstrap`: 3 cases; `TestDriverGuard`: 1 case; `TestEnvelopeSeal`: 20 cases)
     verifying: platform auto-detection confirmed via the public `algorithm()` contract (sealed
     `"alg"` field equals `"hmac-sha256"`) rather than private attribute access; driver
     initialization confirmed via successful `seal()` completion; `sign()` raises `RuntimeError`
@@ -78,9 +78,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     set `{0–9, a–f}`; `sort_keys=True` canonicalization produces byte-identical signatures for
     semantically equivalent payloads with inverted key insertion order, proving preimage invariance
     across all MicroPython targets; HMAC signatures diverge when distinct key files supply
-    different secret material (key material participation); sequence counter correctly resumes from
-    the persisted VFS value after a simulated hardware reboot (replay-protection continuity).
-    **23 passed, 0 failed.**
+    different secret material (key material participation); a 0-byte sequence file (power-loss
+    truncation artifact) is caught as `ValueError` and resets the counter to 0 without aborting
+    device initialization; sequence counter correctly resumes from the persisted VFS value after
+    a simulated hardware reboot (replay-protection continuity). **24 passed, 0 failed.**
 
 - **Phase 8 — `sovereign-ledger` immutable provenance engine** (new workspace member
   `packages/sovereign-ledger/`): Introduces a local-first, SQLite-backed, append-only
@@ -191,6 +192,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `drivers/esp32_hardware.py`): Both driver modules now import `SovereignCryptoDriver` via
   `from ..interface import SovereignCryptoDriver`, consistent with the workspace-wide
   convention for intra-package imports.
+
+- **`SovereignEnvelope.__init__()` — power-loss truncation recovery** (`envelope.py`):
+  The `int(data.strip())` call in the constructor now lives inside a nested
+  `try/except ValueError` block.  A 0-byte or otherwise non-integer sequence file —
+  the typical artifact of a mid-write power interruption that cut power after the VFS
+  page was erased but before any digits were flushed — previously propagated `ValueError`
+  and aborted device initialization entirely.  The handler now prints a diagnostic and
+  resets `_sequence` to 0, allowing the node to boot and resume custody-chain sealing
+  without manual intervention.
+
+- **`SovereignEnvelope.seal()` — write-path exception scope narrowed** (`envelope.py`):
+  The `except Exception` guard around the VFS counter write is replaced with `except OSError`.
+  The previous broad catch silently discarded any structural Python runtime defect
+  (e.g. a logic error producing a `TypeError` inside the `with` body) that could mask
+  a code bug under the appearance of a benign flash-write failure.  `OSError` covers
+  every storage and filesystem media error class that legitimate flash degradation
+  produces, while allowing all other exception types to propagate normally.
 
 ### Fixed
 

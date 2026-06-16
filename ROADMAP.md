@@ -343,16 +343,19 @@ wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 2
   without importing the `abc` module, keeping the MicroPython heap footprint minimal.
 * [x] `SovereignEnvelope` (`envelope.py`) — accepts a `sequence_file` VFS path (default
   `".sovereign_sequence"`) and restores any previously persisted counter from that file on
-  construction, enabling the monotonic sequence to resume across hardware reboots; seals
-  observations in a seven-step deterministic pipeline: (1) monotonic sequence counter incremented
-  and immediately persisted to the configured VFS path for replay protection across power cycles
-  (degrades gracefully to RAM-only tracking on VFS write failure); (2) algorithm identifier queried
-  from driver; (3) payload canonicalized via `json.dumps(..., separators=(',', ':'), sort_keys=True)`,
-  guaranteeing identical preimage bytes regardless of dict key insertion order on any MicroPython
-  target; (4) versioned preimage constructed as `1|node_id|timestamp|sequence|algorithm|canonical_payload`;
-  (5) preimage signed by driver returning raw binary bytes; (6) signature hex-encoded via
-  `binascii.hexlify`; (7) all fields serialized into a 7-key ultra-minified JSON frame
-  `{"v", "n", "t", "q", "alg", "d", "s"}`.
+  construction, enabling the monotonic sequence to resume across hardware reboots; a `ValueError`
+  raised by `int(data.strip())` — the signature of a truncated 0-byte file left by a mid-write
+  power interruption — is caught, a diagnostic is printed, and the counter resets to 0 so device
+  initialization completes rather than aborting; `OSError` on file open degrades gracefully without
+  raising; seals observations in a seven-step deterministic pipeline: (1) monotonic sequence counter
+  incremented and immediately persisted to the configured VFS path via a `with`-block write whose
+  `except OSError` catch degrades gracefully to RAM-only tracking without masking structural defects;
+  (2) algorithm identifier queried from driver; (3) payload keys alphabetically sorted and serialized
+  via `json.dumps(..., separators=(',', ':'), sort_keys=True)`, guaranteeing identical preimage bytes
+  regardless of dict key insertion order on any MicroPython target; (4) versioned preimage constructed
+  as `1|node_id|timestamp|sequence|algorithm|canonical_payload`; (5) preimage signed by driver
+  returning raw binary bytes; (6) signature hex-encoded via `binascii.hexlify`; (7) all fields
+  serialized into a 7-key ultra-minified JSON frame `{"v", "n", "t", "q", "alg", "d", "s"}`.
 * [x] `bootstrap_sensor_node(node_id, private_key_path, sequence_file) -> SovereignEnvelope`
   (`__init__.py`) — inspects `sys.platform.lower()` to route between `ESP32HardwareDriver`
   (on `"esp32"` targets) and `SoftwareFallbackDriver` (all other platforms); calls
@@ -374,8 +377,8 @@ wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 2
 * [x] `packages/sovereign-sensor/pyproject.toml` — zero runtime dependencies; targets Python 3.12
   for desktop test compatibility; restricts internal library code to standard MicroPython built-ins
   (`json`, `sys`, `machine`, `hashlib`, `binascii`).
-* [x] 23-case desktop validation test suite (`tests/test_sensor.py`) across three classes
-  (`TestBootstrap`: 3 cases, `TestDriverGuard`: 1 case, `TestEnvelopeSeal`: 19 cases) verifying
+* [x] 24-case desktop validation test suite (`tests/test_sensor.py`) across three classes
+  (`TestBootstrap`: 3 cases, `TestDriverGuard`: 1 case, `TestEnvelopeSeal`: 20 cases) verifying
   platform auto-detection via public `algorithm()` contract, driver initialization confirmation,
   `sign()` raises `RuntimeError` before `initialize_hardware()` is called, bytes return type,
   valid JSON parse, exact 7-key envelope structure (`v`, `n`, `t`, `q`, `alg`, `d`, `s`),
@@ -387,9 +390,10 @@ wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 2
   canonicalization produces byte-identical signatures for semantically equivalent payloads with
   inverted key insertion order (preimage invariance across all MicroPython targets), HMAC
   signature divergence when distinct key files supply different secret material (key material
-  participation verified), and sequence counter resumption from the persisted VFS value after a
-  simulated hardware reboot (replay-protection continuity across power cycles).
-  **23 passed, 0 failed.**
+  participation verified), graceful recovery from a 0-byte sequence file left by a mid-write
+  power interruption (counter resets to 0 without aborting initialization), and sequence counter
+  resumption from the persisted VFS value after a simulated hardware reboot (replay-protection
+  continuity across power cycles). **24 passed, 0 failed.**
 
 ---
 

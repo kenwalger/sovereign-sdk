@@ -22,8 +22,10 @@ class SovereignEnvelope:
     the counter to resume monotonically after a hardware reboot rather than
     resetting to zero and opening a replay window.  File-access failures
     (``OSError``) degrade gracefully to a zero counter without raising.
-    Corrupt or non-integer sequence file contents propagate as ``ValueError``
-    to prevent a silent rollback to zero that would open a replay window.
+    Corrupt or non-integer file contents — the typical artifact of a mid-write
+    power interruption that truncated the flash page before any digits were
+    committed — are caught as ``ValueError``, a diagnostic is printed, and the
+    counter resets to zero so device initialization completes rather than aborting.
 
     :param node_id: Immutable identifier for the originating sensor node.
     :type node_id: str
@@ -51,7 +53,17 @@ class SovereignEnvelope:
         except OSError:
             pass
         else:
-            self._sequence = int(data.strip())
+            try:
+                self._sequence = int(data.strip())
+            except ValueError:
+                # Sequence file is empty or contains non-integer data — most likely a
+                # truncated write from a power drop mid-flush.  Reset to zero rather
+                # than propagating an exception that would abort device initialization.
+                print(
+                    f"WARNING: sequence file '{self._sequence_file}' is corrupt or empty; "
+                    "resetting counter to 0"
+                )
+                self._sequence = 0
 
     def seal(self, timestamp: str, payload: dict) -> bytes:
         """Canonicalize, sign, and serialize a sensor observation into a wire envelope.
@@ -97,7 +109,7 @@ class SovereignEnvelope:
         try:
             with open(self._sequence_file, "w") as f:
                 f.write(str(self._sequence))
-        except Exception:
+        except OSError:
             pass  # Degrade gracefully to RAM-only sequence tracking.
         algo: str = self._driver.algorithm()
         canonical: str = json.dumps(payload, separators=(",", ":"), sort_keys=True)

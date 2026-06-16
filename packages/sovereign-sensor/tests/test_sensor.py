@@ -311,6 +311,27 @@ class TestEnvelopeSeal:
         sig_b = json.loads(envelope_b.seal(_TIMESTAMP, _PAYLOAD))["s"]
         assert sig_a != sig_b
 
+    def test_envelope_recovers_gracefully_from_truncated_empty_sequence_file(
+        self, tmp_path: Path
+    ) -> None:
+        """A zero-byte sequence file left by a mid-write power loss must not crash init.
+
+        Simulates a power interruption that truncated the VFS sequence file to 0 bytes
+        before any counter digits were flushed.  The envelope constructor must catch the
+        resulting ``ValueError`` from ``int("".strip())``, print a diagnostic, and silently
+        reset ``_sequence`` to zero so device initialization continues without raising.
+
+        :type tmp_path: Path
+        """
+        seq_file = tmp_path / ".sovereign_sequence"
+        seq_file.write_bytes(b"")  # 0-byte truncated file from power-loss mid-write
+
+        driver = SoftwareFallbackDriver(_KEY_PATH)
+        driver.initialize_hardware()
+        envelope = SovereignEnvelope(_NODE_ID, driver, sequence_file=str(seq_file))
+
+        assert envelope._sequence == 0
+
     def test_sequence_counter_resumes_after_reboot_simulation(
         self, tmp_path: Path
     ) -> None:
