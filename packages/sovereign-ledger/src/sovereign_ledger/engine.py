@@ -210,7 +210,7 @@ class SovereignLedger:
                         "SQLite isolated memory architecture creates independent thread-local memory spaces; "
                         "appends from this worker thread will not be visible on the primary thread ledger chain.",
                         RuntimeWarning,
-                        stacklevel=2,
+                        stacklevel=4,
                     )
                 # Each in-memory connection is an independent empty SQLite store;
                 # the schema written by _bootstrap_schema() on the initialising
@@ -294,6 +294,11 @@ class SovereignLedger:
         :return: The ``payload_hash`` of the newly appended row, usable as an
             opaque receipt identifier.
         :rtype: str
+        :raises KeyError: If ``receipt`` is missing a required key
+            (``payload_hash``, ``timestamp``, or ``signature``).  These keys are
+            accessed via plain dict subscripts and the resulting :exc:`KeyError`
+            propagates to the caller unmodified; the ledger performs no
+            pre-validation of the receipt structure.
         :raises sqlite3.IntegrityError: If ``receipt["payload_hash"]`` already
             exists in the ledger (``UNIQUE`` constraint enforcement).
         :raises sqlite3.OperationalError: If the database lock cannot be
@@ -426,34 +431,38 @@ class SovereignLedger:
             has been closed via :meth:`close` prior to the call; raised by
             :meth:`_get_conn` before any database operation is attempted.
         """
-        expected_parent = _GENESIS_HASH
-        last_payload_hash: str | None = None
-        for row in self._conn.execute(
-            "SELECT signature, payload_hash, parent_hash, timestamp, "
-            "raw_token_count, optimized_token_count, tax_savings_percentage, sieved_content "
-            "FROM forensic_ledger ORDER BY id ASC"
-        ):
-            if row["parent_hash"] != expected_parent:
-                return False
-            expected_parent = hashlib.sha256(
-                _canonical_preimage(
-                    row["signature"],
-                    row["payload_hash"],
-                    row["parent_hash"],
-                    row["timestamp"],
-                    row["raw_token_count"],
-                    row["optimized_token_count"],
-                    row["tax_savings_percentage"],
-                    row["sieved_content"],
-                ).encode("utf-8")
-            ).hexdigest()
-            last_payload_hash = row["payload_hash"]
+        self._conn.execute("BEGIN DEFERRED")
+        try:
+            expected_parent = _GENESIS_HASH
+            last_payload_hash: str | None = None
+            for row in self._conn.execute(
+                "SELECT signature, payload_hash, parent_hash, timestamp, "
+                "raw_token_count, optimized_token_count, tax_savings_percentage, sieved_content "
+                "FROM forensic_ledger ORDER BY id ASC"
+            ):
+                if row["parent_hash"] != expected_parent:
+                    return False
+                expected_parent = hashlib.sha256(
+                    _canonical_preimage(
+                        row["signature"],
+                        row["payload_hash"],
+                        row["parent_hash"],
+                        row["timestamp"],
+                        row["raw_token_count"],
+                        row["optimized_token_count"],
+                        row["tax_savings_percentage"],
+                        row["sieved_content"],
+                    ).encode("utf-8")
+                ).hexdigest()
+                last_payload_hash = row["payload_hash"]
 
-        if expected_tip_hash is not None:
-            if last_payload_hash is None or last_payload_hash != expected_tip_hash:
-                return False
+            if expected_tip_hash is not None:
+                if last_payload_hash is None or last_payload_hash != expected_tip_hash:
+                    return False
 
-        return True
+            return True
+        finally:
+            self._conn.execute("COMMIT")
 
     def close(self) -> None:
         """Release all thread-local SQLite connection handles tracked by this instance.
