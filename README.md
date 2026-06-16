@@ -57,6 +57,12 @@ This repository is managed as an integrated `uv` workspace separating the crypto
 │   │   └── tests/
 │   │       └── test_sieve.py
 │   │
+│   ├── sovereign-ledger/                 # Immutable, hash-chained SQLite provenance engine
+│   │   ├── src/sovereign_ledger/
+│   │   │   └── engine.py                 # SovereignLedger — append_receipt(), verify_ledger_integrity()
+│   │   └── tests/
+│   │       └── test_ledger.py
+│   │
 │   ├── sovereign-runtime/                # Compute/Execution tier (tool & model isolation)
 │   │   └── src/sovereign_runtime/
 │   │       ├── router.py                 # Intent-based pre-flight namespace exposure
@@ -106,6 +112,35 @@ cleaned = [pure_sieve(r["text"]) for r in records]
 ```
 
 `pure_sieve()` is pure and synchronous — no I/O, no shared state, no web framework or ML library imports. See [`packages/sovereign-sieve/README.md`](packages/sovereign-sieve/README.md) for full API documentation.
+
+---
+
+## `sovereign-ledger` — Immutable Provenance Engine
+
+For systems that must retain a tamper-evident audit history of every `ForensicReceipt`, `sovereign-ledger` provides a local-first, append-only SQLite store with a SHA-256 hash chain and engine-level Write-Side Custody enforcement:
+
+```python
+from sovereign_core.gateway import SovereignGateway
+from sovereign_ledger import SovereignLedger
+
+gateway = SovereignGateway(signing_key=".keys/sovereign_identity.pem")
+ledger  = SovereignLedger(db_path=".keys/sovereign_audit.db")
+
+# Every boundary crossing is appended and chained
+result = await gateway.sieve_and_sign("Hi! Please just run the analysis.")
+ledger.append_receipt(result.receipt, result.content)
+
+# Verify the full chain at any time — O(n) sweep, no external service
+assert ledger.verify_ledger_integrity()  # False if any row was tampered
+```
+
+Two mechanisms enforce immutability:
+
+1. **Engine-level SQL triggers** — `BEFORE UPDATE` and `BEFORE DELETE` triggers stored inside the `.db` file call `RAISE(ROLLBACK, 'Write-Side Custody violation: ...')`. Any client that opens the database file — Python code, a desktop SQL browser, a raw `sqlite3.connect()` call — receives a `sqlite3.IntegrityError` and has its entire enclosing transaction rolled back at the SQLite engine layer before any mutation can land.
+
+2. **SHA-256 hash chain** — each row's `parent_hash` is derived from the preceding row's `signature + payload_hash + parent_hash`. Modifying any field of any historical row, deleting a middle row, or injecting a fabricated row breaks the chain; `verify_ledger_integrity()` returns `False` on the first detected discrepancy.
+
+See [`docs/sovereign-ledger.md`](docs/sovereign-ledger.md) for the full schema reference, pragma table, threat model matrix, and integration pattern.
 
 ---
 
@@ -203,17 +238,15 @@ Inside a FastAPI route the gateway instance lives on the application object; the
 
 ```python
 from sovereign_core.gateway import SovereignGateway
+from sovereign_ledger import SovereignLedger
 
 gateway = SovereignGateway(signing_key=".keys/sovereign_identity.pem")
+ledger  = SovereignLedger(db_path=".keys/sovereign_audit.db")
 
 @app.post("/api/v1/ingest")
 async def handle_agent_input(raw_payload: dict):
     result = await gateway.sieve_and_sign(raw_payload["text"])
-
-    await reasoning_ledger.append(
-        payload=result.content,
-        receipt=result.receipt,
-    )
+    ledger.append_receipt(result.receipt, result.content)
     return {
         "status": "sovereign_verified",
         "receipt_id": result.receipt["payload_hash"],

@@ -1,0 +1,545 @@
+# packages/sovereign-ledger/src/sovereign_ledger/engine.py
+import hashlib
+import sqlite3
+import threading
+import warnings
+from pathlib import Path
+from types import TracebackType
+from typing import Any
+
+
+class SovereignStorageError(RuntimeError):
+    """Raised when a :class:`SovereignLedger` operation is attempted on an
+    instance whose resources have already been explicitly released via
+    :meth:`SovereignLedger.close`.
+
+    Extends :exc:`RuntimeError` and carries a human-readable message identifying
+    the specific lifecycle violation.
+    """
+
+
+# Root of the hash chain.  Hardcoded so that the genesis entry is verifiable
+# independently of any runtime state.
+_GENESIS_HASH: str = hashlib.sha256(b"SOVEREIGN_LEDGER_GENESIS_BLOCK_v1.0").hexdigest()
+
+_DDL: str = """
+CREATE TABLE IF NOT EXISTS forensic_ledger (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    payload_hash           TEXT    UNIQUE NOT NULL,
+    parent_hash            TEXT    NOT NULL,
+    timestamp              TEXT    NOT NULL,
+    sieved_content         TEXT    NOT NULL,
+    signature              TEXT    NOT NULL,
+    raw_token_count        INTEGER,
+    optimized_token_count  INTEGER,
+    tax_savings_percentage REAL
+);
+
+CREATE TRIGGER IF NOT EXISTS prevent_update_forensic_ledger
+BEFORE UPDATE ON forensic_ledger
+BEGIN
+    SELECT RAISE(ROLLBACK, 'Write-Side Custody violation: UPDATE operations are prohibited on forensic_ledger.');
+END;
+
+CREATE TRIGGER IF NOT EXISTS prevent_delete_forensic_ledger
+BEFORE DELETE ON forensic_ledger
+BEGIN
+    SELECT RAISE(ROLLBACK, 'Write-Side Custody violation: DELETE operations are prohibited on forensic_ledger.');
+END;
+"""
+
+
+def _canonical_preimage(
+    signature: str,
+    payload_hash: str,
+    parent_hash: str,
+    timestamp: str,
+    raw_token_count: int | None,
+    optimized_token_count: int | None,
+    tax_savings_percentage: int | float | None,
+    sieved_content: str,
+) -> str:
+    # NUL delimiter closes length-substitution field-boundary attacks; naive
+    # concatenation allows "AB"+"CDEF" to collide with "ABC"+"DEF".
+    #
+    # tax_savings_percentage uses fixed-precision :.4f serialisation so that a
+    # Python int (e.g. 25, received at append time) and an SQLite REAL extraction
+    # (e.g. 25.0, returned at verify time) both produce the same token "25.0000",
+    # preventing a divergence that would silently corrupt every subsequent parent_hash.
+    return "\x00".join([
+        signature,
+        payload_hash,
+        parent_hash,
+        timestamp,
+        "NULL" if raw_token_count is None else str(raw_token_count),
+        "NULL" if optimized_token_count is None else str(optimized_token_count),
+        "NULL" if tax_savings_percentage is None else f"{float(tax_savings_percentage):.4f}",
+        sieved_content,
+    ])
+
+
+class SovereignLedger:
+    """Append-only, hash-chained SQLite ledger for ForensicReceipt provenance.
+
+    Enforces Write-Side Custody through two complementary mechanisms:
+
+    1. Engine-level ``BEFORE UPDATE`` / ``BEFORE DELETE`` triggers stored
+       inside the database file that abort any mutation attempt regardless of
+       which client opens the file.
+    2. A SHA-256 parent-hash chain linking every row to its predecessor,
+       making out-of-band filesystem tampering detectable via
+       :meth:`verify_ledger_integrity`.
+
+    The public interface is strictly append-only: :meth:`append_receipt` and
+    :meth:`verify_ledger_integrity`.  No update or deletion methods exist.
+
+    Supports the Python context manager protocol.  Use a ``with`` block to
+    guarantee connection release even when an unhandled exception terminates
+    the application ring::
+
+        with SovereignLedger(db_path=".keys/sovereign_audit.db") as ledger:
+            ledger.append_receipt(receipt, sieved_content)
+
+    Each thread that accesses a shared ``SovereignLedger`` instance receives
+    its own isolated ``sqlite3.Connection`` via :meth:`_get_conn`, eliminating
+    cursor and transaction state sharing across threads.  ``BEGIN IMMEDIATE``
+    and ``busy_timeout = 5000`` serialise writes at the SQLite reserved-lock
+    level, preventing sibling-fork ``parent_hash`` collisions without requiring
+    a Python-layer mutex.
+
+    **Threading Caveat for In-Memory Databases**
+
+    When ``db_path=":memory:"`` is used with a shared ``SovereignLedger``
+    instance across multiple threads, SQLite's per-connection isolation
+    architecture creates a fundamentally different runtime topology than the
+    file-backed case.  Each thread-local ``sqlite3.Connection`` opened against
+    ``":memory:"`` maps to a completely independent, empty SQLite in-memory
+    store.  The DDL is bootstrapped correctly on every new thread-local
+    connection (see :meth:`_get_conn`), so worker threads never encounter
+    ``OperationalError: no such table``.  However, **writes committed from one
+    thread are visible only within that thread's own isolated in-memory
+    database**.  No single unified hash chain exists across threads: each
+    thread appends its receipts to its own private chain rooted at the genesis
+    constant, completely invisible to all other threads.  ``BEGIN IMMEDIATE``
+    has no cross-thread serialisation effect because there is no shared database
+    file to lock.
+
+    Consequences for operators and test authors:
+
+    * In-memory instances are appropriate for single-threaded unit tests, fast
+      schema-bootstrap validation, and lifecycle correctness checks where chain
+      continuity across threads is not required.
+    * ``verify_ledger_integrity()`` called from the main thread after a
+      multi-thread in-memory append sequence inspects only the main thread's
+      private in-memory database, **not** the aggregate of all thread writes.
+    * For concurrent write serialisation testing, multi-producer chain-linearity
+      assertions, and production audit workloads, a file-backed database path
+      must be used.  File-backed instances share a single SQLite WAL file across
+      all thread-local connections, enabling true cross-thread append ordering
+      and a single verifiable chain.
+
+    :param db_path: Filesystem path to the SQLite database file.  Pass
+        ``":memory:"`` for an ephemeral in-process store (useful in tests,
+        subject to the per-thread isolation caveat described above).
+    :type db_path: str
+    """
+
+    _db_path: str
+    _closed: bool
+    _creator_thread_id: int
+    _thread_local: threading.local
+    _connections: list[sqlite3.Connection]
+    _connections_lock: threading.Lock
+
+    def __init__(self, db_path: str = ".keys/sovereign_audit.db") -> None:
+        if db_path != ":memory:":
+            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._db_path = db_path
+        self._closed: bool = False
+        self._thread_local = threading.local()
+        # Tracks every per-thread connection so close() can release all file
+        # descriptors regardless of which thread calls it.
+        self._creator_thread_id = threading.get_ident()
+        self._connections: list[sqlite3.Connection] = []
+        self._connections_lock = threading.Lock()
+        # Bootstrap the forensic_ledger schema and triggers on the initialising
+        # thread's connection.  File-backed databases persist the schema so
+        # subsequent thread connections require only pragma application.
+        # In-memory databases are bootstrapped per-connection inside _get_conn()
+        # because each thread-local handle maps to a distinct empty SQLite store.
+        self._bootstrap_schema()
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+
+    def _get_conn(self) -> sqlite3.Connection:
+        # Returns the calling thread's dedicated sqlite3.Connection.
+        #
+        # Fast path: the thread already has a registered handle.  A bare read
+        # of self._closed is sufficient here — CPython's GIL makes bool reads
+        # atomic, and the only risk is using a handle during the brief teardown
+        # window, which sqlite3 itself surfaces as a ProgrammingError.
+        conn: sqlite3.Connection | None = getattr(self._thread_local, "conn", None)
+        if conn is not None:
+            if self._closed:
+                raise SovereignStorageError(
+                    "Cannot acquire connection; SovereignLedger instance has been"
+                    " explicitly closed."
+                )
+            return conn
+        # Slow path: first access from this thread.  The closed check, connection
+        # creation, and registry append are all performed under _connections_lock
+        # so that close() cannot set _closed and clear the registry between the
+        # guard check and the append, which would leave the new handle untracked.
+        with self._connections_lock:
+            if self._closed:
+                raise SovereignStorageError(
+                    "Cannot acquire connection; SovereignLedger instance has been"
+                    " explicitly closed."
+                )
+            conn = sqlite3.connect(
+                self._db_path, check_same_thread=False, isolation_level=None
+            )
+            conn.row_factory = sqlite3.Row
+            self._connections.append(conn)
+            try:
+                self._apply_pragmas(conn)
+                if self._db_path == ":memory:":
+                    if threading.get_ident() != self._creator_thread_id:
+                        warnings.warn(
+                            "SovereignLedger in-memory instance shared across distinct execution threads. "
+                            "SQLite isolated memory architecture creates independent thread-local memory spaces; "
+                            "appends from this worker thread will not be visible on the primary thread ledger chain.",
+                            RuntimeWarning,
+                            stacklevel=4,
+                        )
+                    # Each in-memory connection is an independent empty SQLite store;
+                    # the schema written by _bootstrap_schema() on the initialising
+                    # thread does not carry over.  Hydrate every new thread-local
+                    # handle immediately so workers never hit "no such table".
+                    conn.executescript(_DDL)
+            except Exception:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
+                self._connections.remove(conn)
+                raise
+            self._thread_local.conn = conn
+        return conn
+
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        # Convenience accessor; always returns the calling thread's isolated handle.
+        return self._get_conn()
+
+    def _apply_pragmas(self, conn: sqlite3.Connection) -> None:
+        journal_mode: str = conn.execute("PRAGMA journal_mode = WAL;").fetchone()[0]
+        if self._db_path != ":memory:" and str(journal_mode).lower() != "wal":
+            raise SovereignStorageError(
+                f"Failed to initialize WAL journal mode; engine returned '{journal_mode}'. "
+                "The underlying file system configuration may not support write-ahead logging."
+            )
+        conn.execute("PRAGMA synchronous = NORMAL;")
+        conn.execute("PRAGMA foreign_keys = ON;")
+        # Retry for up to 5 seconds before surfacing a lock error, supporting
+        # concurrent multi-connection write workloads without immediate failure.
+        conn.execute("PRAGMA busy_timeout = 5000;")
+
+    def _bootstrap_schema(self) -> None:
+        # executescript() explicitly ignores isolation_level and issues its
+        # own COMMIT before running the script, so it is safe in autocommit mode.
+        self._get_conn().executescript(_DDL)
+
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
+
+    def append_receipt(self, receipt: dict[str, Any], sieved_content: str) -> str:
+        """Append an immutable ForensicReceipt entry to the ledger.
+
+        The chain-tip read and subsequent ``INSERT`` are tightly bound inside a
+        single ``BEGIN IMMEDIATE`` transaction.  Acquiring the reserved lock
+        *before* reading the tip eliminates the TOCTOU window that concurrent
+        writers would otherwise exploit to derive identical ``parent_hash``
+        values.
+
+        The rolling ``parent_hash`` is the SHA-256 digest of the preceding
+        row's full eight-column canonical preimage, assembled with a NUL byte
+        (``\\x00``) field delimiter to close length-substitution boundary
+        attacks::
+
+            SHA-256(
+                "\\x00".join([
+                    prev.signature,
+                    prev.payload_hash,
+                    prev.parent_hash,
+                    prev.timestamp,
+                    str(prev.raw_token_count),                    # "NULL" when NULL
+                    str(prev.optimized_token_count),              # "NULL" when NULL
+                    f"{float(prev.tax_savings_percentage):.4f}",  # "NULL" when NULL
+                    prev.sieved_content,
+                ])
+            )
+
+        Sealing all eight data columns in the delimited preimage means that any
+        out-of-band mutation of any stored value — textual payload, ingestion
+        timestamp, FinOps telemetry, or cryptographic fields — immediately breaks
+        the chain at the point of corruption and is detected by
+        :meth:`verify_ledger_integrity`.  The genesis constant is used as the
+        parent for the first entry.  Prose Tax token-economy metrics are
+        extracted from ``receipt["metadata"]["prose_tax_summary"]`` when present;
+        the three metric columns store ``NULL`` when the key is absent.
+
+        :param receipt: A ``ForensicReceipt``-compatible mapping containing at
+            minimum ``payload_hash``, ``timestamp``, ``signature``, and
+            ``metadata`` keys.
+        :type receipt: dict[str, Any]
+        :param sieved_content: The Prose-Tax-minimized string payload that was
+            signed to produce ``receipt``.
+        :type sieved_content: str
+        :return: The ``payload_hash`` of the newly appended row, usable as an
+            opaque receipt identifier.
+        :rtype: str
+        :raises KeyError: If ``receipt`` is missing a required key
+            (``payload_hash``, ``timestamp``, or ``signature``).  These keys are
+            accessed via plain dict subscripts and the resulting :exc:`KeyError`
+            propagates to the caller unmodified; the ledger performs no
+            pre-validation of the receipt structure.
+        :raises sqlite3.IntegrityError: If ``receipt["payload_hash"]`` already
+            exists in the ledger (``UNIQUE`` constraint enforcement).
+        :raises sqlite3.OperationalError: If the database lock cannot be
+            acquired within the configured ``busy_timeout`` (transient write
+            collision under high concurrency).
+        :raises SovereignStorageError: If this :class:`SovereignLedger` instance
+            has been closed via :meth:`close` prior to the call; raised by
+            :meth:`_get_conn` before any database operation is attempted.
+        """
+        metadata: dict[str, Any] = receipt.get("metadata") or {}  # :type: Any — caller-defined JSON sub-object; field keys are producer-specific and cannot be statically narrowed at the ledger boundary.
+        prose_tax: dict[str, Any] = metadata.get("prose_tax_summary") or {}  # :type: Any — optional telemetry bag with no enforced schema; field presence varies per producing gateway.
+
+        raw_tokens: int | None = prose_tax.get("raw_token_count")
+        optimized_tokens: int | None = prose_tax.get("optimized_token_count")
+        savings_pct: int | float | None = prose_tax.get("tax_savings_percentage")
+        payload_hash: str = receipt["payload_hash"]
+
+        committed = False
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            tip = self._conn.execute(
+                "SELECT signature, payload_hash, parent_hash, timestamp, "
+                "raw_token_count, optimized_token_count, tax_savings_percentage, sieved_content "
+                "FROM forensic_ledger ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+
+            if tip is None:
+                parent_hash = _GENESIS_HASH
+            else:
+                parent_hash = hashlib.sha256(
+                    _canonical_preimage(
+                        tip["signature"],
+                        tip["payload_hash"],
+                        tip["parent_hash"],
+                        tip["timestamp"],
+                        tip["raw_token_count"],
+                        tip["optimized_token_count"],
+                        tip["tax_savings_percentage"],
+                        tip["sieved_content"],
+                    ).encode("utf-8")
+                ).hexdigest()
+
+            self._conn.execute(
+                """
+                INSERT INTO forensic_ledger
+                    (payload_hash, parent_hash, timestamp, sieved_content, signature,
+                     raw_token_count, optimized_token_count, tax_savings_percentage)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payload_hash,
+                    parent_hash,
+                    receipt["timestamp"],
+                    sieved_content,
+                    receipt["signature"],
+                    raw_tokens,
+                    optimized_tokens,
+                    savings_pct,
+                ),
+            )
+            self._conn.execute("COMMIT")
+            committed = True
+        finally:
+            if not committed:
+                try:
+                    self._conn.execute("ROLLBACK")
+                except (sqlite3.Error, SovereignStorageError):
+                    # SovereignStorageError is caught here because close() can race
+                    # with a failed INSERT: if _closed is set between the INSERT
+                    # raising and this ROLLBACK attempt, _get_conn() raises
+                    # SovereignStorageError (a RuntimeError, not a sqlite3.Error).
+                    # Swallowing it here ensures the original INSERT exception —
+                    # most commonly sqlite3.IntegrityError on a duplicate
+                    # payload_hash — propagates to the caller unmasked.
+                    pass
+
+        return payload_hash
+
+    def verify_ledger_integrity(
+        self, expected_tip_hash: str | None = None
+    ) -> bool:
+        """Perform a full hash-chain sweep to detect any historical tampering.
+
+        Streams every row in insertion order via an iterator cursor, re-deriving
+        the expected ``parent_hash`` for each entry from the same eight-column
+        NUL-delimited canonical preimage used at insertion time::
+
+            SHA-256(
+                "\\x00".join([
+                    row.signature,
+                    row.payload_hash,
+                    row.parent_hash,
+                    row.timestamp,
+                    str(row.raw_token_count),                    # "NULL" when NULL
+                    str(row.optimized_token_count),              # "NULL" when NULL
+                    f"{float(row.tax_savings_percentage):.4f}",  # "NULL" when NULL
+                    row.sieved_content,
+                ])
+            )
+
+        Iterating via the cursor directly rather than ``fetchall()`` keeps memory
+        overhead at O(1) regardless of ledger size; no full row-set is ever
+        materialised in Python heap.
+
+        The first row is validated against the static genesis hash constant.
+        Any discrepancy — whether caused by an ``UPDATE`` to any column,
+        a ``DELETE`` that collapses the row sequence, or the injection of a
+        fabricated row with an incorrect parent pointer — causes an immediate
+        ``False`` return.
+
+        If ``expected_tip_hash`` is supplied, the sweep additionally asserts
+        that the ``payload_hash`` of the final ledger row matches the provided
+        anchor.  This closes the tail-truncation blind spot: without the anchor,
+        an adversary who drops the ``BEFORE DELETE`` trigger and removes one or
+        more trailing rows leaves the remaining prefix chain internally
+        consistent, so the chain sweep alone cannot detect the deletion.  Pass
+        the value returned by the last :meth:`append_receipt` call as the
+        anchor.  Returns ``False`` if the ledger is empty when an anchor is
+        supplied.
+
+        :param expected_tip_hash: The ``payload_hash`` of the expected last row,
+            used as an external anchor to detect tail-truncation attacks.  Pass
+            ``None`` (default) to skip the anchor check.
+        :type expected_tip_hash: str | None
+        :return: ``True`` if every row's recorded ``parent_hash`` matches the
+            mathematically re-derived value and the optional tip anchor matches;
+            ``False`` on the first detected breach.
+        :rtype: bool
+        :raises SovereignStorageError: If this :class:`SovereignLedger` instance
+            has been closed via :meth:`close` prior to the call; raised by
+            :meth:`_get_conn` before any database operation is attempted.
+        """
+        read_started: bool = False
+        try:
+            self._conn.execute("BEGIN DEFERRED")
+            read_started = True
+            expected_parent = _GENESIS_HASH
+            last_payload_hash: str | None = None
+            for row in self._conn.execute(
+                "SELECT signature, payload_hash, parent_hash, timestamp, "
+                "raw_token_count, optimized_token_count, tax_savings_percentage, sieved_content "
+                "FROM forensic_ledger ORDER BY id ASC"
+            ):
+                if row["parent_hash"] != expected_parent:
+                    return False
+                expected_parent = hashlib.sha256(
+                    _canonical_preimage(
+                        row["signature"],
+                        row["payload_hash"],
+                        row["parent_hash"],
+                        row["timestamp"],
+                        row["raw_token_count"],
+                        row["optimized_token_count"],
+                        row["tax_savings_percentage"],
+                        row["sieved_content"],
+                    ).encode("utf-8")
+                ).hexdigest()
+                last_payload_hash = row["payload_hash"]
+
+            if expected_tip_hash is not None:
+                if last_payload_hash is None or last_payload_hash != expected_tip_hash:
+                    return False
+
+            return True
+        finally:
+            if read_started:
+                try:
+                    self._conn.execute("COMMIT")
+                except (sqlite3.Error, SovereignStorageError):
+                    # SovereignStorageError is caught here because close() can race
+                    # with an active sweep: if _closed is set between the sweep
+                    # completing and this COMMIT attempt, _get_conn() raises
+                    # SovereignStorageError (a RuntimeError, not a sqlite3.Error).
+                    # Swallowing it here ensures the sweep's return value —
+                    # True or False — propagates to the caller unmasked.
+                    pass
+
+    def close(self) -> None:
+        """Release all thread-local SQLite connection handles tracked by this instance.
+
+        Acquires :attr:`_connections_lock` and sets ``_closed = True`` as the
+        first operation inside the lock, making the flag transition and the
+        connection-pool teardown a single atomic unit.  Any thread that attempts
+        :meth:`_get_conn` after the lock is released will observe ``_closed``
+        as ``True`` and raise :exc:`SovereignStorageError` before touching any
+        connection object.  Any thread that holds the lock waiting to register a
+        new connection will see ``_closed = True`` immediately on lock acquisition
+        and raise without appending, eliminating the dangling-handle accumulation
+        window.  Called automatically by :meth:`__exit__` when the instance is
+        used as a context manager.
+
+        :return: None
+        :rtype: None
+        """
+        with self._connections_lock:
+            self._closed = True
+            for conn in self._connections:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
+            self._connections.clear()
+
+    def __enter__(self) -> "SovereignLedger":
+        """Enter the runtime context, returning the ledger instance.
+
+        :return: The ``SovereignLedger`` instance itself, bound by the ``with``
+            statement target.
+        :rtype: SovereignLedger
+        """
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        """Exit the runtime context, releasing all SQLite connections.
+
+        Called automatically at the close of a ``with`` block regardless of
+        whether an exception was raised, ensuring file descriptors are never
+        leaked in long-running production server lifecycles.  Exceptions are
+        not suppressed; they propagate normally after the connections are closed.
+
+        :param exc_type: Exception class raised inside the ``with`` block, or
+            ``None`` if the block exited cleanly.
+        :type exc_type: type[BaseException] | None
+        :param exc_val: Exception instance, or ``None``.
+        :type exc_val: BaseException | None
+        :param exc_tb: Traceback object, or ``None``.
+        :type exc_tb: TracebackType | None
+        :return: None (exceptions are not suppressed).
+        :rtype: None
+        """
+        self.close()

@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 members = [
     "sovereign-core",
     "sovereign-fastapi",
+    "sovereign-ledger",
     "sovereign-runtime",
     "sovereign-sdk-workspace",
     "sovereign-sieve",
@@ -448,6 +449,11 @@ requires-dist = [
 ]
 
 [[package]]
+name = "sovereign-ledger"
+version = "1.1.0"
+source = { editable = "packages/sovereign-ledger" }
+
+[[package]]
 name = "sovereign-runtime"
 version = "1.1.0"
 source = { editable = "packages/sovereign-runtime" }
@@ -477,6 +483,7 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "sovereign-core" },
     { name = "sovereign-fastapi" },
+    { name = "sovereign-ledger" },
     { name = "sovereign-runtime" },
     { name = "sovereign-sieve" },
 ]
@@ -491,6 +498,7 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=1.0.0" },
     { name = "sovereign-core", editable = "packages/sovereign-core" },
     { name = "sovereign-fastapi", editable = "packages/sovereign-fastapi" },
+    { name = "sovereign-ledger", editable = "packages/sovereign-ledger" },
     { name = "sovereign-runtime", editable = "packages/sovereign-runtime" },
     { name = "sovereign-sieve", editable = "packages/sovereign-sieve" },
 ]

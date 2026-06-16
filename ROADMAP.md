@@ -269,7 +269,7 @@ Key deliverables:
 
 ---
 
-## Phase 8 — Write-Side Custody Ledger (`sovereign-ledger`)
+## Phase 8 — Write-Side Custody Ledger (`sovereign-ledger`) — Shipped ✓
 
 **Target:** A dedicated, lightweight, local-first storage substrate designed specifically
 to enforce Write-Side Custody by indexing and safeguarding `ForensicReceipts` at the
@@ -279,18 +279,45 @@ Provides local-first systems with an append-only, tamper-evident transactional t
 shield compliance audits from post-hoc database mutation or log-injection vulnerabilities.
 
 ```python
-from sovereign_ledger import SovereignAppendOnlyLedger
+from sovereign_ledger import SovereignLedger
 
-ledger = SovereignAppendOnlyLedger(database_path=".storage/sovereign_history.db")
-ledger.commit_receipt(receipt, payload_manifest)
+ledger = SovereignLedger(db_path=".keys/sovereign_audit.db")
+ledger.append_receipt(receipt, sieved_content)
+assert ledger.verify_ledger_integrity()  # → True on an untampered chain
 
 ```
 
-Key deliverables:
+**Delivered:**
 
-* **Append-Only SQLite Engine:** A hardened local transactional datastore engineered specifically for logging, tracing, and indexing reasoning artifacts and causal state transitions.
-* **Automated Lineage Verification:** Continuous background scanning or query-time hooks that ensure stored records exactly match their signed Ed25519 public key history.
-* **Anti-Attic Structuring:** Force strict indexing schemas on raw data, formally migrating local data environments away from loose "Digital Attic" vector storage anti-patterns.
+* [x] `SovereignLedger` — zero-external-dependency SQLite engine with WAL mode, NORMAL
+  synchronous enforcement, and strict foreign-key locks applied at initialization.
+* [x] `forensic_ledger` table with nine typed columns and a `UNIQUE` constraint on
+  `payload_hash` to guarantee single-ingestion invariant.
+* [x] Engine-level `BEFORE UPDATE` and `BEFORE DELETE` SQL triggers that call
+  `RAISE(ROLLBACK, 'Write-Side Custody violation: ...')`, aborting mutation and
+  rolling back the entire enclosing transaction from any SQLite client regardless
+  of whether it uses the Python class or opens the file raw.
+* [x] SHA-256 parent-hash chain rooted at a static genesis constant, linking every
+  appended row to its cryptographic predecessor.
+* [x] `verify_ledger_integrity() -> bool` — O(n) sweep that re-derives the expected
+  parent hash for each row and returns `False` on any detected breach.
+* [x] `SovereignStorageError` exception (exported from `sovereign_ledger`) raised by
+  `_get_conn()` when called on a closed instance, preventing use-after-close access to
+  released connection handles.
+* [x] 60-case adversarial test suite covering trigger enforcement (internal and external
+  client), `RAISE(ROLLBACK)` transaction-abort semantics confirming post-hoc injection
+  via COMMIT is impossible, out-of-band corruption detection across all eight data columns
+  (signature, payload hash, parent hash, timestamp, raw/optimized token counts, savings
+  percentage, sieved content), field-boundary delimiter collision resistance, mid-chain
+  deletion detection, injected-row detection, full lifecycle correctness, closed-instance
+  guard (`SovereignStorageError` on post-`close()` access), concurrent write serialisation
+  via `BEGIN IMMEDIATE` (8-thread stress tests across separate-instance and
+  shared-instance file-backed scenarios confirming zero chain fragmentation; plus a
+  shared-instance in-memory scenario confirming correct per-thread DDL bootstrapping —
+  each thread obtains an independent isolated SQLite store, so chain linearity
+  assertions apply only to file-backed topologies), connection-registry purge verification
+  (`close()` releases all thread-local handles to zero), and cross-thread in-memory
+  `RuntimeWarning` emission (`test_in_memory_cross_thread_emits_runtime_warning`).
 
 ---
 
