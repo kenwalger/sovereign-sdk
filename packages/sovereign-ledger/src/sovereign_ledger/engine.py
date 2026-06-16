@@ -202,23 +202,26 @@ class SovereignLedger:
                 self._db_path, check_same_thread=False, isolation_level=None
             )
             conn.row_factory = sqlite3.Row
-            self._apply_pragmas(conn)
-            if self._db_path == ":memory:":
-                if threading.get_ident() != self._creator_thread_id:
-                    warnings.warn(
-                        "SovereignLedger in-memory instance shared across distinct execution threads. "
-                        "SQLite isolated memory architecture creates independent thread-local memory spaces; "
-                        "appends from this worker thread will not be visible on the primary thread ledger chain.",
-                        RuntimeWarning,
-                        stacklevel=4,
-                    )
-                # Each in-memory connection is an independent empty SQLite store;
-                # the schema written by _bootstrap_schema() on the initialising
-                # thread does not carry over.  Hydrate every new thread-local
-                # handle immediately so workers never hit "no such table".
-                conn.executescript(_DDL)
-            self._thread_local.conn = conn
             self._connections.append(conn)
+            try:
+                self._apply_pragmas(conn)
+                if self._db_path == ":memory:":
+                    if threading.get_ident() != self._creator_thread_id:
+                        warnings.warn(
+                            "SovereignLedger in-memory instance shared across distinct execution threads. "
+                            "SQLite isolated memory architecture creates independent thread-local memory spaces; "
+                            "appends from this worker thread will not be visible on the primary thread ledger chain.",
+                            RuntimeWarning,
+                            stacklevel=4,
+                        )
+                    # Each in-memory connection is an independent empty SQLite store;
+                    # the schema written by _bootstrap_schema() on the initialising
+                    # thread does not carry over.  Hydrate every new thread-local
+                    # handle immediately so workers never hit "no such table".
+                    conn.executescript(_DDL)
+            except Exception:
+                raise
+            self._thread_local.conn = conn
         return conn
 
     @property
