@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=77.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sovereign-sensor"
+version = "0.1.0"
+description = "Bare-metal Write-Side Custody enforcement for MicroPython sensor nodes with hardware crypto abstraction"
+readme = "README.md"
+requires-python = ">=3.12" # Enforces CPython 3.12+ for desktop development/CI test suites; package library code remains strictly bare-metal MicroPython compatible.
+license = { text = "MIT" }
+dependencies = []
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: Implementation :: MicroPython",
+    "Intended Audience :: Developers",
+    "Topic :: Security",
+    "Topic :: System :: Hardware",
+    "Topic :: Software Development :: Libraries",
+]
+
+[project.urls]
+Homepage = "https://github.com/kenwalger/sovereign-sdk"
+Repository = "https://github.com/kenwalger/sovereign-sdk"
+Changelog = "https://github.com/kenwalger/sovereign-sdk/blob/main/CHANGELOG.md"
+
+[tool.setuptools.packages.find]
+where = ["src"]

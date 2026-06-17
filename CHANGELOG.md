@@ -9,6 +9,132 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
+  member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing
+  sensor observations into versioned, tamper-evident, minified JSON transmission envelopes with
+  monotonic replay protection at the exact point of data genesis on bare-metal microcontrollers
+  (ESP32, Raspberry Pi Pico).  Zero runtime dependencies; internal library code restricted to
+  standard MicroPython built-ins (`json`, `sys`, `machine`, `hashlib`, `hmac`, `binascii`).
+
+  - **`SovereignCryptoDriver`** (`interface.py`): Lightweight HAL base class with explicit
+    `NotImplementedError` stubs for `initialize_hardware() -> None`,
+    `sign(payload: bytes) -> bytes`, and `algorithm() -> str`.  The `algorithm()` method
+    enforces protocol agility by requiring every concrete driver to declare its signing primitive
+    as a canonical identifier string (e.g. `"hmac-sha256"`, `"ecdsa-p256"`), which is embedded
+    in the authenticated preimage and the wire frame.  Intentionally avoids the standard-library
+    `abc` module to remain compatible with constrained MicroPython heap environments.
+  - **`SovereignEnvelope`** (`envelope.py`): Accepts a `sequence_file` VFS path (default
+    `".sovereign_sequence"`) and restores any previously persisted counter from that file on
+    construction, enabling the monotonic sequence to resume across hardware reboots.  Seals
+    observations in a seven-step deterministic pipeline: (1) per-instance monotonic sequence
+    counter computed transiently as `_sequence + 1` and bound into the preimage; the in-memory
+    counter and VFS sequence file are not advanced until `sign()` returns successfully, so a
+    `sign()` failure never consumes a sequence position or introduces a gap in the on-disk custody
+    timeline (degrades gracefully to RAM-only tracking on VFS write failure); (2) algorithm
+    identifier queried from driver via `algorithm()`; (3) payload keys alphabetically sorted and
+    serialized via `json.dumps(..., separators=(',', ':'), sort_keys=True, ensure_ascii=False)`,
+    guaranteeing byte-identical raw UTF-8 preimage bytes regardless of dict key insertion order or
+    non-ASCII payload characters across bare-metal MicroPython targets and desktop gateways;
+    (4) versioned preimage constructed as
+    `1|{len(node_bytes)}:{node_id}|{len(time_bytes)}:{timestamp}|{seq}|{len(algo_bytes)}:{algorithm}|{canonical}`,
+    where each variable-length field is prefixed with its UTF-8 byte count (not Unicode character
+    count), binding protocol version, identity, time, ordering, and algorithm into a single
+    unambiguous signed surface with no delimiter injection surface; (5) preimage dispatched across
+    the driver's `sign()` boundary, returning raw binary bytes; (6) raw bytes hex-encoded via
+    `binascii.hexlify`, guaranteeing all values `0x00–0xFF` map safely without `UnicodeDecodeError`
+    on MicroPython silicon; (7) seven-key frame `{"v":1, "n", "t", "q", "alg", "d", "s"}`
+    serialized to ultra-minified UTF-8 JSON bytes via
+    `json.dumps(..., sort_keys=True, ensure_ascii=False)`, freezing the alphabetical key sequence
+    and enforcing raw UTF-8 wire encoding independently of MicroPython allocator-driven insertion
+    order.
+  - **`bootstrap_sensor_node(node_id, private_key_path, sequence_file) -> SovereignEnvelope`**
+    (`__init__.py`): Inspects `sys.platform.lower()` at runtime; routes to `ESP32HardwareDriver`
+    when `"esp32"` is present in the platform string, otherwise binds `SoftwareFallbackDriver`.
+    Calls `initialize_hardware()` inside a `try/except NotImplementedError` block — when the
+    selected hardware driver raises (skeleton placeholder not yet implemented), a warning is
+    printed and the factory rebinds to `SoftwareFallbackDriver` so sealing, sequencing, and VFS
+    layers remain exercisable on the workbench before register-level engineering is complete.
+    Accepts an optional `sequence_file` path (default `".sovereign_sequence"`) forwarded to
+    `SovereignEnvelope` for VFS-based counter persistence across reboots.
+  - **`SoftwareFallbackDriver`** (`drivers/software_fallback.py`): HMAC-SHA256 keyed signing
+    driver using `hashlib` and `hmac`.  On `initialize_hardware()`, checks whether
+    `private_key_path` equals `_MOCK_KEY_SENTINEL = "/mock/test_gateway.key"` — if so,
+    substitutes the fixed deterministic `_MOCK_KEY` stub so desktop CI tests operate without
+    a provisioned key store; for all other paths, opens the file in read-binary mode and
+    re-raises any `OSError` as `RuntimeError`, eliminating the prior silent key substitution
+    defect where any absent file silently resolved to the mock key.  Returns raw 32-byte
+    HMAC-SHA256 digest bytes (no encoding applied; hex encoding is the envelope layer's
+    exclusive responsibility).  Declares `algorithm() -> "hmac-sha256"`.
+    Not intended for production custody chains.
+  - **`ESP32HardwareDriver`** (`drivers/esp32_hardware.py`): v0.1 HAL skeleton class
+    establishing the class contract and import surface for the ESP32 on-chip ECC accelerator
+    via MicroPython `machine` and `hashlib` HAL bindings.  Declares `algorithm() -> "ecdsa-p256"`
+    as a forward-looking identifier for the hardware signing primitive.  `sign()` raises
+    `NotImplementedError`; full register-level engineering is deferred to the next sprint.
+    This driver must not be wired into any production custody chain in its current state.
+
+  - **`packages/sovereign-sensor/README.md`** — new distribution documentation asset satisfying
+    the `pyproject.toml` `readme` field; includes a HAL architecture section, a driver
+    comparison table, the 7-step sealing pipeline with preimage format specification, minimal
+    `bootstrap_sensor_node()` usage examples for both production and desktop/CI paths, and a
+    package invariants table.
+
+  - **`packages/sovereign-sensor/tests/test_sensor.py`** — 33 test cases across three classes
+    (`TestBootstrap`: 4 cases; `TestDriverGuard`: 3 cases; `TestEnvelopeSeal`: 26 cases)
+    verifying: platform auto-detection confirmed via the public `algorithm()` contract (sealed
+    `"alg"` field equals `"hmac-sha256"`) rather than private attribute access; driver
+    initialization confirmed via successful `seal()` completion; bootstrap falls back to
+    `SoftwareFallbackDriver` (with printed warning) when the selected hardware driver raises
+    `NotImplementedError` (simulated by patching `sys.platform` to `"esp32"`), confirming the
+    workbench fallback contract; `sign()` raises `RuntimeError` when called before
+    `initialize_hardware()`, preventing silent keyless HMAC packets from bad setup sequencing;
+    `initialize_hardware()` raises `RuntimeError` for any non-sentinel path that cannot be
+    opened, eliminating the prior silent `_MOCK_KEY` substitution defect for production key
+    paths; `initialize_hardware()` raises `ValueError` when the key file exists but contains zero
+    bytes, preventing HMAC keyed with `b""` from producing authentication tags with no
+    cryptographic uniqueness; `seal()` returns `bytes`; output parses as valid JSON; transmission
+    envelope contains exactly the seven keys `v`, `n`, `t`, `q`, `alg`, `d`, `s`; `v` is
+    integer `1`; `n` and `t` are preserved verbatim; `q` starts at `1` on the first call
+    (isolated via `tmp_path` sequence file); three consecutive calls on the same instance produce
+    `q` values `[1, 2, 3]` (monotonic increment, isolated via `tmp_path`); `"alg"` equals
+    `"hmac-sha256"`; payload dict round-trips without mutation; signature is a non-empty ASCII
+    string; software driver signature is exactly 64 hex characters (HMAC-SHA256 digest); output
+    is ultra-minified (no whitespace after separators); two independent fresh instances produce
+    byte-identical first seals for identical inputs (cross-instance determinism); distinct
+    payloads at the same sequence position produce distinct signatures; `"s"` field contains only
+    characters from the set `{0–9, a–f}`; `sort_keys=True` canonicalization produces
+    byte-identical signatures for semantically equivalent payloads with inverted key insertion
+    order, proving preimage invariance across all MicroPython targets; full raw wire-frame byte
+    arrays are identical for semantically equivalent payloads with inverted key insertion order,
+    proving transport-layer byte determinism independent of allocator-driven dict ordering; HMAC
+    signatures diverge when distinct key files supply different secret material (key material
+    participation); a 0-byte sequence file (power-loss truncation artifact) is caught as
+    `ValueError` and resets the counter to 0 without aborting device initialization; sequence
+    counter correctly resumes from the persisted VFS value after a simulated hardware reboot
+    (replay-protection continuity); length-prefixed preimage delimiter injection immunity —
+    `node_id="abc|def"` with `timestamp="ghi"` produces a distinct HMAC from `node_id="abc"`
+    with `timestamp="def|ghi"`, confirming cross-identity preimage collision is eliminated;
+    non-ASCII node_id byte-length prefix integrity — `"noëud"` (5 Unicode chars, 6 UTF-8 bytes)
+    seals correctly and the sealed signature matches an independently computed HMAC over the
+    byte-count-prefixed preimage, proving that character-count semantics are rejected and
+    cross-platform field boundary deserialization is correct on all MicroPython targets;
+    negative sequence counter clamp — `"-42"` written to the sequence file produces
+    `_sequence == 0` after construction and `q=1` on the first `seal()`, confirming that
+    adversarially written or filesystem-corrupted negative counter values are neutralized
+    before the monotonic custody chain begins; algorithm identifier byte-count-prefix
+    delimiter injection immunity — two drivers returning `"hmac|sha256"` and `"hmac"` produce
+    distinct HMAC signatures confirming cross-algorithm preimage collision is closed; an
+    independently reconstructed HMAC over the byte-count-prefixed preimage exactly matches
+    the sealed signature, verifying the complete preimage format end-to-end; Unicode payload
+    serialization without ASCII escaping — `{"sensor": "Nordøst-Ventil", "data": "Ω-Value"}`
+    seals without error, the payload round-trips correctly, and the wire bytes contain raw
+    UTF-8 characters (`ø`, `Ω`) with no `\uXXXX` escape sequences, confirming
+    `ensure_ascii=False` is active on both the preimage and wire frame serialization paths;
+    preimage reconstruction tests refactored to use the public `SoftwareFallbackDriver.sign()`
+    API rather than accessing the private `_MOCK_KEY` attribute directly, eliminating all
+    private-attribute access from the test suite.
+    **33 passed, 0 failed.**
+
 - **Phase 8 — `sovereign-ledger` immutable provenance engine** (new workspace member
   `packages/sovereign-ledger/`): Introduces a local-first, SQLite-backed, append-only
   audit ledger that enforces Write-Side Custody for all `ForensicReceipt` transactions.
@@ -96,6 +222,193 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Covers determinism invariant, idempotency, Unicode payloads, very long inputs,
   `TypeError` on non-`str` arguments, and internal savings-percentage arithmetic
   consistency.
+
+### Changed
+
+- **`SovereignEnvelope.seal()` — `ensure_ascii=False` enforced on both `json.dumps()` calls** (`envelope.py`):
+  `ensure_ascii=False` is now passed explicitly to the `json.dumps()` call that produces the
+  canonical payload preimage string and to the final `json.dumps()` that serializes the wire
+  frame.  CPython's default `ensure_ascii=True` escapes every character outside U+007F to a
+  six-byte `\uXXXX` sequence, while many MicroPython builds emit the raw multi-byte UTF-8
+  encoding for the same character.  For a payload containing `"Ω"` (U+03A9), CPython would
+  produce `"Ω"` in the canonical string and MicroPython would produce the raw bytes
+  `\xce\xa9`, yielding different HMAC preimages and causing cross-platform signature
+  verification to fail silently on any non-ASCII payload.  `ensure_ascii=False` forces both
+  runtimes to the same raw UTF-8 output, eliminating the split-brain encoding divergence
+  at the preimage and wire frame layers simultaneously.
+
+- **`SovereignEnvelope.seal()` — sequence counter commit deferred to after signing** (`envelope.py`):
+  The sequence index is now computed transiently as `next_sequence = self._sequence + 1`
+  before the preimage is assembled.  `self._sequence` is not mutated and the VFS sequence
+  file is not written until after `self._driver.sign()` returns without raising.  Previously
+  the counter was incremented and flushed to the VFS immediately at the start of `seal()`:
+  a `sign()` failure (e.g. `RuntimeError` from a driver that was never initialized) would
+  permanently consume a sequence position, introducing a numbering gap in the on-disk
+  custody timeline that a downstream verifier would flag as a replay-protection breach.
+  With the deferred commit, a signing failure propagates cleanly and the counter is not
+  advanced, keeping the persistent sequence file in perfect sync with actually-sealed frames.
+
+- **`tests/test_sensor.py` — private `_MOCK_KEY` attribute access eliminated** (`tests/test_sensor.py`):
+  Two tests that reconstructed the expected HMAC preimage signature by directly reading
+  `SoftwareFallbackDriver._MOCK_KEY` bytes and calling `hmac.new()` inline are refactored
+  to use only the public driver API.  `test_seal_non_ascii_node_id_uses_utf8_byte_length_prefix`
+  and `test_algo_field_length_prefix_closes_preimage_delimiter_collision` now construct a
+  reference `SoftwareFallbackDriver(MOCK_KEY_SENTINEL)`, call `initialize_hardware()`, and
+  delegate to the public `sign()` method to compute the expected signature.  The `_FixedAlgoDriver`
+  mock in the algo-collision test holds its own `SoftwareFallbackDriver(MOCK_KEY_SENTINEL)` reference
+  initialized in `__init__` and forwards all `sign()` calls to it, removing the last direct dependency
+  on a private attribute from the test file.  `ensure_ascii=False` is added to the `json.dumps()`
+  calls in both tests' canonical reconstruction to match the updated envelope implementation.
+
+- **`SovereignEnvelope.seal()` — algorithm identifier uniformly byte-count-prefixed in the preimage** (`envelope.py`):
+  `algorithm` is now encoded to a UTF-8 byte array independently and prefixed with its byte
+  count before insertion into the versioned preimage, bringing it into parity with `node_id`
+  and `timestamp`.  The preimage format is
+  `1|{len(node_bytes)}:{node_id}|{len(time_bytes)}:{timestamp}|{seq}|{len(algo_bytes)}:{algorithm}|{canonical}`.
+  Without the prefix, a driver returning an algorithm identifier containing `|` (e.g.
+  `"hmac|sha256"`) could produce a preimage byte sequence that an alternative `(node_id,
+  algorithm)` split reconstructs identically, enabling cross-algorithm signature reuse.
+  Named variables `node_prefix`, `time_prefix`, and `algo_prefix` are assembled from the
+  corresponding byte arrays and fed into a single f-string that is encoded to UTF-8 at the
+  end, keeping the assembly logic readable and the encoding boundary explicit.
+
+- **`SoftwareFallbackDriver.MOCK_KEY_SENTINEL` — renamed from `_MOCK_KEY_SENTINEL` to `MOCK_KEY_SENTINEL`** (`drivers/software_fallback.py`):
+  The leading underscore implied a private attribute, but callers in both the `__init__.py`
+  factory and test code reference the sentinel by name to opt into the deterministic mock key
+  path.  Removing the underscore formalizes it as a documented public class attribute,
+  eliminating the implicit private-access idiom and allowing downstream code to reference it
+  without a pylint / mypy private-access warning.  `_MOCK_KEY` retains its underscore because
+  it is a fixed internal stub that must not be referenced outside `initialize_hardware()`.
+
+- **`bootstrap_sensor_node()` — fallback exception chain decoupled via boolean flag** (`__init__.py`):
+  The `SoftwareFallbackDriver` re-initialization and warning print previously executed inside
+  the `except NotImplementedError` block, implicitly chaining the original `NotImplementedError`
+  as `__context__` on any exception raised during fallback setup.  A boolean flag
+  `_hw_not_implemented` is now set inside the `except` clause; the warning and fallback
+  initialization run in an unconditional `if _hw_not_implemented:` branch outside the block.
+  On constrained MicroPython serial consoles, this prevents a doubled traceback — the original
+  `NotImplementedError` and the `RuntimeError` from a misconfigured fallback key path — from
+  flooding the output and obscuring the root cause.
+
+- **`SovereignEnvelope.__init__()` — negative sequence counter clamped to zero** (`envelope.py`):
+  After a successfully parsed integer is assigned to `self._sequence`, an `else` branch on the
+  `try/except ValueError` block checks `if self._sequence < 0` and resets it to zero.  A
+  negative value stored in the sequence file — whether written by an adversary with VFS write
+  access or produced by a filesystem fault that corrupted a flash page with a plausible-looking
+  negative decimal string — would cause the first `seal()` call to emit `q=0` (after the
+  pre-increment `+= 1`), violating the `q ≥ 1` monotonic custody invariant and potentially
+  confusing downstream consumers.  The clamp is placed in an `else` clause so it only executes
+  on successfully parsed integers; the `ValueError` path already resets to zero independently.
+
+- **`SovereignEnvelope.seal()` — preimage length prefix changed from character count to UTF-8 byte count** (`envelope.py`):
+  `node_id` and `timestamp` are now encoded to UTF-8 byte arrays independently before the
+  length-prefix is computed.  The preimage is assembled from raw byte slices rather than from
+  a single f-string that is encoded afterward:
+  `f"1|{len(node_bytes)}:".encode() + node_bytes + b"|" + f"{len(time_bytes)}:".encode() + time_bytes + ...`.
+  Without this change, any `node_id` or `timestamp` containing multi-byte UTF-8 characters
+  (characters outside U+007F) would produce a prefix reflecting the Unicode character count
+  rather than the UTF-8 byte count.  A cross-platform receiver — including constrained
+  MicroPython targets that may count string length in bytes — would then parse field
+  boundaries at the wrong offset, silently reconstructing a different preimage and rejecting
+  legitimate frames.  For ASCII-only inputs `len(s) == len(s.encode("utf-8"))`, so all
+  existing tests remain byte-for-byte identical.
+
+- **`packages/sovereign-sensor/pyproject.toml` — Trove classifiers corrected to valid PyPI identifiers**:
+  `"Topic :: Embedded Systems"` is not a registered Trove classifier and would cause `twine
+  check` to fail at release time.  It is replaced with `"Topic :: System :: Hardware"`, which
+  is a registered classifier in the PyPI taxonomy.  `"Programming Language :: Python :: 3"`,
+  `"Programming Language :: Python :: 3 :: Only"`, and
+  `"Programming Language :: Python :: Implementation :: MicroPython"` are added to correctly
+  signal the package's Python version floor and MicroPython target runtime to tooling and
+  packaging indexes.
+
+- **`SoftwareFallbackDriver.initialize_hardware()` — empty key file guard added** (`drivers/software_fallback.py`):
+  After a successful `open()` of the key file, the read bytes are now stored in a local
+  `key_bytes: bytes` variable rather than assigned directly to `self._secret_key`.  If
+  `key_bytes` is empty, `ValueError` is raised immediately with a descriptive message before
+  any assignment to `_secret_key` or `_initialized`.  A 0-byte key file produces an HMAC
+  keyed with `b""`, which is identical across every node that encounters the same empty-file
+  failure — indistinguishable from other nodes with the same defect and providing no
+  cryptographic uniqueness.  The node must halt at the bootstrap boundary rather than emit
+  authentication tags under a keyless primitive.
+
+- **`SovereignEnvelope.seal()` — preimage length-prefix delimiter injection closed** (`envelope.py`):
+  `node_id` and `timestamp` are now length-prefixed before insertion into the pipe-joined
+  preimage string:
+  `1|{len(node_id)}:{node_id}|{len(timestamp)}:{timestamp}|sequence|algorithm|canonical_payload`.
+  Without length prefixes, `node_id="abc|def"` with `timestamp="ghi"` and `node_id="abc"` with
+  `timestamp="def|ghi"` collapse to the identical naive pipe-joined string
+  `1|abc|def|ghi|…`, enabling a cross-identity signature reuse attack where an adversary
+  holding a valid frame for one `(node_id, timestamp)` pair can present it as authentic for
+  a structurally equivalent pair.  Length prefixes make every field boundary unambiguous
+  regardless of field content, eliminating the collision surface entirely.
+
+- **`SovereignEnvelope.seal()` — alphabetical key canonicalization enforced** (`envelope.py`):
+  The `json.dumps` call that serializes the payload into the HMAC preimage now passes
+  `sort_keys=True`, guaranteeing that semantically equivalent payloads with different key
+  insertion orders produce byte-identical canonical strings.  On constrained MicroPython
+  targets, dict insertion order is not guaranteed stable across firmware versions or allocation
+  events; without this flag, two nodes sealing the same observation could produce diverging
+  preimages and non-matching signatures.  The flag makes cryptographic preimages perfectly
+  deterministic across space and time.
+
+- **`SoftwareFallbackDriver.sign()` — initialization guard simplified** (`drivers/software_fallback.py`):
+  The guard condition was tightened to `if not self._initialized:`, removing a previously
+  present redundant `hasattr(self, "_secret_key")` check.  The `_secret_key` attribute is
+  unconditionally declared in `__init__`, making the `hasattr` test structurally dead code;
+  the `_initialized` boolean is the sole authoritative initialization sentinel.
+
+- **Driver imports standardized to package-relative form** (`drivers/software_fallback.py`,
+  `drivers/esp32_hardware.py`): Both driver modules now import `SovereignCryptoDriver` via
+  `from ..interface import SovereignCryptoDriver`, consistent with the workspace-wide
+  convention for intra-package imports.
+
+- **`SovereignEnvelope.__init__()` — power-loss truncation recovery** (`envelope.py`):
+  The `int(data.strip())` call in the constructor now lives inside a nested
+  `try/except ValueError` block.  A 0-byte or otherwise non-integer sequence file —
+  the typical artifact of a mid-write power interruption that cut power after the VFS
+  page was erased but before any digits were flushed — previously propagated `ValueError`
+  and aborted device initialization entirely.  The handler now prints a diagnostic and
+  resets `_sequence` to 0, allowing the node to boot and resume custody-chain sealing
+  without manual intervention.
+
+- **`SovereignEnvelope.seal()` — write-path exception scope narrowed** (`envelope.py`):
+  The `except Exception` guard around the VFS counter write is replaced with `except OSError`.
+  The previous broad catch silently discarded any structural Python runtime defect
+  (e.g. a logic error producing a `TypeError` inside the `with` body) that could mask
+  a code bug under the appearance of a benign flash-write failure.  `OSError` covers
+  every storage and filesystem media error class that legitimate flash degradation
+  produces, while allowing all other exception types to propagate normally.
+
+- **`SovereignEnvelope.seal()` — wire-frame serialization frozen with `sort_keys=True`** (`envelope.py`):
+  The final `json.dumps(frame, ...)` call that produces the transmitted bytes now passes
+  `sort_keys=True`.  Without this flag, the seven envelope keys (`alg`, `d`, `n`, `q`, `s`,
+  `t`, `v`) and the nested payload sub-object under `"d"` were serialized in insertion order,
+  which CPython 3.7+ preserves but MicroPython does not guarantee stable across firmware
+  versions or heap-allocation patterns.  Two nodes on different firmware builds could therefore
+  produce different raw byte frames for the same observation even though their HMAC signatures
+  matched — breaking byte-exact deduplication, frame-level checksumming, and any transport
+  consumer that compares raw wire content rather than parsed JSON.  The flag freezes the
+  alphabetical key sequence at both the outer frame and the inner `"d"` sub-object level.
+
+- **`SoftwareFallbackDriver.initialize_hardware()` — silent key substitution eliminated** (`drivers/software_fallback.py`):
+  The previous `except OSError` fallback substituted `_MOCK_KEY` for any key path that could
+  not be opened, including real production paths that simply had a permissions error, wrong
+  path, or transient mount failure.  A node would boot and begin sealing observations with a
+  fixed, publicly known stub key indistinguishable from an authenticated one.  The method now
+  checks `self._key_path == _MOCK_KEY_SENTINEL` first: only the explicit sentinel
+  `"/mock/test_gateway.key"` opts into the deterministic mock key.  Any other path that cannot
+  be opened re-raises the `OSError` wrapped in a descriptive `RuntimeError`, halting the node
+  at the bootstrap phase rather than emitting silently-weakened custody frames.
+
+- **`bootstrap_sensor_node()` — `NotImplementedError` guard added** (`__init__.py`):
+  `driver.initialize_hardware()` is now called inside a `try/except NotImplementedError`
+  block.  When the selected driver raises — as `ESP32HardwareDriver` does while hardware crypto
+  acceleration is still a skeleton — the factory prints a loud warning and rebinds to a fully
+  functional `SoftwareFallbackDriver` so the node can exercise the sealing, sequencing, and
+  VFS serialization layers on the workbench.  Without this guard, an ESP32 boot would silently
+  succeed initialization and then crash on the first `seal()` call, hiding the missing
+  implementation behind an opaque `NotImplementedError` deep in the custody chain.
 
 ### Fixed
 

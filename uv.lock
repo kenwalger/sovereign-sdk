@@ -9,6 +9,7 @@ members = [
     "sovereign-ledger",
     "sovereign-runtime",
     "sovereign-sdk-workspace",
+    "sovereign-sensor",
     "sovereign-sieve",
 ]
 
@@ -485,6 +486,7 @@ dev = [
     { name = "sovereign-fastapi" },
     { name = "sovereign-ledger" },
     { name = "sovereign-runtime" },
+    { name = "sovereign-sensor" },
     { name = "sovereign-sieve" },
 ]
 
@@ -500,8 +502,14 @@ dev = [
     { name = "sovereign-fastapi", editable = "packages/sovereign-fastapi" },
     { name = "sovereign-ledger", editable = "packages/sovereign-ledger" },
     { name = "sovereign-runtime", editable = "packages/sovereign-runtime" },
+    { name = "sovereign-sensor", editable = "packages/sovereign-sensor" },
     { name = "sovereign-sieve", editable = "packages/sovereign-sieve" },
 ]
+
+[[package]]
+name = "sovereign-sensor"
+version = "0.1.0"
+source = { editable = "packages/sovereign-sensor" }
 
 [[package]]
 name = "sovereign-sieve"

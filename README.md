@@ -63,6 +63,17 @@ This repository is managed as an integrated `uv` workspace separating the crypto
 │   │   └── tests/
 │   │       └── test_ledger.py
 │   │
+│   ├── sovereign-sensor/                 # MicroPython HAL for bare-metal Write-Side Custody
+│   │   ├── src/sovereign_sensor/
+│   │   │   ├── interface.py              # SovereignCryptoDriver HAL base class
+│   │   │   ├── envelope.py               # SovereignEnvelope — 7-step sealing pipeline
+│   │   │   ├── __init__.py               # bootstrap_sensor_node() entry point
+│   │   │   └── drivers/
+│   │   │       ├── software_fallback.py  # SoftwareFallbackDriver — HMAC-SHA256 (non-ESP32)
+│   │   │       └── esp32_hardware.py     # ESP32HardwareDriver — skeleton (ECC impl. pending)
+│   │   └── tests/
+│   │       └── test_sensor.py
+│   │
 │   ├── sovereign-runtime/                # Compute/Execution tier (tool & model isolation)
 │   │   └── src/sovereign_runtime/
 │   │       ├── router.py                 # Intent-based pre-flight namespace exposure
@@ -141,6 +152,33 @@ Two mechanisms enforce immutability:
 2. **SHA-256 hash chain** — each row's `parent_hash` is derived from the preceding row's `signature + payload_hash + parent_hash`. Modifying any field of any historical row, deleting a middle row, or injecting a fabricated row breaks the chain; `verify_ledger_integrity()` returns `False` on the first detected discrepancy.
 
 See [`docs/sovereign-ledger.md`](docs/sovereign-ledger.md) for the full schema reference, pragma table, threat model matrix, and integration pattern.
+
+---
+
+## `sovereign-sensor` — Bare-Metal Write-Side Custody
+
+For IoT and embedded systems where data must be sealed cryptographically at the exact point of genesis — before any network hop or cloud ingestion — `sovereign-sensor` provides a MicroPython-compatible Hardware Abstraction Layer that runs on ESP32 and Raspberry Pi Pico with zero external dependencies:
+
+```python
+from sovereign_sensor import bootstrap_sensor_node
+
+# Selects ESP32HardwareDriver or SoftwareFallbackDriver at runtime.
+# Falls back to SoftwareFallbackDriver with a warning while ECC acceleration
+# is pending register-level engineering.
+envelope = bootstrap_sensor_node(
+    node_id="node-temperature-01",
+    private_key_path="/flash/keys/node.key",
+    sequence_file="/flash/.sovereign_sequence",
+)
+
+observation = {"sensor": "temperature", "value": 21.4, "unit": "C"}
+wire_bytes = envelope.seal("2026-06-16T12:00:00Z", observation)
+# → b'{"alg":"hmac-sha256","d":{...},"n":"node-temperature-01","q":1,"s":"<64-char hex>","t":"...","v":1}'
+```
+
+Each sealed frame carries a monotonic sequence counter (`q`) persisted to VFS across hardware reboots, an HMAC-SHA256 signature over a deterministic UTF-8 preimage, and a `sort_keys=True, ensure_ascii=False` wire serialization that is byte-identical across CPython and bare-metal MicroPython for any payload — including Unicode sensor labels and multi-byte locale strings.
+
+For desktop CI and testing, pass `SoftwareFallbackDriver.MOCK_KEY_SENTINEL` as `private_key_path` to opt into a deterministic stub key without a provisioned key store. See [`packages/sovereign-sensor/README.md`](packages/sovereign-sensor/README.md) for the full HAL contract, driver table, and invariants reference.
 
 ---
 
