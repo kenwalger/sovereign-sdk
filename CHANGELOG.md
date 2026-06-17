@@ -73,8 +73,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `bootstrap_sensor_node()` usage examples for both production and desktop/CI paths, and a
     package invariants table.
 
-  - **`packages/sovereign-sensor/tests/test_sensor.py`** — 31 test cases across three classes
-    (`TestBootstrap`: 4 cases; `TestDriverGuard`: 3 cases; `TestEnvelopeSeal`: 24 cases)
+  - **`packages/sovereign-sensor/tests/test_sensor.py`** — 32 test cases across three classes
+    (`TestBootstrap`: 4 cases; `TestDriverGuard`: 3 cases; `TestEnvelopeSeal`: 25 cases)
     verifying: platform auto-detection confirmed via the public `algorithm()` contract (sealed
     `"alg"` field equals `"hmac-sha256"`) rather than private attribute access; driver
     initialization confirmed via successful `seal()` completion; bootstrap falls back to
@@ -115,8 +115,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     negative sequence counter clamp — `"-42"` written to the sequence file produces
     `_sequence == 0` after construction and `q=1` on the first `seal()`, confirming that
     adversarially written or filesystem-corrupted negative counter values are neutralized
-    before the monotonic custody chain begins.
-    **31 passed, 0 failed.**
+    before the monotonic custody chain begins; algorithm identifier byte-count-prefix
+    delimiter injection immunity — two drivers returning `"hmac|sha256"` and `"hmac"` produce
+    distinct HMAC signatures confirming cross-algorithm preimage collision is closed; an
+    independently reconstructed HMAC over the byte-count-prefixed preimage exactly matches
+    the sealed signature, verifying the complete preimage format end-to-end.
+    **32 passed, 0 failed.**
 
 - **Phase 8 — `sovereign-ledger` immutable provenance engine** (new workspace member
   `packages/sovereign-ledger/`): Introduces a local-first, SQLite-backed, append-only
@@ -207,6 +211,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   consistency.
 
 ### Changed
+
+- **`SovereignEnvelope.seal()` — algorithm identifier uniformly byte-count-prefixed in the preimage** (`envelope.py`):
+  `algorithm` is now encoded to a UTF-8 byte array independently and prefixed with its byte
+  count before insertion into the versioned preimage, bringing it into parity with `node_id`
+  and `timestamp`.  The preimage format is
+  `1|{len(node_bytes)}:{node_id}|{len(time_bytes)}:{timestamp}|{seq}|{len(algo_bytes)}:{algorithm}|{canonical}`.
+  Without the prefix, a driver returning an algorithm identifier containing `|` (e.g.
+  `"hmac|sha256"`) could produce a preimage byte sequence that an alternative `(node_id,
+  algorithm)` split reconstructs identically, enabling cross-algorithm signature reuse.
+  Named variables `node_prefix`, `time_prefix`, and `algo_prefix` are assembled from the
+  corresponding byte arrays and fed into a single f-string that is encoded to UTF-8 at the
+  end, keeping the assembly logic readable and the encoding boundary explicit.
+
+- **`SoftwareFallbackDriver.MOCK_KEY_SENTINEL` — renamed from `_MOCK_KEY_SENTINEL` to `MOCK_KEY_SENTINEL`** (`drivers/software_fallback.py`):
+  The leading underscore implied a private attribute, but callers in both the `__init__.py`
+  factory and test code reference the sentinel by name to opt into the deterministic mock key
+  path.  Removing the underscore formalizes it as a documented public class attribute,
+  eliminating the implicit private-access idiom and allowing downstream code to reference it
+  without a pylint / mypy private-access warning.  `_MOCK_KEY` retains its underscore because
+  it is a fixed internal stub that must not be referenced outside `initialize_hardware()`.
+
+- **`bootstrap_sensor_node()` — fallback exception chain decoupled via boolean flag** (`__init__.py`):
+  The `SoftwareFallbackDriver` re-initialization and warning print previously executed inside
+  the `except NotImplementedError` block, implicitly chaining the original `NotImplementedError`
+  as `__context__` on any exception raised during fallback setup.  A boolean flag
+  `_hw_not_implemented` is now set inside the `except` clause; the warning and fallback
+  initialization run in an unconditional `if _hw_not_implemented:` branch outside the block.
+  On constrained MicroPython serial consoles, this prevents a doubled traceback — the original
+  `NotImplementedError` and the `RuntimeError` from a misconfigured fallback key path — from
+  flooding the output and obscuring the root cause.
 
 - **`SovereignEnvelope.__init__()` — negative sequence counter clamped to zero** (`envelope.py`):
   After a successfully parsed integer is assigned to `self._sequence`, an `else` branch on the

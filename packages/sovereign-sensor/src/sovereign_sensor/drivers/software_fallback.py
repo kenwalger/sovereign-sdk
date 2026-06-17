@@ -19,23 +19,23 @@ class SoftwareFallbackDriver(SovereignCryptoDriver):
     """HMAC-SHA256–based software signing driver for non-accelerated platforms.
 
     Key material is loaded from ``private_key_path`` during ``initialize_hardware()``.
-    If ``private_key_path`` equals ``_MOCK_KEY_SENTINEL``, the fixed deterministic
+    If ``private_key_path`` equals ``MOCK_KEY_SENTINEL``, the fixed deterministic
     ``_MOCK_KEY`` stub is substituted so lightweight desktop tests can operate without
     a provisioned key store.  Any other path that cannot be opened raises
     ``RuntimeError`` immediately — there is no silent key substitution for
     non-sentinel paths.
 
     :param private_key_path: Filesystem path to the binary HMAC key material, or
-        ``SoftwareFallbackDriver._MOCK_KEY_SENTINEL`` to opt into the deterministic
+        ``SoftwareFallbackDriver.MOCK_KEY_SENTINEL`` to opt into the deterministic
         mock key for desktop testing.
     :type private_key_path: str
     """
 
     # Explicit opt-in sentinel for desktop testing without a provisioned key store.
     # Any path other than this that cannot be opened raises RuntimeError immediately.
-    _MOCK_KEY_SENTINEL: str = "/mock/test_gateway.key"
+    MOCK_KEY_SENTINEL: str = "/mock/test_gateway.key"
 
-    # Fixed stub keyed exclusively to _MOCK_KEY_SENTINEL paths.  Never deploy in
+    # Fixed stub keyed exclusively to MOCK_KEY_SENTINEL paths.  Never deploy in
     # production — this value provides zero cryptographic uniqueness guarantees.
     _MOCK_KEY: bytes = b"sovereign-sensor-mock-key-v1-do-not-use-in-production"
 
@@ -47,7 +47,7 @@ class SoftwareFallbackDriver(SovereignCryptoDriver):
     def initialize_hardware(self) -> None:
         """Load HMAC key material from the VFS and mark the driver ready.
 
-        If ``private_key_path`` equals ``_MOCK_KEY_SENTINEL``, substitutes the
+        If ``private_key_path`` equals ``MOCK_KEY_SENTINEL``, substitutes the
         fixed deterministic ``_MOCK_KEY`` stub so lightweight desktop tests operate
         without a provisioned key store.  For all other paths, opens the file in
         read-binary mode, re-raises any ``OSError`` as ``RuntimeError``, and raises
@@ -61,7 +61,7 @@ class SoftwareFallbackDriver(SovereignCryptoDriver):
             the key file cannot be opened or read.
         :raises ValueError: If the key file exists but contains zero bytes.
         """
-        if self._key_path == self._MOCK_KEY_SENTINEL:
+        if self._key_path == self.MOCK_KEY_SENTINEL:
             self._secret_key = self._MOCK_KEY
             self._initialized = True
             return

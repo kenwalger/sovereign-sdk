@@ -44,7 +44,7 @@ def bootstrap_sensor_node(
     :param node_id: Immutable identifier string for this sensor node.
     :type node_id: str
     :param private_key_path: Filesystem path to the node's private signing key,
-        or ``SoftwareFallbackDriver._MOCK_KEY_SENTINEL`` for desktop testing.
+        or ``SoftwareFallbackDriver.MOCK_KEY_SENTINEL`` for desktop testing.
     :type private_key_path: str
     :param sequence_file: VFS path used to persist the monotonic sequence
         counter across reboots.  Defaults to ``".sovereign_sequence"`` in the
@@ -60,9 +60,18 @@ def bootstrap_sensor_node(
     else:
         from .drivers.software_fallback import SoftwareFallbackDriver
         driver = SoftwareFallbackDriver(private_key_path)
+    _hw_not_implemented: bool = False
     try:
         driver.initialize_hardware()
     except NotImplementedError:
+        _hw_not_implemented = True
+
+    if _hw_not_implemented:
+        # Emit the warning outside the except block so the fallback initialization
+        # path carries no implicit exception context.  Any exception raised by the
+        # SoftwareFallbackDriver below will surface with a clean traceback rather
+        # than chaining the original NotImplementedError, preventing doubled
+        # tracebacks from flooding the serial monitor on constrained MicroPython targets.
         print(
             "WARNING: Hardware crypto accelerator is not yet implemented "
             "(pending low-level register engineering in the next sprint). "

@@ -112,7 +112,7 @@ from sovereign_sensor.drivers.software_fallback import SoftwareFallbackDriver
 
 envelope = bootstrap_sensor_node(
     node_id="ci-node-001",
-    private_key_path=SoftwareFallbackDriver._MOCK_KEY_SENTINEL,
+    private_key_path=SoftwareFallbackDriver.MOCK_KEY_SENTINEL,
 )
 wire = envelope.seal("2026-06-16T00:00:00Z", {"ping": True})
 ```

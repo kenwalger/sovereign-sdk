@@ -353,14 +353,16 @@ wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 2
   `except OSError` catch degrades gracefully to RAM-only tracking without masking structural defects;
   (2) algorithm identifier queried from driver; (3) payload keys alphabetically sorted and serialized
   via `json.dumps(..., separators=(',', ':'), sort_keys=True)`, guaranteeing identical preimage bytes
-  regardless of dict key insertion order on any MicroPython target; (4) `node_id` and
-  `timestamp` independently encoded to UTF-8 byte arrays, each prefixed with its UTF-8 byte
-  count (not Unicode character count), and concatenated into the versioned preimage
-  `1|{len(node_bytes)}:{node_id}|{len(time_bytes)}:{timestamp}|sequence|algorithm|canonical_payload`;
-  byte-count prefixes close delimiter injection (two `(node_id, timestamp)` pairs with the
-  same naive pipe-join produce identical preimage bytes without them) and multi-byte encoding
+  regardless of dict key insertion order on any MicroPython target; (4) `node_id`,
+  `timestamp`, and `algorithm` independently encoded to UTF-8 byte arrays, each prefixed with
+  its UTF-8 byte count (not Unicode character count), and concatenated into the versioned
+  preimage
+  `1|{len(node_bytes)}:{node_id}|{len(time_bytes)}:{timestamp}|sequence|{len(algo_bytes)}:{algorithm}|canonical_payload`;
+  byte-count prefixes close delimiter injection across all three variable-length fields —
+  a crafted algorithm identifier embedding `|` produces an ambiguous preimage without the
+  prefix, enabling cross-algorithm signature reuse; prefixes also close multi-byte encoding
   ambiguity (a receiver using character-count semantics parses field boundaries at the wrong
-  byte offset for any node_id with characters outside U+007F); (5) preimage signed by driver
+  byte offset for any field with characters outside U+007F); (5) preimage signed by driver
   returning raw binary bytes; (6) signature hex-encoded via `binascii.hexlify`; (7) all fields
   serialized into a 7-key ultra-minified JSON frame `{"v", "n", "t", "q", "alg", "d", "s"}` via
   `json.dumps(..., sort_keys=True)`, freezing the alphabetical key sequence in the raw
@@ -368,14 +370,18 @@ wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 2
 * [x] `bootstrap_sensor_node(node_id, private_key_path, sequence_file) -> SovereignEnvelope`
   (`__init__.py`) — inspects `sys.platform.lower()` to route between `ESP32HardwareDriver`
   (on `"esp32"` targets) and `SoftwareFallbackDriver` (all other platforms); calls
-  `initialize_hardware()` inside a `try/except NotImplementedError` block — if the selected
-  hardware driver raises (skeleton placeholder not yet implemented), a warning is printed and
-  the factory rebinds to `SoftwareFallbackDriver` so sealing, sequencing, and VFS layers remain
+  `initialize_hardware()` inside a `try/except NotImplementedError` block via a boolean
+  `_hw_not_implemented` flag — the flag is set inside the `except` clause and both the
+  fallback warning print and the `SoftwareFallbackDriver` re-initialization execute outside
+  the block, preventing the original `NotImplementedError` from chaining into the fallback
+  initialization traceback on MicroPython serial consoles; if the selected hardware driver
+  raises (skeleton placeholder not yet implemented), a warning is printed and the factory
+  rebinds to `SoftwareFallbackDriver` so sealing, sequencing, and VFS layers remain
   exercisable on the workbench; forwards `sequence_file` to the constructed `SovereignEnvelope`
   for VFS counter persistence across reboots.
 * [x] `SoftwareFallbackDriver` (`drivers/software_fallback.py`) — HMAC-SHA256 keyed signing
   driver using `hashlib` and `hmac`; reads key material from the VFS path supplied at
-  construction during `initialize_hardware()`; `_MOCK_KEY_SENTINEL = "/mock/test_gateway.key"`
+  construction during `initialize_hardware()`; `MOCK_KEY_SENTINEL = "/mock/test_gateway.key"`
   is the only path that opts into the fixed deterministic `_MOCK_KEY` stub — any other path
   that cannot be opened raises `RuntimeError` immediately, eliminating silent key substitution
   for production key paths; read bytes are stored in a local `key_bytes: bytes` variable before
@@ -398,8 +404,8 @@ wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 2
 * [x] `packages/sovereign-sensor/README.md` — distribution documentation asset satisfying the
   `pyproject.toml` `readme` field; includes architectural overview, HAL driver table,
   7-step sealing pipeline description, minimal usage examples, and invariants table.
-* [x] 31-case desktop validation test suite (`tests/test_sensor.py`) across three classes
-  (`TestBootstrap`: 4 cases, `TestDriverGuard`: 3 cases, `TestEnvelopeSeal`: 24 cases) verifying
+* [x] 32-case desktop validation test suite (`tests/test_sensor.py`) across three classes
+  (`TestBootstrap`: 4 cases, `TestDriverGuard`: 3 cases, `TestEnvelopeSeal`: 25 cases) verifying
   platform auto-detection via public `algorithm()` contract, driver initialization confirmation,
   bootstrap falls back to `SoftwareFallbackDriver` (with warning) when hardware driver raises
   `NotImplementedError` (simulated via `sys.platform` patch to `"esp32"`), `sign()` raises
@@ -428,7 +434,12 @@ wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 2
   that character-count semantics are rejected and cross-platform field boundary parsing is
   correct on all targets; negative sequence counter clamped to zero — `"-42"` written to
   the sequence file produces `_sequence == 0` after construction and `q=1` on the first
-  `seal()`, confirming the `q < 0` invariant violation is closed. **31 passed, 0 failed.**
+  `seal()`, confirming the `q < 0` invariant violation is closed; algorithm identifier
+  byte-count-prefix delimiter injection immunity — two drivers returning `"hmac|sha256"` and
+  `"hmac"` respectively produce distinct HMAC signatures, confirming that a pipe character
+  embedded in the algorithm string cannot collapse adjacent preimage fields; an independently
+  reconstructed HMAC over the byte-count-prefixed preimage exactly matches the sealed
+  signature, verifying the complete preimage format end-to-end. **32 passed, 0 failed.**
 
 ---
 

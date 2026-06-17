@@ -36,7 +36,7 @@ from sovereign_sensor.drivers.software_fallback import SoftwareFallbackDriver
 
 
 _NODE_ID = "node-sensor-001"
-_KEY_PATH = "/mock/test_gateway.key"  # SoftwareFallbackDriver._MOCK_KEY_SENTINEL
+_KEY_PATH = "/mock/test_gateway.key"  # SoftwareFallbackDriver.MOCK_KEY_SENTINEL
 _TIMESTAMP = "2026-06-16T00:00:00Z"
 _PAYLOAD: dict = {"sensor": "temperature", "value": 42, "unit": "C"}
 
@@ -128,7 +128,7 @@ class TestDriverGuard:
         A ``SoftwareFallbackDriver`` pointed at a real but absent key file must
         fail fast with a descriptive ``RuntimeError`` rather than substituting the
         fixed stub and silently producing signatures under an unknown key.  Only
-        the explicit ``_MOCK_KEY_SENTINEL`` path opts into deterministic mock
+        the explicit ``MOCK_KEY_SENTINEL`` path opts into deterministic mock
         signing; every other missing path is a hard boot failure.
         """
         driver = SoftwareFallbackDriver("/nonexistent/production.key")
@@ -485,17 +485,19 @@ class TestEnvelopeSeal:
         assert len(node_bytes) > len(non_ascii_node)
 
         # Independently reconstruct the expected HMAC preimage using byte-count
-        # prefix semantics and verify the sealed signature matches.
+        # prefix semantics (node, timestamp, and algo) and verify the sealed
+        # signature matches.
         time_bytes: bytes = _TIMESTAMP.encode("utf-8")
+        algo_str: str = "hmac-sha256"
+        algo_b: bytes = algo_str.encode("utf-8")
         canonical: str = json.dumps(_PAYLOAD, separators=(",", ":"), sort_keys=True)
         expected_preimage: bytes = (
-            f"1|{len(node_bytes)}:".encode("utf-8")
-            + node_bytes
-            + b"|"
-            + f"{len(time_bytes)}:".encode("utf-8")
-            + time_bytes
-            + f"|1|hmac-sha256|{canonical}".encode("utf-8")
-        )
+            f"1|{len(node_bytes)}:{non_ascii_node}"
+            f"|{len(time_bytes)}:{_TIMESTAMP}"
+            f"|1"
+            f"|{len(algo_b)}:{algo_str}"
+            f"|{canonical}"
+        ).encode("utf-8")
         expected_sig: str = binascii.hexlify(
             _hmac.new(
                 SoftwareFallbackDriver._MOCK_KEY,
@@ -532,6 +534,83 @@ class TestEnvelopeSeal:
         sig_a = json.loads(envelope_a.seal("ghi", _PAYLOAD))["s"]
         sig_b = json.loads(envelope_b.seal("def|ghi", _PAYLOAD))["s"]
         assert sig_a != sig_b
+
+    def test_algo_field_length_prefix_closes_preimage_delimiter_collision(
+        self, tmp_path: Path
+    ) -> None:
+        """Algorithm field must be length-prefixed in the preimage to close the full
+        delimiter injection surface across all three variable-length signed fields.
+
+        Without a length prefix on the algorithm identifier, two drivers whose
+        ``algorithm()`` strings share a naive pipe-joined preimage suffix — e.g.
+        ``algo="a|b"`` alongside ``algo="a"`` — could produce identical preimage
+        bytes for distinct (algo, canonical) combinations, enabling a framing attack
+        where a seal produced under one algorithm identity validates under another.
+        This test constructs two envelopes backed by minimal mock drivers with pipe-
+        bearing and pipe-free algo strings, verifies the sealed signatures diverge
+        (confirming the prefix disambiguates them), then independently reconstructs
+        the expected HMAC for the length-prefixed preimage and asserts the sealed
+        signature matches exactly.
+
+        :type tmp_path: Path
+        """
+        import hashlib
+        import hmac as _hmac
+        from sovereign_sensor.interface import SovereignCryptoDriver
+
+        _KEY: bytes = SoftwareFallbackDriver._MOCK_KEY
+
+        class _FixedAlgoDriver(SovereignCryptoDriver):
+            """Minimal mock driver with a configurable algorithm identifier."""
+
+            def __init__(self, algo: str) -> None:
+                self._algo: str = algo
+
+            def initialize_hardware(self) -> None:
+                pass
+
+            def algorithm(self) -> str:
+                return self._algo
+
+            def sign(self, payload: bytes) -> bytes:
+                return _hmac.new(_KEY, payload, hashlib.sha256).digest()
+
+        seq_a: str = str(tmp_path / "seq_a")
+        seq_b: str = str(tmp_path / "seq_b")
+
+        # algo_a contains a pipe character — without a length prefix it is ambiguous
+        # with algo_b at the pipe-split boundary.
+        algo_a: str = "hmac|sha256"
+        algo_b: str = "hmac"
+
+        envelope_a = SovereignEnvelope(
+            _NODE_ID, _FixedAlgoDriver(algo_a), sequence_file=seq_a
+        )
+        envelope_b = SovereignEnvelope(
+            _NODE_ID, _FixedAlgoDriver(algo_b), sequence_file=seq_b
+        )
+
+        sig_a: str = json.loads(envelope_a.seal(_TIMESTAMP, _PAYLOAD))["s"]
+        sig_b: str = json.loads(envelope_b.seal(_TIMESTAMP, _PAYLOAD))["s"]
+        assert sig_a != sig_b
+
+        # Independently reconstruct the expected preimage for envelope_a and confirm
+        # the sealed signature matches, proving algo_prefix semantics are in force.
+        node_bytes: bytes = _NODE_ID.encode("utf-8")
+        time_bytes: bytes = _TIMESTAMP.encode("utf-8")
+        algo_bytes_a: bytes = algo_a.encode("utf-8")
+        canonical: str = json.dumps(_PAYLOAD, separators=(",", ":"), sort_keys=True)
+        expected_preimage: bytes = (
+            f"1|{len(node_bytes)}:{_NODE_ID}"
+            f"|{len(time_bytes)}:{_TIMESTAMP}"
+            f"|1"
+            f"|{len(algo_bytes_a)}:{algo_a}"
+            f"|{canonical}"
+        ).encode("utf-8")
+        expected_sig: str = binascii.hexlify(
+            _hmac.new(_KEY, expected_preimage, hashlib.sha256).digest()
+        ).decode("utf-8")
+        assert sig_a == expected_sig
 
     def test_sequence_counter_resumes_after_reboot_simulation(
         self, tmp_path: Path
