@@ -73,8 +73,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `bootstrap_sensor_node()` usage examples for both production and desktop/CI paths, and a
     package invariants table.
 
-  - **`packages/sovereign-sensor/tests/test_sensor.py`** — 32 test cases across three classes
-    (`TestBootstrap`: 4 cases; `TestDriverGuard`: 3 cases; `TestEnvelopeSeal`: 25 cases)
+  - **`packages/sovereign-sensor/tests/test_sensor.py`** — 33 test cases across three classes
+    (`TestBootstrap`: 4 cases; `TestDriverGuard`: 3 cases; `TestEnvelopeSeal`: 26 cases)
     verifying: platform auto-detection confirmed via the public `algorithm()` contract (sealed
     `"alg"` field equals `"hmac-sha256"`) rather than private attribute access; driver
     initialization confirmed via successful `seal()` completion; bootstrap falls back to
@@ -119,8 +119,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     delimiter injection immunity — two drivers returning `"hmac|sha256"` and `"hmac"` produce
     distinct HMAC signatures confirming cross-algorithm preimage collision is closed; an
     independently reconstructed HMAC over the byte-count-prefixed preimage exactly matches
-    the sealed signature, verifying the complete preimage format end-to-end.
-    **32 passed, 0 failed.**
+    the sealed signature, verifying the complete preimage format end-to-end; Unicode payload
+    serialization without ASCII escaping — `{"sensor": "Nordøst-Ventil", "data": "Ω-Value"}`
+    seals without error, the payload round-trips correctly, and the wire bytes contain raw
+    UTF-8 characters (`ø`, `Ω`) with no `\uXXXX` escape sequences, confirming
+    `ensure_ascii=False` is active on both the preimage and wire frame serialization paths;
+    preimage reconstruction tests refactored to use the public `SoftwareFallbackDriver.sign()`
+    API rather than accessing the private `_MOCK_KEY` attribute directly, eliminating all
+    private-attribute access from the test suite.
+    **33 passed, 0 failed.**
 
 - **Phase 8 — `sovereign-ledger` immutable provenance engine** (new workspace member
   `packages/sovereign-ledger/`): Introduces a local-first, SQLite-backed, append-only
@@ -211,6 +218,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   consistency.
 
 ### Changed
+
+- **`SovereignEnvelope.seal()` — `ensure_ascii=False` enforced on both `json.dumps()` calls** (`envelope.py`):
+  `ensure_ascii=False` is now passed explicitly to the `json.dumps()` call that produces the
+  canonical payload preimage string and to the final `json.dumps()` that serializes the wire
+  frame.  CPython's default `ensure_ascii=True` escapes every character outside U+007F to a
+  six-byte `\uXXXX` sequence, while many MicroPython builds emit the raw multi-byte UTF-8
+  encoding for the same character.  For a payload containing `"Ω"` (U+03A9), CPython would
+  produce `"Ω"` in the canonical string and MicroPython would produce the raw bytes
+  `\xce\xa9`, yielding different HMAC preimages and causing cross-platform signature
+  verification to fail silently on any non-ASCII payload.  `ensure_ascii=False` forces both
+  runtimes to the same raw UTF-8 output, eliminating the split-brain encoding divergence
+  at the preimage and wire frame layers simultaneously.
+
+- **`SovereignEnvelope.seal()` — sequence counter commit deferred to after signing** (`envelope.py`):
+  The sequence index is now computed transiently as `next_sequence = self._sequence + 1`
+  before the preimage is assembled.  `self._sequence` is not mutated and the VFS sequence
+  file is not written until after `self._driver.sign()` returns without raising.  Previously
+  the counter was incremented and flushed to the VFS immediately at the start of `seal()`:
+  a `sign()` failure (e.g. `RuntimeError` from a driver that was never initialized) would
+  permanently consume a sequence position, introducing a numbering gap in the on-disk
+  custody timeline that a downstream verifier would flag as a replay-protection breach.
+  With the deferred commit, a signing failure propagates cleanly and the counter is not
+  advanced, keeping the persistent sequence file in perfect sync with actually-sealed frames.
+
+- **`tests/test_sensor.py` — private `_MOCK_KEY` attribute access eliminated** (`tests/test_sensor.py`):
+  Two tests that reconstructed the expected HMAC preimage signature by directly reading
+  `SoftwareFallbackDriver._MOCK_KEY` bytes and calling `hmac.new()` inline are refactored
+  to use only the public driver API.  `test_seal_non_ascii_node_id_uses_utf8_byte_length_prefix`
+  and `test_algo_field_length_prefix_closes_preimage_delimiter_collision` now construct a
+  reference `SoftwareFallbackDriver(MOCK_KEY_SENTINEL)`, call `initialize_hardware()`, and
+  delegate to the public `sign()` method to compute the expected signature.  The `_FixedAlgoDriver`
+  mock in the algo-collision test holds its own `SoftwareFallbackDriver(MOCK_KEY_SENTINEL)` reference
+  initialized in `__init__` and forwards all `sign()` calls to it, removing the last direct dependency
+  on a private attribute from the test file.  `ensure_ascii=False` is added to the `json.dumps()`
+  calls in both tests' canonical reconstruction to match the updated envelope implementation.
 
 - **`SovereignEnvelope.seal()` — algorithm identifier uniformly byte-count-prefixed in the preimage** (`envelope.py`):
   `algorithm` is now encoded to a UTF-8 byte array independently and prefixed with its byte

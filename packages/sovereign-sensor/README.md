@@ -27,10 +27,10 @@ Two concrete drivers are provided:
 
 - **`SoftwareFallbackDriver`** — HMAC-SHA256 over a VFS-resident binary key file.
   Used on all non-ESP32 targets (desktop CI, Raspberry Pi Pico, etc.).
-  The sentinel path `"/mock/test_gateway.key"` opts into a deterministic stub key for
-  desktop testing; every other path that cannot be opened raises `RuntimeError`
-  immediately, eliminating silent key substitution.  A zero-byte key file raises
-  `ValueError` to prevent HMAC keyed with `b""`.
+  The class-level `MOCK_KEY_SENTINEL = "/mock/test_gateway.key"` opts into a
+  deterministic stub key for desktop testing; every other path that cannot be opened
+  raises `RuntimeError` immediately, eliminating silent key substitution.  A zero-byte
+  key file raises `ValueError` to prevent HMAC keyed with `b""`.
 
 - **`ESP32HardwareDriver`** — Skeleton placeholder for the on-chip ECC accelerator.
   `initialize_hardware()` raises `NotImplementedError` until register-level engineering
@@ -40,34 +40,38 @@ Two concrete drivers are provided:
 
 ### Seven-Step Sealing Pipeline (`SovereignEnvelope.seal()`)
 
-1. **Monotonic sequence counter** — incremented and immediately flushed to a VFS
-   file (default `.sovereign_sequence`) so the counter survives hardware reboots
-   without replay-window regression.  A truncated (0-byte) file resets to 0; a
-   negative stored value is clamped to 0.  VFS write failures degrade gracefully to
-   RAM-only tracking.
+1. **Monotonic sequence counter** — computed transiently as `_sequence + 1` and bound
+   into the preimage.  The in-memory counter and VFS file (default `.sovereign_sequence`)
+   are advanced only after signing succeeds, so a `sign()` failure never consumes a
+   sequence position or introduces a gap in the on-disk custody timeline.  A truncated
+   (0-byte) file resets to 0; a negative stored value is clamped to 0.  VFS write
+   failures degrade gracefully to RAM-only tracking.
 
 2. **Algorithm identifier** — queried from the active driver via `algorithm()` and
    embedded in the authenticated preimage, providing protocol agility without
    a schema change.
 
-3. **Canonical payload serialization** — `json.dumps(payload, separators=(",", ":"), sort_keys=True)`
+3. **Canonical payload serialization** — `json.dumps(payload, separators=(",", ":"), sort_keys=True, ensure_ascii=False)`
    guarantees a byte-identical preimage for semantically equivalent payloads
-   regardless of key insertion order, which MicroPython does not guarantee stable
-   across firmware versions or heap-allocation events.
+   regardless of key insertion order.  `ensure_ascii=False` forces raw UTF-8 output
+   for all characters, eliminating the `\uXXXX`-vs-raw-UTF-8 split-brain divergence
+   that would cause cross-platform HMAC verification to fail silently on any payload
+   containing characters outside U+007F.
 
-4. **UTF-8 byte-count-prefixed preimage assembly** — `node_id` and `timestamp` are
-   each encoded to UTF-8 independently; the prefix for each field is the UTF-8 byte
-   count (not the Unicode character count).  The preimage is assembled from raw byte
-   slices:
+4. **UTF-8 byte-count-prefixed preimage assembly** — `node_id`, `timestamp`, and the
+   `algorithm` identifier are each encoded to UTF-8 independently; the prefix for each
+   field is the UTF-8 byte count (not the Unicode character count).  The preimage is
+   assembled from raw byte slices:
 
    ```
-   1|{len(node_bytes)}:{node_id}|{len(time_bytes)}:{timestamp}|{seq}|{algo}|{canonical}
+   1|{len(node_bytes)}:{node_id}|{len(time_bytes)}:{timestamp}|{seq}|{len(algo_bytes)}:{algo}|{canonical}
    ```
 
-   Byte-count prefixes close two attack surfaces: delimiter injection (two distinct
-   `(node_id, timestamp)` pairs that collapse to the same naive pipe-joined string)
-   and multi-byte encoding ambiguity (a receiver using character-count semantics
-   parses field boundaries at the wrong offset for non-ASCII identifiers).
+   Byte-count prefixes close all variable-length field injection surfaces: delimiter
+   injection (any two inputs that differ only in where a `|` character falls produce
+   identical naive pipe-joined preimage bytes without prefixes) and multi-byte encoding
+   ambiguity (a receiver using character-count semantics parses field boundaries at the
+   wrong byte offset for any non-ASCII field value).
 
 5. **Driver signing** — raw preimage bytes traverse `driver.sign()`, returning raw
    binary output from the underlying cryptographic primitive.
@@ -78,9 +82,9 @@ Two concrete drivers are provided:
 
 7. **Wire frame serialization** — all seven envelope fields (`v`, `n`, `t`, `q`,
    `alg`, `d`, `s`) are packed into a dict and serialized with
-   `json.dumps(..., separators=(",", ":"), sort_keys=True)`, freezing the
-   alphabetical key sequence in the raw transmission bytes independently of
-   MicroPython allocator-driven insertion order.
+   `json.dumps(..., separators=(",", ":"), sort_keys=True, ensure_ascii=False)`,
+   freezing the alphabetical key sequence and enforcing raw UTF-8 wire encoding
+   independently of MicroPython allocator-driven insertion order.
 
 ---
 
@@ -124,8 +128,9 @@ wire = envelope.seal("2026-06-16T00:00:00Z", {"ping": True})
 | Property | Guarantee |
 |---|---|
 | **Replay protection** | Monotonic `q` counter persisted to VFS; resumes across reboots. |
+| **Sequence atomicity** | Counter advanced only after `sign()` succeeds; a signing failure leaves the on-disk counter unchanged with no gap. |
 | **Key material safety** | Missing or empty key file raises immediately; no silent substitution. |
-| **Preimage determinism** | `sort_keys=True` on payload; byte-count length prefixes on identity fields. |
-| **Wire frame determinism** | `sort_keys=True` on the outer frame; byte-identical output across MicroPython builds. |
+| **Preimage determinism** | `sort_keys=True` and `ensure_ascii=False` on payload; byte-count length prefixes on all three variable-length fields. |
+| **Wire frame determinism** | `sort_keys=True` and `ensure_ascii=False` on the outer frame; byte-identical UTF-8 output across CPython and MicroPython builds. |
 | **Encoding safety** | `binascii.hexlify` prevents `UnicodeDecodeError` on raw binary digest bytes. |
 | **Zero dependencies** | No network calls, no PyTorch, no external packages at runtime. |

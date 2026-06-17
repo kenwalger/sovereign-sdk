@@ -78,16 +78,20 @@ class SovereignEnvelope:
 
         Sealing proceeds in seven deterministic steps:
 
-        1. Internal sequence counter is incremented monotonically and immediately
-           persisted to the configured VFS sequence file, binding this observation
-           to a unique position in the node's emission history and preventing
-           replayed frames from being accepted as fresh — including across hardware
-           reboots.  VFS write failures degrade gracefully to RAM-only tracking.
+        1. Monotonic sequence index is computed transiently as ``self._sequence + 1``
+           and bound into the preimage.  The in-memory counter and the VFS sequence
+           file are not advanced until step 5 returns successfully, guaranteeing that
+           a ``sign()`` failure never consumes a sequence position or introduces a gap
+           in the on-disk custody timeline.
         2. Active algorithm identifier is queried from the driver, embedding
            the signing primitive into the authenticated preimage for protocol agility.
         3. Payload keys are alphabetically sorted and the dict is serialized to
-           minified JSON with no inter-token whitespace, guaranteeing an identical
-           preimage regardless of key insertion order on any MicroPython target.
+           minified JSON with ``ensure_ascii=False`` and no inter-token whitespace.
+           Raw UTF-8 string bytes in the canonical form guarantee identical preimage
+           bytes across CPython and bare-metal MicroPython for any Unicode payload,
+           eliminating the ``\\uXXXX``-vs-raw-UTF-8 split-brain divergence that
+           would cause cross-platform signature verification to fail on non-ASCII
+           payloads.
         4. ``node_id``, ``timestamp``, and the algorithm identifier are each encoded
            to UTF-8 byte arrays independently.  Each is prefixed with its UTF-8 byte
            count (not its Unicode character count) and the three prefixed strings are
@@ -102,14 +106,16 @@ class SovereignEnvelope:
            characters and algorithm identifiers that embed separator characters.
         5. Preimage bytes traverse the driver's signing boundary, returning
            raw binary output from the underlying cryptographic primitive.
-        6. Raw signature bytes are hex-encoded via ``binascii.hexlify``,
-           guaranteeing all byte values ``0x00–0xFF`` map safely to the
-           alphanumeric characters ``0–9``, ``a–f`` without ``UnicodeDecodeError``
-           on constrained MicroPython runtimes.
-        7. All fields are packed into a versioned transmission dict and
-           serialized to ultra-minified UTF-8 JSON bytes with ``sort_keys=True``,
-           guaranteeing a fixed alphabetical key sequence in the raw wire frame
-           independent of dict insertion order on any MicroPython target.
+        6. The in-memory sequence counter is advanced to the transient value from
+           step 1 and immediately flushed to the configured VFS sequence file, binding
+           this observation to a unique position in the node's emission history.
+           Execution reaches this step only when ``sign()`` returns successfully.
+           VFS write failures degrade gracefully to RAM-only tracking.
+        7. Raw signature bytes are hex-encoded via ``binascii.hexlify``; all fields
+           are packed into a versioned dict and serialized to ultra-minified UTF-8
+           JSON bytes with ``sort_keys=True`` and ``ensure_ascii=False``, freezing
+           the alphabetical key sequence and raw UTF-8 encoding in the wire frame
+           independently of MicroPython allocator-driven insertion order.
 
         :param timestamp: ISO-8601 observation timestamp string.
         :type timestamp: str
@@ -119,18 +125,11 @@ class SovereignEnvelope:
                  ``q``, ``alg``, ``d``, ``s``.
         :rtype: bytes
         """
-        self._sequence += 1
-        # Persist counter to VFS immediately after increment.  The with-block
-        # guarantees flush and close before execution continues, satisfying
-        # MicroPython's flash-write coherence requirement: a power-cycle at any
-        # subsequent point cannot reuse this sequence position.
-        try:
-            with open(self._sequence_file, "w") as f:
-                f.write(str(self._sequence))
-        except OSError:
-            pass  # Degrade gracefully to RAM-only sequence tracking.
+        next_sequence: int = self._sequence + 1
         algo: str = self._driver.algorithm()
-        canonical: str = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+        canonical: str = json.dumps(
+            payload, separators=(",", ":"), sort_keys=True, ensure_ascii=False
+        )
         node_bytes: bytes = self._node_id.encode("utf-8")
         time_bytes: bytes = timestamp.encode("utf-8")
         algo_bytes: bytes = algo.encode("utf-8")
@@ -138,10 +137,19 @@ class SovereignEnvelope:
         time_prefix: str = f"{len(time_bytes)}:{timestamp}"
         algo_prefix: str = f"{len(algo_bytes)}:{algo}"
         preimage: bytes = (
-            f"1|{node_prefix}|{time_prefix}|{self._sequence}|{algo_prefix}|{canonical}"
+            f"1|{node_prefix}|{time_prefix}|{next_sequence}|{algo_prefix}|{canonical}"
             .encode("utf-8")
         )
         sig_bytes: bytes = self._driver.sign(preimage)
+        # Commit sequence state only after sign() returns successfully.  A sign()
+        # failure propagates without advancing the counter, so no sequence position
+        # is silently consumed and the on-disk custody timeline has no gaps.
+        self._sequence = next_sequence
+        try:
+            with open(self._sequence_file, "w") as f:
+                f.write(str(self._sequence))
+        except OSError:
+            pass  # Degrade gracefully to RAM-only sequence tracking.
         signature_string: str = binascii.hexlify(sig_bytes).decode("utf-8")
         frame: dict = {
             "v": 1,
@@ -152,4 +160,6 @@ class SovereignEnvelope:
             "d": payload,
             "s": signature_string,
         }
-        return json.dumps(frame, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        return json.dumps(
+            frame, separators=(",", ":"), sort_keys=True, ensure_ascii=False
+        ).encode("utf-8")

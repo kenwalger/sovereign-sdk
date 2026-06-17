@@ -463,9 +463,6 @@ class TestEnvelopeSeal:
 
         :type tmp_path: Path
         """
-        import hashlib
-        import hmac as _hmac
-
         # "noëud" — 5 Unicode chars, 6 UTF-8 bytes (ë = U+00EB encodes to 2 bytes).
         non_ascii_node: str = "noëud"
         seq_file: str = str(tmp_path / ".sovereign_sequence")
@@ -486,11 +483,14 @@ class TestEnvelopeSeal:
 
         # Independently reconstruct the expected HMAC preimage using byte-count
         # prefix semantics (node, timestamp, and algo) and verify the sealed
-        # signature matches.
+        # signature matches.  Signs via the public SoftwareFallbackDriver API
+        # rather than accessing the private _MOCK_KEY bytes directly.
         time_bytes: bytes = _TIMESTAMP.encode("utf-8")
         algo_str: str = "hmac-sha256"
         algo_b: bytes = algo_str.encode("utf-8")
-        canonical: str = json.dumps(_PAYLOAD, separators=(",", ":"), sort_keys=True)
+        canonical: str = json.dumps(
+            _PAYLOAD, separators=(",", ":"), sort_keys=True, ensure_ascii=False
+        )
         expected_preimage: bytes = (
             f"1|{len(node_bytes)}:{non_ascii_node}"
             f"|{len(time_bytes)}:{_TIMESTAMP}"
@@ -498,12 +498,10 @@ class TestEnvelopeSeal:
             f"|{len(algo_b)}:{algo_str}"
             f"|{canonical}"
         ).encode("utf-8")
+        ref_driver = SoftwareFallbackDriver(SoftwareFallbackDriver.MOCK_KEY_SENTINEL)
+        ref_driver.initialize_hardware()
         expected_sig: str = binascii.hexlify(
-            _hmac.new(
-                SoftwareFallbackDriver._MOCK_KEY,
-                expected_preimage,
-                hashlib.sha256,
-            ).digest()
+            ref_driver.sign(expected_preimage)
         ).decode("utf-8")
         assert parsed["s"] == expected_sig
 
@@ -554,17 +552,22 @@ class TestEnvelopeSeal:
 
         :type tmp_path: Path
         """
-        import hashlib
-        import hmac as _hmac
         from sovereign_sensor.interface import SovereignCryptoDriver
 
-        _KEY: bytes = SoftwareFallbackDriver._MOCK_KEY
-
         class _FixedAlgoDriver(SovereignCryptoDriver):
-            """Minimal mock driver with a configurable algorithm identifier."""
+            """Minimal mock driver with a configurable algorithm identifier.
+
+            Delegates sign() to a SoftwareFallbackDriver initialized with
+            MOCK_KEY_SENTINEL so the key bytes are never accessed directly
+            via the private _MOCK_KEY attribute.
+            """
 
             def __init__(self, algo: str) -> None:
                 self._algo: str = algo
+                self._ref: SoftwareFallbackDriver = SoftwareFallbackDriver(
+                    SoftwareFallbackDriver.MOCK_KEY_SENTINEL
+                )
+                self._ref.initialize_hardware()
 
             def initialize_hardware(self) -> None:
                 pass
@@ -573,7 +576,7 @@ class TestEnvelopeSeal:
                 return self._algo
 
             def sign(self, payload: bytes) -> bytes:
-                return _hmac.new(_KEY, payload, hashlib.sha256).digest()
+                return self._ref.sign(payload)
 
         seq_a: str = str(tmp_path / "seq_a")
         seq_b: str = str(tmp_path / "seq_b")
@@ -596,10 +599,14 @@ class TestEnvelopeSeal:
 
         # Independently reconstruct the expected preimage for envelope_a and confirm
         # the sealed signature matches, proving algo_prefix semantics are in force.
+        # Signs via the public SoftwareFallbackDriver API rather than accessing the
+        # private _MOCK_KEY bytes directly.
         node_bytes: bytes = _NODE_ID.encode("utf-8")
         time_bytes: bytes = _TIMESTAMP.encode("utf-8")
         algo_bytes_a: bytes = algo_a.encode("utf-8")
-        canonical: str = json.dumps(_PAYLOAD, separators=(",", ":"), sort_keys=True)
+        canonical: str = json.dumps(
+            _PAYLOAD, separators=(",", ":"), sort_keys=True, ensure_ascii=False
+        )
         expected_preimage: bytes = (
             f"1|{len(node_bytes)}:{_NODE_ID}"
             f"|{len(time_bytes)}:{_TIMESTAMP}"
@@ -607,8 +614,10 @@ class TestEnvelopeSeal:
             f"|{len(algo_bytes_a)}:{algo_a}"
             f"|{canonical}"
         ).encode("utf-8")
+        ref_driver = SoftwareFallbackDriver(SoftwareFallbackDriver.MOCK_KEY_SENTINEL)
+        ref_driver.initialize_hardware()
         expected_sig: str = binascii.hexlify(
-            _hmac.new(_KEY, expected_preimage, hashlib.sha256).digest()
+            ref_driver.sign(expected_preimage)
         ).decode("utf-8")
         assert sig_a == expected_sig
 
@@ -640,3 +649,42 @@ class TestEnvelopeSeal:
 
         parsed = json.loads(envelope_after.seal(_TIMESTAMP, _PAYLOAD))
         assert parsed["q"] == 4
+
+    def test_seal_unicode_payload_serializes_without_ascii_escaping(
+        self, tmp_path: Path
+    ) -> None:
+        """Payloads containing non-ASCII Unicode characters must seal without error
+        and serialize as raw UTF-8 bytes rather than ``\\uXXXX`` escape sequences.
+
+        ``ensure_ascii=False`` on both the preimage canonical JSON and the wire
+        frame JSON guarantees byte-identical output across CPython and bare-metal
+        MicroPython for any Unicode payload.  Without the flag, CPython's
+        ``json.dumps`` emits ``\\uXXXX`` escape sequences for characters outside
+        U+007F while some MicroPython builds emit raw UTF-8, producing diverging
+        preimage bytes and broken cross-platform signature verification.  This test
+        uses high-plane Unicode characters (``ø`` U+00F8, ``Ω`` U+03A9) to confirm
+        both the payload round-trip and the wire encoding are correct.
+
+        :type tmp_path: Path
+        """
+        unicode_payload: dict = {"sensor": "Nordøst-Ventil", "data": "Ω-Value"}
+        envelope = bootstrap_sensor_node(
+            _NODE_ID, _KEY_PATH, sequence_file=str(tmp_path / ".sovereign_sequence")
+        )
+        wire: bytes = envelope.seal(_TIMESTAMP, unicode_payload)
+        parsed: dict = json.loads(wire)
+
+        # Payload round-trips without mutation.
+        assert parsed["d"] == unicode_payload
+        # Signature is a valid 64-char HMAC-SHA256 hex digest.
+        assert len(parsed["s"]) == 64
+
+        # ensure_ascii=False serializes non-ASCII characters as raw UTF-8 bytes.
+        # "Ω" (U+03A9) → b'\xce\xa9' in UTF-8; with ensure_ascii=True it appears
+        # as the six-byte escape sequence "\\u03a9".  "ø" (U+00F8) → b'\xc3\xb8'
+        # raw vs "\\u00f8" escaped.  Assert the raw characters are present in the
+        # wire bytes and that no unicode escape sequences were emitted.
+        wire_text: str = wire.decode("utf-8")
+        assert "\\u" not in wire_text
+        assert "Ω" in wire_text
+        assert "ø" in wire_text
