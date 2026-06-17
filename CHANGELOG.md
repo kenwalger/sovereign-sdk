@@ -67,8 +67,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `NotImplementedError`; full register-level engineering is deferred to the next sprint.
     This driver must not be wired into any production custody chain in its current state.
 
-  - **`packages/sovereign-sensor/tests/test_sensor.py`** — 29 test cases across three classes
-    (`TestBootstrap`: 4 cases; `TestDriverGuard`: 3 cases; `TestEnvelopeSeal`: 22 cases)
+  - **`packages/sovereign-sensor/tests/test_sensor.py`** — 30 test cases across three classes
+    (`TestBootstrap`: 4 cases; `TestDriverGuard`: 3 cases; `TestEnvelopeSeal`: 23 cases)
     verifying: platform auto-detection confirmed via the public `algorithm()` contract (sealed
     `"alg"` field equals `"hmac-sha256"`) rather than private attribute access; driver
     initialization confirmed via successful `seal()` completion; bootstrap falls back to
@@ -101,8 +101,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     counter correctly resumes from the persisted VFS value after a simulated hardware reboot
     (replay-protection continuity); length-prefixed preimage delimiter injection immunity —
     `node_id="abc|def"` with `timestamp="ghi"` produces a distinct HMAC from `node_id="abc"`
-    with `timestamp="def|ghi"`, confirming cross-identity preimage collision is eliminated.
-    **29 passed, 0 failed.**
+    with `timestamp="def|ghi"`, confirming cross-identity preimage collision is eliminated;
+    non-ASCII node_id byte-length prefix integrity — `"noëud"` (5 Unicode chars, 6 UTF-8 bytes)
+    seals correctly and the sealed signature matches an independently computed HMAC over the
+    byte-count-prefixed preimage, proving that character-count semantics are rejected and
+    cross-platform field boundary deserialization is correct on all MicroPython targets.
+    **30 passed, 0 failed.**
 
 - **Phase 8 — `sovereign-ledger` immutable provenance engine** (new workspace member
   `packages/sovereign-ledger/`): Introduces a local-first, SQLite-backed, append-only
@@ -193,6 +197,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   consistency.
 
 ### Changed
+
+- **`SovereignEnvelope.seal()` — preimage length prefix changed from character count to UTF-8 byte count** (`envelope.py`):
+  `node_id` and `timestamp` are now encoded to UTF-8 byte arrays independently before the
+  length-prefix is computed.  The preimage is assembled from raw byte slices rather than from
+  a single f-string that is encoded afterward:
+  `f"1|{len(node_bytes)}:".encode() + node_bytes + b"|" + f"{len(time_bytes)}:".encode() + time_bytes + ...`.
+  Without this change, any `node_id` or `timestamp` containing multi-byte UTF-8 characters
+  (characters outside U+007F) would produce a prefix reflecting the Unicode character count
+  rather than the UTF-8 byte count.  A cross-platform receiver — including constrained
+  MicroPython targets that may count string length in bytes — would then parse field
+  boundaries at the wrong offset, silently reconstructing a different preimage and rejecting
+  legitimate frames.  For ASCII-only inputs `len(s) == len(s.encode("utf-8"))`, so all
+  existing tests remain byte-for-byte identical.
+
+- **`packages/sovereign-sensor/pyproject.toml` — Trove classifiers corrected to valid PyPI identifiers**:
+  `"Topic :: Embedded Systems"` is not a registered Trove classifier and would cause `twine
+  check` to fail at release time.  It is replaced with `"Topic :: System :: Hardware"`, which
+  is a registered classifier in the PyPI taxonomy.  `"Programming Language :: Python :: 3"`,
+  `"Programming Language :: Python :: 3 :: Only"`, and
+  `"Programming Language :: Python :: Implementation :: MicroPython"` are added to correctly
+  signal the package's Python version floor and MicroPython target runtime to tooling and
+  packaging indexes.
 
 - **`SoftwareFallbackDriver.initialize_hardware()` — empty key file guard added** (`drivers/software_fallback.py`):
   After a successful `open()` of the key file, the read bytes are now stored in a local

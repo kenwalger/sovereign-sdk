@@ -80,13 +80,20 @@ class SovereignEnvelope:
         3. Payload keys are alphabetically sorted and the dict is serialized to
            minified JSON with no inter-token whitespace, guaranteeing an identical
            preimage regardless of key insertion order on any MicroPython target.
-        4. A versioned, hardened preimage string is constructed as
-           ``1|{len(node_id)}:{node_id}|{len(timestamp)}:{timestamp}|sequence|algorithm|canonical_payload``.
-           Length-prefixing ``node_id`` and ``timestamp`` before joining with ``|``
-           eliminates delimiter injection: without prefixes, ``node="a|b"`` with
-           ``ts="c"`` and ``node="a"`` with ``ts="b|c"`` collapse to the same
-           pipe-joined string, enabling cross-identity signature reuse.  Length
-           prefixes make each field boundary unambiguous regardless of field content.
+        4. ``node_id`` and ``timestamp`` are independently encoded to UTF-8 byte
+           arrays.  Each is prefixed with its UTF-8 byte count (not its Unicode
+           character count) and the resulting byte slices are concatenated into the
+           versioned preimage:
+           ``1|{len(node_bytes)}:{node_id}|{len(time_bytes)}:{timestamp}|sequence|algorithm|canonical_payload``.
+           Byte-count prefixes close two attack surfaces simultaneously: (a) delimiter
+           injection — without prefixes, ``node="a|b"`` with ``ts="c"`` and
+           ``node="a"`` with ``ts="b|c"`` collapse to identical pipe-joined bytes,
+           enabling cross-identity signature reuse; (b) multi-byte encoding ambiguity —
+           for any ``node_id`` containing characters outside U+007F,
+           ``len(node_id) < len(node_id.encode("utf-8"))``, so a receiver using
+           character-count semantics would parse field boundaries at the wrong byte
+           offset.  Byte-count prefixes guarantee unambiguous deserialization on every
+           platform, including constrained MicroPython targets.
         5. Preimage bytes traverse the driver's signing boundary, returning
            raw binary output from the underlying cryptographic primitive.
         6. Raw signature bytes are hex-encoded via ``binascii.hexlify``,
@@ -118,11 +125,15 @@ class SovereignEnvelope:
             pass  # Degrade gracefully to RAM-only sequence tracking.
         algo: str = self._driver.algorithm()
         canonical: str = json.dumps(payload, separators=(",", ":"), sort_keys=True)
-        node_prefix: str = f"{len(self._node_id)}:{self._node_id}"
-        time_prefix: str = f"{len(timestamp)}:{timestamp}"
+        node_bytes: bytes = self._node_id.encode("utf-8")
+        time_bytes: bytes = timestamp.encode("utf-8")
         preimage: bytes = (
-            f"1|{node_prefix}|{time_prefix}|{self._sequence}|{algo}|{canonical}"
-            .encode("utf-8")
+            f"1|{len(node_bytes)}:".encode("utf-8")
+            + node_bytes
+            + b"|"
+            + f"{len(time_bytes)}:".encode("utf-8")
+            + time_bytes
+            + f"|{self._sequence}|{algo}|{canonical}".encode("utf-8")
         )
         sig_bytes: bytes = self._driver.sign(preimage)
         signature_string: str = binascii.hexlify(sig_bytes).decode("utf-8")

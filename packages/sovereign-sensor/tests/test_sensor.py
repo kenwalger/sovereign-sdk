@@ -25,6 +25,7 @@ Invariants verified across every test:
 - Every test uses an isolated tmp_path sequence file so no test run pollutes
   the workspace VFS state or interferes with concurrent test execution.
 """
+import binascii
 import json
 from pathlib import Path
 
@@ -418,6 +419,65 @@ class TestEnvelopeSeal:
         envelope = SovereignEnvelope(_NODE_ID, driver, sequence_file=str(seq_file))
 
         assert envelope._sequence == 0
+
+    def test_seal_non_ascii_node_id_uses_utf8_byte_length_prefix(
+        self, tmp_path: Path
+    ) -> None:
+        """Preimage length prefixes must reflect UTF-8 byte counts, not Unicode character counts.
+
+        A ``node_id`` containing multi-byte UTF-8 characters has
+        ``len(node_id) < len(node_id.encode("utf-8"))``.  Using character count as
+        the length prefix would cause any cross-platform receiver — including
+        constrained MicroPython targets with differing string-length semantics — to
+        parse field boundaries at the wrong byte offset.  This test encodes a
+        non-ASCII ``node_id`` independently, constructs the expected HMAC preimage
+        with the byte-count prefix, and asserts the sealed signature matches exactly.
+        If the implementation uses character count instead of byte count, the
+        reconstructed preimage will differ and the assertion will fail.
+
+        :type tmp_path: Path
+        """
+        import hashlib
+        import hmac as _hmac
+
+        # "noëud" — 5 Unicode chars, 6 UTF-8 bytes (ë = U+00EB encodes to 2 bytes).
+        non_ascii_node: str = "noëud"
+        seq_file: str = str(tmp_path / ".sovereign_sequence")
+
+        driver = SoftwareFallbackDriver(_KEY_PATH)
+        driver.initialize_hardware()
+        envelope = SovereignEnvelope(non_ascii_node, driver, sequence_file=seq_file)
+
+        wire: bytes = envelope.seal(_TIMESTAMP, _PAYLOAD)
+        parsed: dict = json.loads(wire)
+
+        assert parsed["n"] == non_ascii_node
+        assert len(parsed["s"]) == 64
+
+        # Confirm the chosen node_id genuinely has byte count > char count.
+        node_bytes: bytes = non_ascii_node.encode("utf-8")
+        assert len(node_bytes) > len(non_ascii_node)
+
+        # Independently reconstruct the expected HMAC preimage using byte-count
+        # prefix semantics and verify the sealed signature matches.
+        time_bytes: bytes = _TIMESTAMP.encode("utf-8")
+        canonical: str = json.dumps(_PAYLOAD, separators=(",", ":"), sort_keys=True)
+        expected_preimage: bytes = (
+            f"1|{len(node_bytes)}:".encode("utf-8")
+            + node_bytes
+            + b"|"
+            + f"{len(time_bytes)}:".encode("utf-8")
+            + time_bytes
+            + f"|1|hmac-sha256|{canonical}".encode("utf-8")
+        )
+        expected_sig: str = binascii.hexlify(
+            _hmac.new(
+                SoftwareFallbackDriver._MOCK_KEY,
+                expected_preimage,
+                hashlib.sha256,
+            ).digest()
+        ).decode("utf-8")
+        assert parsed["s"] == expected_sig
 
     def test_preimage_delimiter_injection_is_immunized(self, tmp_path: Path) -> None:
         """Length-prefixed preimage fields must produce distinct signatures for inputs

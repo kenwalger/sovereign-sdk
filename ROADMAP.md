@@ -352,11 +352,14 @@ wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 2
   `except OSError` catch degrades gracefully to RAM-only tracking without masking structural defects;
   (2) algorithm identifier queried from driver; (3) payload keys alphabetically sorted and serialized
   via `json.dumps(..., separators=(',', ':'), sort_keys=True)`, guaranteeing identical preimage bytes
-  regardless of dict key insertion order on any MicroPython target; (4) versioned preimage constructed
-  as `1|{len(node_id)}:{node_id}|{len(timestamp)}:{timestamp}|sequence|algorithm|canonical_payload`,
-  length-prefixing `node_id` and `timestamp` to close the delimiter injection surface where naive
-  pipe-joining allows two distinct `(node_id, timestamp)` pairs to collapse to the same preimage
-  string, enabling cross-identity signature reuse; (5) preimage signed by driver
+  regardless of dict key insertion order on any MicroPython target; (4) `node_id` and
+  `timestamp` independently encoded to UTF-8 byte arrays, each prefixed with its UTF-8 byte
+  count (not Unicode character count), and concatenated into the versioned preimage
+  `1|{len(node_bytes)}:{node_id}|{len(time_bytes)}:{timestamp}|sequence|algorithm|canonical_payload`;
+  byte-count prefixes close delimiter injection (two `(node_id, timestamp)` pairs with the
+  same naive pipe-join produce identical preimage bytes without them) and multi-byte encoding
+  ambiguity (a receiver using character-count semantics parses field boundaries at the wrong
+  byte offset for any node_id with characters outside U+007F); (5) preimage signed by driver
   returning raw binary bytes; (6) signature hex-encoded via `binascii.hexlify`; (7) all fields
   serialized into a 7-key ultra-minified JSON frame `{"v", "n", "t", "q", "alg", "d", "s"}` via
   `json.dumps(..., sort_keys=True)`, freezing the alphabetical key sequence in the raw
@@ -388,9 +391,11 @@ wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 2
   and this driver must not be wired into any production custody chain in its current state.
 * [x] `packages/sovereign-sensor/pyproject.toml` — zero runtime dependencies; targets Python 3.12
   for desktop test compatibility; restricts internal library code to standard MicroPython built-ins
-  (`json`, `sys`, `machine`, `hashlib`, `binascii`).
-* [x] 29-case desktop validation test suite (`tests/test_sensor.py`) across three classes
-  (`TestBootstrap`: 4 cases, `TestDriverGuard`: 3 cases, `TestEnvelopeSeal`: 22 cases) verifying
+  (`json`, `sys`, `machine`, `hashlib`, `binascii`); Trove classifiers corrected to valid PyPI
+  identifiers: `"Programming Language :: Python :: 3"`, `"Programming Language :: Python :: 3 :: Only"`,
+  `"Programming Language :: Python :: Implementation :: MicroPython"`, `"Topic :: System :: Hardware"`.
+* [x] 30-case desktop validation test suite (`tests/test_sensor.py`) across three classes
+  (`TestBootstrap`: 4 cases, `TestDriverGuard`: 3 cases, `TestEnvelopeSeal`: 23 cases) verifying
   platform auto-detection via public `algorithm()` contract, driver initialization confirmation,
   bootstrap falls back to `SoftwareFallbackDriver` (with warning) when hardware driver raises
   `NotImplementedError` (simulated via `sys.platform` patch to `"esp32"`), `sign()` raises
@@ -413,7 +418,11 @@ wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 2
   persisted VFS value after a simulated hardware reboot (replay-protection continuity across
   power cycles), and length-prefixed preimage delimiter injection immunity — `("abc|def", "ghi")`
   and `("abc", "def|ghi")` are verified to produce distinct HMAC signatures, confirming that
-  cross-identity preimage collision is closed. **29 passed, 0 failed.**
+  cross-identity preimage collision is closed; non-ASCII `node_id` byte-length prefix
+  integrity — `"noëud"` (5 chars, 6 UTF-8 bytes) produces a sealed signature that exactly
+  matches an independently computed HMAC over the byte-count-prefixed preimage, confirming
+  that character-count semantics are rejected and cross-platform field boundary parsing is
+  correct on all targets. **30 passed, 0 failed.**
 
 ---
 

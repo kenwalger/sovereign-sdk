@@ -12,10 +12,13 @@ license = { text = "MIT" }
 dependencies = []
 classifiers = [
     "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: Implementation :: MicroPython",
     "Intended Audience :: Developers",
     "Topic :: Security",
-    "Topic :: Embedded Systems",
+    "Topic :: System :: Hardware",
     "Topic :: Software Development :: Libraries",
 ]
 
