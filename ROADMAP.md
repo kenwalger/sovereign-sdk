@@ -333,7 +333,7 @@ from sovereign_sensor import bootstrap_sensor_node
 # Auto-selects hardware or software crypto driver at runtime
 envelope = bootstrap_sensor_node("node-temperature-01", "/flash/keys/node.key")
 wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 21.4})
-# → b'{"v":1,"n":"node-temperature-01","t":"2026-06-16T00:00:00Z","q":1,"alg":"hmac-sha256","d":{"sensor":"temp","value":21.4},"s":"<hex-sig>"}'
+# → b'{"alg":"hmac-sha256","d":{"sensor":"temp","value":21.4},"n":"node-temperature-01","q":1,"s":"<hex-sig>","t":"2026-06-16T00:00:00Z","v":1}'
 ```
 
 **Delivered:**
@@ -405,7 +405,7 @@ wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 2
   and this driver must not be wired into any production custody chain in its current state.
 * [x] `packages/sovereign-sensor/pyproject.toml` — zero runtime dependencies; targets Python 3.12
   for desktop test compatibility; restricts internal library code to standard MicroPython built-ins
-  (`json`, `sys`, `machine`, `hashlib`, `binascii`); Trove classifiers corrected to valid PyPI
+  (`json`, `sys`, `machine`, `hashlib`, `hmac`, `binascii`); Trove classifiers corrected to valid PyPI
   identifiers: `"Programming Language :: Python :: 3"`, `"Programming Language :: Python :: 3 :: Only"`,
   `"Programming Language :: Python :: Implementation :: MicroPython"`, `"Topic :: System :: Hardware"`.
 * [x] `packages/sovereign-sensor/README.md` — distribution documentation asset satisfying the
@@ -440,8 +440,8 @@ wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 2
   matches an independently computed HMAC over the byte-count-prefixed preimage, confirming
   that character-count semantics are rejected and cross-platform field boundary parsing is
   correct on all targets; negative sequence counter clamped to zero — `"-42"` written to
-  the sequence file produces `_sequence == 0` after construction and `q=1` on the first
-  `seal()`, confirming the `q < 0` invariant violation is closed; algorithm identifier
+  the sequence file produces `q=1` on the first `seal()`, confirming the `q < 0`
+  invariant violation is closed; algorithm identifier
   byte-count-prefix delimiter injection immunity — two drivers returning `"hmac|sha256"` and
   `"hmac"` respectively produce distinct HMAC signatures, confirming that a pipe character
   embedded in the algorithm string cannot collapse adjacent preimage fields; an independently

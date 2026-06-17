@@ -406,8 +406,10 @@ class TestEnvelopeSeal:
 
         Simulates a power interruption that truncated the VFS sequence file to 0 bytes
         before any counter digits were flushed.  The envelope constructor must catch the
-        resulting ``ValueError`` from ``int("".strip())``, print a diagnostic, and silently
-        reset ``_sequence`` to zero so device initialization continues without raising.
+        resulting ``ValueError`` from ``int("".strip())``, print a diagnostic, and reset
+        the sequence counter so the first ``seal()`` call produces ``q=1``, proving that
+        device initialization continues without raising and the custody chain starts from a
+        clean monotonic base.
 
         :type tmp_path: Path
         """
@@ -418,7 +420,8 @@ class TestEnvelopeSeal:
         driver.initialize_hardware()
         envelope = SovereignEnvelope(_NODE_ID, driver, sequence_file=str(seq_file))
 
-        assert envelope._sequence == 0
+        parsed = json.loads(envelope.seal(_TIMESTAMP, _PAYLOAD))
+        assert parsed["q"] == 1
 
     def test_envelope_clamps_negative_stored_sequence_to_zero(
         self, tmp_path: Path
@@ -442,7 +445,6 @@ class TestEnvelopeSeal:
         driver.initialize_hardware()
         envelope = SovereignEnvelope(_NODE_ID, driver, sequence_file=str(seq_file))
 
-        assert envelope._sequence == 0
         parsed = json.loads(envelope.seal(_TIMESTAMP, _PAYLOAD))
         assert parsed["q"] == 1
 
