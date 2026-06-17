@@ -7,7 +7,7 @@ name = "sovereign-sensor"
 version = "0.1.0"
 description = "Bare-metal Write-Side Custody enforcement for MicroPython sensor nodes with hardware crypto abstraction"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12" # Enforces CPython 3.12+ for desktop development/CI test suites; package library code remains strictly bare-metal MicroPython compatible.
 license = { text = "MIT" }
 dependencies = []
 classifiers = [

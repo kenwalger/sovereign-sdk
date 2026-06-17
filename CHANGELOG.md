@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sensor observations into versioned, tamper-evident, minified JSON transmission envelopes with
   monotonic replay protection at the exact point of data genesis on bare-metal microcontrollers
   (ESP32, Raspberry Pi Pico).  Zero runtime dependencies; internal library code restricted to
-  standard MicroPython built-ins (`json`, `sys`, `machine`, `hashlib`, `binascii`).
+  standard MicroPython built-ins (`json`, `sys`, `machine`, `hashlib`, `hmac`, `binascii`).
 
   - **`SovereignCryptoDriver`** (`interface.py`): Lightweight HAL base class with explicit
     `NotImplementedError` stubs for `initialize_hardware() -> None`,
@@ -27,20 +27,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `".sovereign_sequence"`) and restores any previously persisted counter from that file on
     construction, enabling the monotonic sequence to resume across hardware reboots.  Seals
     observations in a seven-step deterministic pipeline: (1) per-instance monotonic sequence
-    counter incremented and immediately persisted to the configured VFS path, binding each frame
-    to a unique emission position for replay protection across power cycles (degrades gracefully
-    to RAM-only tracking on VFS write failure); (2) algorithm identifier queried from driver via
-    `algorithm()`; (3) payload keys alphabetically sorted and serialized via
-    `json.dumps(..., separators=(',', ':'), sort_keys=True)`, guaranteeing a byte-identical
-    preimage regardless of dict key insertion order across bare-metal MicroPython targets and
-    desktop gateways; (4) versioned preimage constructed as `1|node_id|timestamp|sequence|algorithm|canonical_payload`,
-    binding protocol version, identity, time, ordering, and algorithm into a single signed surface;
-    (5) preimage dispatched across the driver's `sign()` boundary, returning raw binary bytes;
-    (6) raw bytes hex-encoded via `binascii.hexlify`, guaranteeing all values `0x00–0xFF` map
-    safely without `UnicodeDecodeError` on MicroPython silicon; (7) seven-key frame
-    `{"v":1, "n", "t", "q", "alg", "d", "s"}` serialized to ultra-minified UTF-8 JSON bytes via
-    `json.dumps(..., sort_keys=True)`, freezing the alphabetical key sequence in the raw
-    transmission bytes independently of MicroPython allocator-driven insertion order.
+    counter computed transiently as `_sequence + 1` and bound into the preimage; the in-memory
+    counter and VFS sequence file are not advanced until `sign()` returns successfully, so a
+    `sign()` failure never consumes a sequence position or introduces a gap in the on-disk custody
+    timeline (degrades gracefully to RAM-only tracking on VFS write failure); (2) algorithm
+    identifier queried from driver via `algorithm()`; (3) payload keys alphabetically sorted and
+    serialized via `json.dumps(..., separators=(',', ':'), sort_keys=True, ensure_ascii=False)`,
+    guaranteeing byte-identical raw UTF-8 preimage bytes regardless of dict key insertion order or
+    non-ASCII payload characters across bare-metal MicroPython targets and desktop gateways;
+    (4) versioned preimage constructed as
+    `1|{len(node_bytes)}:{node_id}|{len(time_bytes)}:{timestamp}|{seq}|{len(algo_bytes)}:{algorithm}|{canonical}`,
+    where each variable-length field is prefixed with its UTF-8 byte count (not Unicode character
+    count), binding protocol version, identity, time, ordering, and algorithm into a single
+    unambiguous signed surface with no delimiter injection surface; (5) preimage dispatched across
+    the driver's `sign()` boundary, returning raw binary bytes; (6) raw bytes hex-encoded via
+    `binascii.hexlify`, guaranteeing all values `0x00–0xFF` map safely without `UnicodeDecodeError`
+    on MicroPython silicon; (7) seven-key frame `{"v":1, "n", "t", "q", "alg", "d", "s"}`
+    serialized to ultra-minified UTF-8 JSON bytes via
+    `json.dumps(..., sort_keys=True, ensure_ascii=False)`, freezing the alphabetical key sequence
+    and enforcing raw UTF-8 wire encoding independently of MicroPython allocator-driven insertion
+    order.
   - **`bootstrap_sensor_node(node_id, private_key_path, sequence_file) -> SovereignEnvelope`**
     (`__init__.py`): Inspects `sys.platform.lower()` at runtime; routes to `ESP32HardwareDriver`
     when `"esp32"` is present in the platform string, otherwise binds `SoftwareFallbackDriver`.

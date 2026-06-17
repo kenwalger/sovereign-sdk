@@ -36,7 +36,7 @@ from sovereign_sensor.drivers.software_fallback import SoftwareFallbackDriver
 
 
 _NODE_ID = "node-sensor-001"
-_KEY_PATH = "/mock/test_gateway.key"  # SoftwareFallbackDriver.MOCK_KEY_SENTINEL
+_KEY_PATH = SoftwareFallbackDriver.MOCK_KEY_SENTINEL
 _TIMESTAMP = "2026-06-16T00:00:00Z"
 _PAYLOAD: dict = {"sensor": "temperature", "value": 42, "unit": "C"}
 
