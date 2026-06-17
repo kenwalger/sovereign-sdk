@@ -346,8 +346,9 @@ wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 2
   construction, enabling the monotonic sequence to resume across hardware reboots; a `ValueError`
   raised by `int(data.strip())` — the signature of a truncated 0-byte file left by a mid-write
   power interruption — is caught, a diagnostic is printed, and the counter resets to 0 so device
-  initialization completes rather than aborting; `OSError` on file open degrades gracefully without
-  raising; seals observations in a seven-step deterministic pipeline: (1) monotonic sequence counter
+  initialization completes rather than aborting; a successfully parsed negative integer is clamped
+  to 0, preventing an adversarially written or filesystem-corrupted negative counter from producing
+  `q < 0` wire frames; `OSError` on file open degrades gracefully without raising; seals observations in a seven-step deterministic pipeline: (1) monotonic sequence counter
   incremented and immediately persisted to the configured VFS path via a `with`-block write whose
   `except OSError` catch degrades gracefully to RAM-only tracking without masking structural defects;
   (2) algorithm identifier queried from driver; (3) payload keys alphabetically sorted and serialized
@@ -394,8 +395,11 @@ wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 2
   (`json`, `sys`, `machine`, `hashlib`, `binascii`); Trove classifiers corrected to valid PyPI
   identifiers: `"Programming Language :: Python :: 3"`, `"Programming Language :: Python :: 3 :: Only"`,
   `"Programming Language :: Python :: Implementation :: MicroPython"`, `"Topic :: System :: Hardware"`.
-* [x] 30-case desktop validation test suite (`tests/test_sensor.py`) across three classes
-  (`TestBootstrap`: 4 cases, `TestDriverGuard`: 3 cases, `TestEnvelopeSeal`: 23 cases) verifying
+* [x] `packages/sovereign-sensor/README.md` — distribution documentation asset satisfying the
+  `pyproject.toml` `readme` field; includes architectural overview, HAL driver table,
+  7-step sealing pipeline description, minimal usage examples, and invariants table.
+* [x] 31-case desktop validation test suite (`tests/test_sensor.py`) across three classes
+  (`TestBootstrap`: 4 cases, `TestDriverGuard`: 3 cases, `TestEnvelopeSeal`: 24 cases) verifying
   platform auto-detection via public `algorithm()` contract, driver initialization confirmation,
   bootstrap falls back to `SoftwareFallbackDriver` (with warning) when hardware driver raises
   `NotImplementedError` (simulated via `sys.platform` patch to `"esp32"`), `sign()` raises
@@ -422,7 +426,9 @@ wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 2
   integrity — `"noëud"` (5 chars, 6 UTF-8 bytes) produces a sealed signature that exactly
   matches an independently computed HMAC over the byte-count-prefixed preimage, confirming
   that character-count semantics are rejected and cross-platform field boundary parsing is
-  correct on all targets. **30 passed, 0 failed.**
+  correct on all targets; negative sequence counter clamped to zero — `"-42"` written to
+  the sequence file produces `_sequence == 0` after construction and `q=1` on the first
+  `seal()`, confirming the `q < 0` invariant violation is closed. **31 passed, 0 failed.**
 
 ---
 

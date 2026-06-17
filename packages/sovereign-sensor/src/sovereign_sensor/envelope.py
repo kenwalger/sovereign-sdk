@@ -26,6 +26,9 @@ class SovereignEnvelope:
     power interruption that truncated the flash page before any digits were
     committed — are caught as ``ValueError``, a diagnostic is printed, and the
     counter resets to zero so device initialization completes rather than aborting.
+    A successfully parsed integer value is additionally clamped to zero if negative,
+    preventing an adversarially written or filesystem-corrupted negative counter from
+    producing ``q < 0`` wire frames that violate the monotonic custody invariant.
 
     :param node_id: Immutable identifier for the originating sensor node.
     :type node_id: str
@@ -64,6 +67,11 @@ class SovereignEnvelope:
                     "resetting counter to 0"
                 )
                 self._sequence = 0
+            else:
+                # Clamp adversarially written or filesystem-corrupted negative values
+                # to zero so the monotonic q ≥ 1 invariant is preserved on the first seal().
+                if self._sequence < 0:
+                    self._sequence = 0
 
     def seal(self, timestamp: str, payload: dict) -> bytes:
         """Canonicalize, sign, and serialize a sensor observation into a wire envelope.

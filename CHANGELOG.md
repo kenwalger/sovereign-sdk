@@ -67,8 +67,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `NotImplementedError`; full register-level engineering is deferred to the next sprint.
     This driver must not be wired into any production custody chain in its current state.
 
-  - **`packages/sovereign-sensor/tests/test_sensor.py`** — 30 test cases across three classes
-    (`TestBootstrap`: 4 cases; `TestDriverGuard`: 3 cases; `TestEnvelopeSeal`: 23 cases)
+  - **`packages/sovereign-sensor/README.md`** — new distribution documentation asset satisfying
+    the `pyproject.toml` `readme` field; includes a HAL architecture section, a driver
+    comparison table, the 7-step sealing pipeline with preimage format specification, minimal
+    `bootstrap_sensor_node()` usage examples for both production and desktop/CI paths, and a
+    package invariants table.
+
+  - **`packages/sovereign-sensor/tests/test_sensor.py`** — 31 test cases across three classes
+    (`TestBootstrap`: 4 cases; `TestDriverGuard`: 3 cases; `TestEnvelopeSeal`: 24 cases)
     verifying: platform auto-detection confirmed via the public `algorithm()` contract (sealed
     `"alg"` field equals `"hmac-sha256"`) rather than private attribute access; driver
     initialization confirmed via successful `seal()` completion; bootstrap falls back to
@@ -105,8 +111,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     non-ASCII node_id byte-length prefix integrity — `"noëud"` (5 Unicode chars, 6 UTF-8 bytes)
     seals correctly and the sealed signature matches an independently computed HMAC over the
     byte-count-prefixed preimage, proving that character-count semantics are rejected and
-    cross-platform field boundary deserialization is correct on all MicroPython targets.
-    **30 passed, 0 failed.**
+    cross-platform field boundary deserialization is correct on all MicroPython targets;
+    negative sequence counter clamp — `"-42"` written to the sequence file produces
+    `_sequence == 0` after construction and `q=1` on the first `seal()`, confirming that
+    adversarially written or filesystem-corrupted negative counter values are neutralized
+    before the monotonic custody chain begins.
+    **31 passed, 0 failed.**
 
 - **Phase 8 — `sovereign-ledger` immutable provenance engine** (new workspace member
   `packages/sovereign-ledger/`): Introduces a local-first, SQLite-backed, append-only
@@ -197,6 +207,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   consistency.
 
 ### Changed
+
+- **`SovereignEnvelope.__init__()` — negative sequence counter clamped to zero** (`envelope.py`):
+  After a successfully parsed integer is assigned to `self._sequence`, an `else` branch on the
+  `try/except ValueError` block checks `if self._sequence < 0` and resets it to zero.  A
+  negative value stored in the sequence file — whether written by an adversary with VFS write
+  access or produced by a filesystem fault that corrupted a flash page with a plausible-looking
+  negative decimal string — would cause the first `seal()` call to emit `q=0` (after the
+  pre-increment `+= 1`), violating the `q ≥ 1` monotonic custody invariant and potentially
+  confusing downstream consumers.  The clamp is placed in an `else` clause so it only executes
+  on successfully parsed integers; the `ValueError` path already resets to zero independently.
 
 - **`SovereignEnvelope.seal()` — preimage length prefix changed from character count to UTF-8 byte count** (`envelope.py`):
   `node_id` and `timestamp` are now encoded to UTF-8 byte arrays independently before the

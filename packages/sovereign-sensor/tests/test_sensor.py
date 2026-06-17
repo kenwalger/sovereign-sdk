@@ -420,6 +420,32 @@ class TestEnvelopeSeal:
 
         assert envelope._sequence == 0
 
+    def test_envelope_clamps_negative_stored_sequence_to_zero(
+        self, tmp_path: Path
+    ) -> None:
+        """A negative integer written to the sequence file must be clamped to zero.
+
+        An adversary with write access to the VFS — or a filesystem fault that corrupts
+        a flash page with a plausible-looking negative decimal string — could cause the
+        envelope to restore a negative counter, producing ``q < 0`` wire frames that
+        violate the monotonic custody invariant and may confuse downstream consumers
+        that expect strictly positive sequence positions.  The constructor must clamp
+        any successfully parsed negative value to zero so the first ``seal()`` call
+        always emits ``q=1`` and the invariant is preserved.
+
+        :type tmp_path: Path
+        """
+        seq_file = tmp_path / ".sovereign_sequence"
+        seq_file.write_text("-42")
+
+        driver = SoftwareFallbackDriver(_KEY_PATH)
+        driver.initialize_hardware()
+        envelope = SovereignEnvelope(_NODE_ID, driver, sequence_file=str(seq_file))
+
+        assert envelope._sequence == 0
+        parsed = json.loads(envelope.seal(_TIMESTAMP, _PAYLOAD))
+        assert parsed["q"] == 1
+
     def test_seal_non_ascii_node_id_uses_utf8_byte_length_prefix(
         self, tmp_path: Path
     ) -> None:
