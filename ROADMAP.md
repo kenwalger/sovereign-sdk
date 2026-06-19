@@ -456,6 +456,59 @@ wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 2
 
 ---
 
+## Phase 9.5 — Sensor Ingestion Bridge (`sovereign-edge`) — Shipped ✓
+
+**Target:** Introduce a local-first middleware pipeline that intercepts sealed sensor
+wire frames from `sovereign-sensor`, applies the `sovereign-sieve` Prose Tax
+transformation, and commits a signed `ForensicReceipt` to `sovereign-ledger`.  An
+off-grid JSONL buffer absorbs receipts when the ledger is temporarily unreachable, with
+background-threaded persistence so the ingestion loop is never blocked on disk I/O.
+
+```python
+from sovereign_edge import EdgePipeline
+from sovereign_ledger import SovereignLedger
+
+ledger = SovereignLedger(".keys/sovereign_audit.db")
+pipeline = EdgePipeline(ledger=ledger, signing_key=".keys/edge_identity.pem")
+
+# Intercept a sealed wire frame from sovereign-sensor
+result = pipeline.process(wire_bytes)
+# result.payload_hash  — hex SHA-256 receipt identifier
+# result.sieved_content — Prose-Tax-minimized observation payload
+# result.buffered       — True when ledger was unreachable; receipt queued off-grid
+
+# Replay buffered receipts when the ledger recovers
+committed = pipeline.drain_buffer()
+```
+
+**Delivered:**
+
+* [x] `SensorFrame` dataclass: deserializes all seven sovereign-sensor wire envelope keys
+  (`v`, `n`, `t`, `q`, `alg`, `d`, `s`) from UTF-8 JSON bytes; `text_content()` produces
+  deterministic, sort-keyed JSON for canonical sieve input.
+* [x] `OffGridBuffer`: durable JSONL-backed queue with background daemon writer thread —
+  `push()` returns immediately (non-blocking); `flush()` blocks via `Queue.join()` until all
+  pending writes are committed to disk; `size` combines on-disk count with `_in_flight`
+  counter for accurate `buffer_depth` without requiring `flush()`; `drain()` flushes,
+  sorts by ascending `metadata["sequence"]` (stable sort for FIFO at equal keys),
+  and atomically clears via `tempfile` → `os.replace`.
+* [x] `EdgePipeline`: four-stage orchestrator (deserialize → sieve → sign → commit);
+  sieve stage guarded by `try/except Exception` — on failure falls back to raw
+  `text_content()`, sets `tax_savings_percentage=0.0`, and stamps `sieve_fault=True`
+  in receipt metadata; receipt metadata carries `"sequence": frame.q` as the drain
+  sort key; routes `SovereignStorageError` and `sqlite3.Error` to the off-grid buffer;
+  `drain_buffer()` re-queues entries that still cannot reach the ledger.
+* [x] `EdgeResult` dataclass: structured return type from `process()` with `payload_hash`,
+  `receipt`, `sieved_content`, Prose Tax telemetry fields, and `buffered` flag.
+* [x] 53-case desktop validation test suite across six classes (`TestSensorFrame`,
+  `TestOffGridBuffer`, `TestEdgePipelineProcess`, `TestEdgePipelineBuffering`,
+  `TestEdgePipelineDrainBuffer`, `TestOffGridBufferAsync`, `TestEdgePipelineSieveFault`)
+  covering all three fortification scenarios: non-blocking `push()` with immediate
+  in-flight `size` reporting, chronological `drain()` sort by sequence, sieve fault
+  fallback with raw text and `sieve_fault=True` metadata.
+
+---
+
 ## Phase 10 — Isolated Context Vault & Governance Server (`sovereign-vault`)
 
 **Target:** Implement the "Sovereign Vault" architecture as an isolated local orchestration

@@ -9,6 +9,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Phase 9.5 — `sovereign-edge` sensor ingestion bridge** (new workspace member
+  `packages/sovereign-edge/`): Introduces the middleware pipeline that intercepts
+  sealed sensor wire frames from `sovereign-sensor`, applies the `sovereign-sieve`
+  Prose Tax transformation to produce a verified, minimized payload, and dispatches
+  a signed `ForensicReceipt` to `sovereign-ledger`.  An off-grid JSONL buffer absorbs
+  receipts when the ledger is temporarily unreachable.  Zero network dependencies;
+  all operations are strictly local-first.
+
+  - **`SensorFrame` dataclass** (`models.py`): Deserializes the seven-key
+    sovereign-sensor wire envelope (`v`, `n`, `t`, `q`, `alg`, `d`, `s`) from
+    UTF-8 JSON bytes.  `from_bytes(raw: bytes) -> SensorFrame` classmethod decodes and
+    maps all keys with strict type annotations.  `text_content() -> str` produces a
+    deterministic, `sort_keys=True`, `ensure_ascii=False` JSON serialization of `d`
+    for use as the canonical sieve input.
+
+  - **`OffGridBuffer`** (`buffer.py`): Durable JSONL-backed queue that absorbs
+    `ForensicReceipt` payloads when the ledger is unreachable.  `push()` enqueues
+    entries to a background daemon `threading.Thread` worker and returns immediately,
+    decoupling the sensor ingestion loop from disk-bound `os.fsync` latency.  The
+    worker opens the buffer file in append mode, writes one JSON line, and
+    `fsync`-commits before signalling completion via `queue.Queue.task_done()`.
+    `flush()` blocks via `Queue.join()` until all pending writes are committed.
+    `size` combines on-disk line count with an `_in_flight` counter (incremented
+    in `push()`, decremented in the worker `finally`) so `buffer_depth` is accurate
+    immediately without requiring `flush()`.  `drain()` calls `flush()` first, then
+    reads the JSONL file, sorts entries in ascending order by
+    `receipt["metadata"]["sequence"]` (stable sort preserves FIFO for equal keys),
+    and atomically clears the buffer via `tempfile` → `os.replace` to eliminate the
+    double-replay window.  `close()` sends a `None` sentinel to terminate the worker.
+
+  - **`EdgePipeline`** (`pipeline.py`): Four-stage orchestrator
+    (deserialize → sieve → sign → commit).  Applies `sieve_with_metrics()` to the
+    canonical observation payload within a `try/except Exception` guard: on sieve
+    failure the pipeline falls back to the raw `text_content()` string,
+    sets `tax_savings_percentage=0.0`, and stamps `sieve_fault=True` in the receipt
+    metadata so downstream auditors can distinguish fault-path entries.  The receipt
+    `metadata` carries `"sequence": frame.q` to provide the sort key used by
+    `OffGridBuffer.drain()` for chronologically ordered ledger replay.  Mints an
+    Ed25519 `ForensicReceipt` via `SovereignKeyManager` with embedded Prose Tax
+    summary, then calls `append_receipt()`.  On `SovereignStorageError` or
+    `sqlite3.Error`, the receipt is queued to the off-grid buffer.
+    `drain_buffer()` re-queues entries that still cannot reach the ledger so no
+    receipt is silently discarded.
+
+  - **`EdgeResult` dataclass** (`models.py`): Structured return type from
+    `EdgePipeline.process()` carrying `payload_hash`, `receipt`, `sieved_content`,
+    `raw_token_count`, `optimized_token_count`, `tax_savings_percentage`, and
+    `buffered` flag.
+
+  - **`packages/sovereign-edge/pyproject.toml`**: `sovereign-edge` registered as
+    workspace member at version `0.1.0` with workspace-source dependencies on
+    `sovereign-core`, `sovereign-ledger`, and `sovereign-sieve`.
+
+  - **`packages/sovereign-edge/tests/test_edge.py`** — 53 test cases across six
+    classes (`TestSensorFrame`: 11 cases; `TestOffGridBuffer`: 9 cases;
+    `TestEdgePipelineProcess`: 16 cases; `TestEdgePipelineBuffering`: 4 cases;
+    `TestEdgePipelineDrainBuffer`: 5 cases; `TestOffGridBufferAsync`: 4 cases;
+    `TestEdgePipelineSieveFault`: 4 cases) verifying: wire frame deserialization,
+    sort-keyed `text_content()` determinism, in-flight `size` accounting, `flush()`
+    disk-commit guarantee, ascending-sequence sort in `drain()`, FIFO stable-sort
+    preservation for equal sequence keys, happy-path ledger commit, receipt signature
+    verifiability, `sieve_fault` metadata marking, raw-text fallback on sieve failure,
+    zero savings percentage on fault path, fault-path ledger commit, buffering on
+    closed ledger, buffer depth increment, drain-on-recovery, re-queue on persistent
+    failure, and post-drain ledger integrity.  **53 passed, 0 failed.**
+
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing
   sensor observations into versioned, tamper-evident, minified JSON transmission envelopes with

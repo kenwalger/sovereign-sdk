@@ -1,0 +1,119 @@
+# packages/sovereign-edge/src/sovereign_edge/models.py
+"""Typed data models for the sovereign-edge ingestion pipeline."""
+import json
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass
+class SensorFrame:
+    """Deserialized representation of a sovereign-sensor wire envelope.
+
+    Corresponds one-to-one with the seven-key minified JSON frame produced by
+    :meth:`~sovereign_sensor.SovereignEnvelope.seal`.  The ``d`` field carries
+    the raw sensor observation dict; all other fields are protocol metadata.
+
+    :param v: Protocol version integer (``1`` for the current wire format).
+    :type v: int
+    :param n: Originating node identifier string.
+    :type n: str
+    :param t: ISO-8601 observation timestamp string.
+    :type t: str
+    :param q: Monotonic sequence counter binding the frame to its emission
+        position in the node's custody timeline.
+    :type q: int
+    :param alg: Canonical signing algorithm identifier (e.g. ``"hmac-sha256"``).
+    :type alg: str
+    :param d: Structured sensor observation payload dict.
+    :type d: dict[str, Any]
+    :param s: Hex-encoded signature string produced by the sensor's HAL driver.
+    :type s: str
+    """
+
+    v: int
+    n: str
+    t: str
+    q: int
+    alg: str
+    d: dict[str, Any]
+    s: str
+
+    @classmethod
+    def from_bytes(cls, raw: bytes) -> "SensorFrame":
+        """Deserialize a wire frame from UTF-8 JSON bytes into a typed :class:`SensorFrame`.
+
+        :param raw: Ultra-minified JSON bytes as produced by
+            :meth:`~sovereign_sensor.SovereignEnvelope.seal`.
+        :type raw: bytes
+        :return: A fully populated :class:`SensorFrame` instance.
+        :rtype: SensorFrame
+        :raises json.JSONDecodeError: If ``raw`` is not valid JSON.
+        :raises KeyError: If any mandatory wire frame key is absent from the
+            decoded object.
+        :raises UnicodeDecodeError: If ``raw`` is not valid UTF-8.
+        """
+        frame: dict[str, Any] = json.loads(raw.decode("utf-8"))
+        return cls(
+            v=frame["v"],
+            n=frame["n"],
+            t=frame["t"],
+            q=frame["q"],
+            alg=frame["alg"],
+            d=frame["d"],
+            s=frame["s"],
+        )
+
+    def text_content(self) -> str:
+        """Return the canonical text representation of the sensor payload for sieve processing.
+
+        Serializes the ``d`` observation dict to deterministic, sort-keyed,
+        non-ASCII-escaped JSON so that the sieve layer receives a consistent
+        string regardless of insertion-order variance in the originating payload.
+
+        :return: Minified JSON string representation of the observation payload.
+        :rtype: str
+        """
+        return json.dumps(self.d, sort_keys=True, ensure_ascii=False)
+
+
+@dataclass
+class EdgeResult:
+    """Structured result produced by a successful :class:`~sovereign_edge.EdgePipeline` processing pass.
+
+    Carries the ledger receipt identifier, the full signed ForensicReceipt
+    envelope, the sieve-minimized content string, Prose Tax token telemetry,
+    and a flag indicating whether the receipt was queued to the off-grid buffer
+    rather than committed to the ledger directly.
+
+    :param payload_hash: The ``payload_hash`` field of the minted
+        :class:`~sovereign_core.crypto.ForensicReceipt`, usable as an opaque
+        receipt identifier for downstream ledger lookups.
+    :type payload_hash: str
+    :param receipt: The fully minted :class:`~sovereign_core.crypto.ForensicReceipt`
+        dict envelope whose ``signature`` covers ``timestamp``, ``payload_hash``,
+        and ``metadata`` atomically.
+    :type receipt: dict[str, Any]
+    :param sieved_content: The Prose-Tax-minimized string produced from the
+        sensor observation payload.
+    :type sieved_content: str
+    :param raw_token_count: Estimated token count of the original payload before
+        sieve minimization.
+    :type raw_token_count: int
+    :param optimized_token_count: Estimated token count after sieve minimization.
+    :type optimized_token_count: int
+    :param tax_savings_percentage: Percentage token reduction relative to the
+        raw baseline, in the range ``[0.0, 100.0]``.
+    :type tax_savings_percentage: float
+    :param buffered: ``True`` if the receipt was written to the off-grid JSONL
+        buffer because the ledger was unreachable; ``False`` if the receipt was
+        committed to the ledger directly.
+    :type buffered: bool
+    """
+
+    payload_hash: str
+    receipt: dict[str, Any]
+    sieved_content: str
+    raw_token_count: int
+    optimized_token_count: int
+    tax_savings_percentage: float
+    buffered: bool

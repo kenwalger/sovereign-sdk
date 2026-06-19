@@ -74,6 +74,15 @@ This repository is managed as an integrated `uv` workspace separating the crypto
 │   │   └── tests/
 │   │       └── test_sensor.py
 │   │
+│   ├── sovereign-edge/                   # Middleware bridge: sensor intake → ledger storage
+│   │   ├── src/sovereign_edge/
+│   │   │   ├── models.py                 # SensorFrame, EdgeResult dataclasses
+│   │   │   ├── buffer.py                 # OffGridBuffer — async JSONL receipt queue
+│   │   │   ├── pipeline.py               # EdgePipeline — 4-stage ingestion orchestrator
+│   │   │   └── __init__.py
+│   │   └── tests/
+│   │       └── test_edge.py
+│   │
 │   ├── sovereign-runtime/                # Compute/Execution tier (tool & model isolation)
 │   │   └── src/sovereign_runtime/
 │   │       ├── router.py                 # Intent-based pre-flight namespace exposure
@@ -152,6 +161,52 @@ Two mechanisms enforce immutability:
 2. **SHA-256 hash chain** — each row's `parent_hash` is derived from the preceding row's `signature + payload_hash + parent_hash`. Modifying any field of any historical row, deleting a middle row, or injecting a fabricated row breaks the chain; `verify_ledger_integrity()` returns `False` on the first detected discrepancy.
 
 See [`docs/sovereign-ledger.md`](docs/sovereign-ledger.md) for the full schema reference, pragma table, threat model matrix, and integration pattern.
+
+---
+
+## `sovereign-edge` — Sensor Ingestion Bridge
+
+For bare-metal sensor deployments where `sovereign-sensor` seals observations on the microcontroller and `sovereign-ledger` stores the receipts on a gateway host, `sovereign-edge` provides the middleware pipeline that bridges the two layers:
+
+```python
+from sovereign_edge import EdgePipeline
+from sovereign_ledger import SovereignLedger
+
+ledger   = SovereignLedger(".keys/sovereign_audit.db")
+pipeline = EdgePipeline(
+    ledger=ledger,
+    signing_key=".keys/edge_identity.pem",
+    buffer_path=".edge_buffer.jsonl",
+)
+
+# Intercept a sealed wire frame from sovereign-sensor
+wire_bytes = envelope.seal("2026-06-19T00:00:00Z", {"sensor": "temp", "value": 21.4})
+result = pipeline.process(wire_bytes)
+# result.payload_hash  — hex receipt identifier committed to the ledger
+# result.sieved_content — Prose-Tax-minimized observation payload
+# result.buffered       — True when the ledger was unreachable
+
+# When the ledger recovers, flush the off-grid buffer
+committed_hashes = pipeline.drain_buffer()
+```
+
+Three fortification properties are enforced at the architecture level:
+
+1. **Backpressure isolation** — `push()` dispatches to a background daemon thread;
+   the calling sensor-read loop is never blocked on `os.fsync` latency.  `buffer_depth`
+   reflects in-flight entries immediately via an atomic `_in_flight` counter, and
+   `flush()` provides an explicit synchronization point via `Queue.join()`.
+
+2. **Chronological replay** — the receipt `metadata` carries `"sequence": frame.q`.
+   `drain()` sorts all buffered entries by this key before returning them, protecting
+   the ledger's linear hash chain from out-of-order replay when entries arrive from
+   concurrent push paths.
+
+3. **Sieve fault isolation** — if `sieve_with_metrics()` raises, the pipeline falls
+   back to the raw `text_content()` observation string, sets `tax_savings_percentage`
+   to `0.0`, and stamps `"sieve_fault": True` in the receipt metadata.  The receipt
+   is still committed to the ledger or off-grid buffer so no observation is silently
+   discarded regardless of sieve-layer faults.
 
 ---
 
