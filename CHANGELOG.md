@@ -31,13 +31,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     worker opens the buffer file in append mode, writes one JSON line, and
     `fsync`-commits before signalling completion via `queue.Queue.task_done()`.
     `flush()` blocks via `Queue.join()` until all pending writes are committed.
-    `size` combines on-disk line count with an `_in_flight` counter (incremented
-    in `push()`, decremented in the worker `finally`) so `buffer_depth` is accurate
-    immediately without requiring `flush()`.  `drain()` calls `flush()` first, then
-    reads the JSONL file, sorts entries in ascending order by
-    `receipt["metadata"]["sequence"]` (stable sort preserves FIFO for equal keys),
-    and atomically clears the buffer via `tempfile` → `os.replace` to eliminate the
-    double-replay window.  `close()` sends a `None` sentinel to terminate the worker.
+    `size` returns `_pending + _committed` — two atomic counters updated under a single
+    lock acquisition in the worker `finally` block — so no file read is performed and
+    no transient queue state can cause an item to be counted twice.  `_pending` covers
+    items enqueued but not yet fsync'd; `_committed` covers items fsync'd but not yet
+    drained.  `drain()` calls `flush()` first, reads the JSONL file, sorts entries in
+    ascending order by `receipt["metadata"]["sequence"]` through a guarded `_seq_key`
+    helper that catches `TypeError` / `ValueError` so a non-numeric sequence value falls
+    back to sort key `0` rather than aborting the drain (stable sort preserves FIFO for
+    equal keys), atomically clears the buffer via `tempfile` → `os.replace`, and
+    decrements `_committed` by exactly the number of entries drained rather than zeroing
+    it unconditionally, preserving counter increments for concurrent writes that arrive
+    after `flush()` returns but before the file swap completes.  `close()` sends a
+    `None` sentinel to terminate the worker.
 
   - **`EdgePipeline`** (`pipeline.py`): Four-stage orchestrator
     (deserialize → sieve → sign → commit).  Applies `sieve_with_metrics()` to the
@@ -62,18 +68,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     workspace member at version `0.1.0` with workspace-source dependencies on
     `sovereign-core`, `sovereign-ledger`, and `sovereign-sieve`.
 
-  - **`packages/sovereign-edge/tests/test_edge.py`** — 53 test cases across six
+  - **`packages/sovereign-edge/tests/test_edge.py`** — 55 test cases across six
     classes (`TestSensorFrame`: 11 cases; `TestOffGridBuffer`: 9 cases;
     `TestEdgePipelineProcess`: 16 cases; `TestEdgePipelineBuffering`: 4 cases;
-    `TestEdgePipelineDrainBuffer`: 5 cases; `TestOffGridBufferAsync`: 4 cases;
+    `TestEdgePipelineDrainBuffer`: 5 cases; `TestOffGridBufferAsync`: 6 cases;
     `TestEdgePipelineSieveFault`: 4 cases) verifying: wire frame deserialization,
     sort-keyed `text_content()` determinism, in-flight `size` accounting, `flush()`
     disk-commit guarantee, ascending-sequence sort in `drain()`, FIFO stable-sort
-    preservation for equal sequence keys, happy-path ledger commit, receipt signature
-    verifiability, `sieve_fault` metadata marking, raw-text fallback on sieve failure,
-    zero savings percentage on fault path, fault-path ledger commit, buffering on
-    closed ledger, buffer depth increment, drain-on-recovery, re-queue on persistent
-    failure, and post-drain ledger integrity.  **53 passed, 0 failed.**
+    preservation for equal sequence keys, non-integer sequence value tolerance,
+    `_committed` counter accuracy after drain, happy-path ledger commit, receipt
+    signature verifiability, `sieve_fault` metadata marking, raw-text fallback on sieve
+    failure, zero savings percentage on fault path, fault-path ledger commit, buffering
+    on closed ledger, buffer depth increment, drain-on-recovery, re-queue on persistent
+    failure, and post-drain ledger integrity.  **55 passed, 0 failed.**
+
+### Changed
+
+- **`OffGridBuffer.drain()` — sort key guarded against non-numeric sequence values**
+  (`buffer.py`): The sequence-sort lambda `int(e[0].get("metadata", {}).get("sequence", 0))`
+  is replaced with a local `_seq_key` helper that wraps the cast in
+  `try/except (TypeError, ValueError)`.  A corrupted or non-numeric sequence value
+  (e.g. `"not-a-number"`, `None`) previously raised `ValueError` inside `list.sort()`,
+  aborting the entire drain pass and leaving every buffered receipt stranded on disk
+  with no exception visible to the caller — a silent, total data-loss path.  The guard
+  falls back to sort key `0`, keeping every valid entry in the returned list regardless
+  of what sits in a corrupted neighbour's metadata.
+
+- **`OffGridBuffer.drain()` — `_committed` decremented by drained count, not zeroed**
+  (`buffer.py`): `self._committed = 0` is replaced with
+  `self._committed = max(0, self._committed - drained)` under the count lock, where
+  `drained = len(entries)` is the number of valid entries actually removed from disk.
+  Zeroing unconditionally erased the accounting for any write whose `fsync` completed
+  between `flush()` returning and the `os.replace` closing — a real window when the
+  sensor stream continues running during a recovery drain.  Subtracting only the drained
+  count preserves those increments so `buffer_depth` remains accurate without a follow-up
+  `flush()`.  `max(0, …)` prevents the counter going negative in cross-instance drain
+  scenarios where the file contains entries written by a different `OffGridBuffer`
+  instance that are not tracked by this instance's `_committed`.
+
+- **`EdgePipeline.__init__()` — key directory created with `mode=0o700`** (`pipeline.py`):
+  `key_path.parent.mkdir(parents=True, exist_ok=True)` now passes `mode=0o700`,
+  restricting automatically generated edge node credential directories to owner-only
+  access on POSIX targets from the moment of creation.  Mode is ignored safely on
+  Windows.
+
+- **`OffGridBuffer.size` — file read eliminated; race-free atomic counter pair**
+  (`buffer.py`): The previous `size` implementation snapshotted `_in_flight` under
+  the count lock, released the lock, then read the file.  The background worker
+  decrements `_in_flight` in its `finally` block *after* the `fsync` completes, so
+  between the lock release and the file read the item could exist simultaneously in
+  both the `_in_flight` snapshot (not yet decremented) and the file (already written),
+  yielding `size = 2` for a single buffered entry.  `size` now returns
+  `_pending + _committed` under a single lock acquisition — no file read, no race
+  window.  `_pending` and `_committed` are both updated atomically inside the same
+  `with self._count_lock:` block in the worker `finally`, so their sum is always
+  exact.
 
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing

@@ -26,7 +26,9 @@ class OffGridBuffer:
       worker ``finally`` — covers items waiting in the queue *and* items currently being
       written to disk.
     - ``_committed``: incremented in the worker ``finally`` only after a successful
-      ``fsync``; reset to zero by :meth:`drain` after the atomic file replace succeeds.
+      ``fsync``; decremented by :meth:`drain` by exactly the number of entries removed
+      from disk after the atomic file replace succeeds, so concurrent writes arriving
+      mid-drain are not erased from the counter.
 
     :attr:`size` returns ``_pending + _committed`` without reading the file, so no
     transient queue state can cause an item to be counted twice or omitted.
@@ -123,12 +125,17 @@ class OffGridBuffer:
         Calls :meth:`flush` to ensure all in-flight background writes are committed
         before reading the file.  Entries are sorted in ascending order by
         ``receipt["metadata"]["sequence"]`` to protect the ledger's linear hash chain
-        from out-of-order replay when entries arrive from concurrent push paths.
+        from out-of-order replay when entries arrive from concurrent push paths.  The
+        sort key is evaluated inside a guarded helper that catches :exc:`TypeError` and
+        :exc:`ValueError` so a non-numeric sequence value in a corrupted entry falls
+        back to ``0`` rather than aborting the entire drain pass.
         The buffer file is then replaced with an empty staging file via
         ``tempfile`` → ``os.replace`` to close the double-replay window, and
-        ``_committed`` is reset to zero under the count lock so :attr:`size` reflects
-        the cleared state immediately.  Malformed JSON lines are silently skipped.
-        Returns an empty list when the buffer file does not exist.
+        ``_committed`` is decremented by the exact number of entries drained under the
+        count lock rather than zeroed unconditionally.  This preserves any ``_committed``
+        increments that accumulated for concurrent writes arriving after :meth:`flush`
+        returned but before the file swap completed.  Malformed JSON lines are silently
+        skipped.  Returns an empty list when the buffer file does not exist.
 
         :return: List of ``(receipt_dict, sieved_content)`` tuples sorted by sequence.
         :rtype: list[tuple[dict[str, Any], str]]
@@ -154,9 +161,15 @@ class OffGridBuffer:
             except (json.JSONDecodeError, KeyError):
                 continue
 
-        entries.sort(
-            key=lambda e: int(e[0].get("metadata", {}).get("sequence", 0))
-        )
+        def _seq_key(entry: tuple[dict[str, Any], str]) -> int:
+            try:
+                return int(entry[0].get("metadata", {}).get("sequence", 0))
+            except (TypeError, ValueError):
+                return 0
+
+        entries.sort(key=_seq_key)
+
+        drained: int = len(entries)
 
         tmp_path: str = ""
         replaced: bool = False
@@ -181,7 +194,7 @@ class OffGridBuffer:
 
         if replaced:
             with self._count_lock:
-                self._committed = 0
+                self._committed = max(0, self._committed - drained)
 
         return entries
 

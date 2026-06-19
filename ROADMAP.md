@@ -488,10 +488,14 @@ committed = pipeline.drain_buffer()
   deterministic, sort-keyed JSON for canonical sieve input.
 * [x] `OffGridBuffer`: durable JSONL-backed queue with background daemon writer thread —
   `push()` returns immediately (non-blocking); `flush()` blocks via `Queue.join()` until all
-  pending writes are committed to disk; `size` combines on-disk count with `_in_flight`
-  counter for accurate `buffer_depth` without requiring `flush()`; `drain()` flushes,
-  sorts by ascending `metadata["sequence"]` (stable sort for FIFO at equal keys),
-  and atomically clears via `tempfile` → `os.replace`.
+  pending writes are committed to disk; `size` returns `_pending + _committed` under a
+  single lock acquisition with no file read, closing the double-count race where a
+  `_in_flight`-plus-file-read approach could count one item twice; `drain()` flushes,
+  sorts by ascending `metadata["sequence"]` through a `_seq_key` helper guarded by
+  `try/except (TypeError, ValueError)` so a non-numeric sequence value falls back to `0`
+  rather than aborting the drain (stable sort for FIFO at equal keys), atomically clears
+  via `tempfile` → `os.replace`, and decrements `_committed` by the exact drained count
+  to preserve concurrent write increments arriving after `flush()` returns.
 * [x] `EdgePipeline`: four-stage orchestrator (deserialize → sieve → sign → commit);
   sieve stage guarded by `try/except Exception` — on failure falls back to raw
   `text_content()`, sets `tax_savings_percentage=0.0`, and stamps `sieve_fault=True`
@@ -500,12 +504,13 @@ committed = pipeline.drain_buffer()
   `drain_buffer()` re-queues entries that still cannot reach the ledger.
 * [x] `EdgeResult` dataclass: structured return type from `process()` with `payload_hash`,
   `receipt`, `sieved_content`, Prose Tax telemetry fields, and `buffered` flag.
-* [x] 53-case desktop validation test suite across six classes (`TestSensorFrame`,
+* [x] 55-case desktop validation test suite across six classes (`TestSensorFrame`,
   `TestOffGridBuffer`, `TestEdgePipelineProcess`, `TestEdgePipelineBuffering`,
   `TestEdgePipelineDrainBuffer`, `TestOffGridBufferAsync`, `TestEdgePipelineSieveFault`)
-  covering all three fortification scenarios: non-blocking `push()` with immediate
-  in-flight `size` reporting, chronological `drain()` sort by sequence, sieve fault
-  fallback with raw text and `sieve_fault=True` metadata.
+  covering all fortification scenarios: non-blocking `push()` with immediate `size`
+  reporting, chronological `drain()` sort by sequence, non-integer sequence value
+  tolerance in the sort key guard, `_committed` counter accuracy after drain,
+  sieve fault fallback with raw text and `sieve_fault=True` metadata.
 
 ---
 

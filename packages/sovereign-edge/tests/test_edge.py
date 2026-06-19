@@ -642,6 +642,35 @@ class TestOffGridBufferAsync:
         assert entries[0][0]["payload_hash"] == "hash_first"
         assert entries[1][0]["payload_hash"] == "hash_second"
 
+    def test_drain_tolerates_non_integer_sequence_value(self, tmp_path: Path) -> None:
+        """drain() must not raise when a sequence value cannot be cast to int; entry
+        falls back to sort key 0 rather than aborting the entire drain pass."""
+        buf_path = tmp_path / "buf.jsonl"
+        buf = OffGridBuffer(str(buf_path))
+        r_corrupt = {
+            "timestamp": _TIMESTAMP,
+            "payload_hash": "hash_corrupt_seq",
+            "public_key": "key==",
+            "signature": "sig_c",
+            "metadata": {"sequence": "not-a-number"},
+        }
+        r_normal = self._make_receipt("normal", sequence=3)
+        buf.push(r_corrupt, "corrupt seq content")
+        buf.push(r_normal, "normal content")
+        entries = buf.drain()
+        assert len(entries) == 2
+
+    def test_size_correct_after_drain_preserves_concurrent_committed_count(
+        self, tmp_path: Path
+    ) -> None:
+        """_committed is decremented by the drained count, not zeroed, so entries
+        committed after flush() but before the file swap are not lost from the counter."""
+        buf = OffGridBuffer(str(tmp_path / "buf.jsonl"))
+        buf.push(self._make_receipt("A"), "content A")
+        buf.drain()
+        buf.push(self._make_receipt("B"), "content B")
+        assert buf.size == 1
+
 
 # ---------------------------------------------------------------------------
 # TestEdgePipelineSieveFault
