@@ -29,8 +29,10 @@ class EdgePipeline:
     :param ledger: An open :class:`~sovereign_ledger.SovereignLedger` instance.
     :type ledger: SovereignLedger
     :param signing_key: Path to the edge node's Ed25519 private key PEM file.  The
-        parent directory is used as the key directory.  Defaults to
-        ``".keys/edge_identity.pem"`` relative to the current working directory.
+        parent directory is created with ``mode=0o700`` on first use and its permissions
+        are explicitly enforced via ``chmod(0o700)`` so that a pre-existing directory
+        with lax permissions is corrected.  Defaults to ``".keys/edge_identity.pem"``
+        relative to the current working directory.
     :type signing_key: str
     :param buffer_path: Filesystem path for the off-grid JSONL receipt buffer.  Defaults
         to ``".edge_buffer.jsonl"`` in the current working directory.
@@ -47,6 +49,7 @@ class EdgePipeline:
         self._buffer: OffGridBuffer = OffGridBuffer(buffer_path)
         key_path: Path = Path(signing_key).resolve()
         key_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        key_path.parent.chmod(0o700)
         self._key_manager: SovereignKeyManager = SovereignKeyManager(key_dir=key_path.parent)
         self._key_manager.private_key_path = key_path
         self._key_manager.public_key_path = key_path.with_suffix(".pub")

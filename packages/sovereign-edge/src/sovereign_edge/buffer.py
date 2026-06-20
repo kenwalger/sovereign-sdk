@@ -26,9 +26,12 @@ class OffGridBuffer:
       worker ``finally`` — covers items waiting in the queue *and* items currently being
       written to disk.
     - ``_committed``: incremented in the worker ``finally`` only after a successful
-      ``fsync``; decremented by :meth:`drain` by exactly the number of entries removed
-      from disk after the atomic file replace succeeds, so concurrent writes arriving
-      mid-drain are not erased from the counter.
+      ``fsync``; decremented by :meth:`drain` by exactly the number of file entries
+      removed from disk after the atomic replace succeeds.
+    - ``_write_errors``: a list of ``(receipt_dict, sieved_content)`` tuples preserved
+      under the count lock when a background write raises :exc:`OSError`.  These entries
+      never reached disk and are surfaced by :meth:`drain` so that no receipt is silently
+      discarded on a full disk or read-only filesystem.
 
     A ``_drain_lock`` provides mutual exclusion between :meth:`push` and the entire
     :meth:`drain` critical section (flush → read → atomic replace).  :meth:`push` holds
@@ -36,14 +39,17 @@ class OffGridBuffer:
     ensuring no new item can be enqueued while :meth:`drain` holds the file open.
     The background worker never acquires ``_drain_lock``, so no deadlock is possible.
 
-    :attr:`size` returns ``_pending + _committed`` without reading the file, so no
-    transient queue state can cause an item to be counted twice or omitted.
+    :attr:`size` returns ``_pending + _committed + len(_write_errors)`` without reading
+    the file, so no transient queue state can cause an item to be counted twice or omitted,
+    and disk write failures remain visible in the depth counter.
 
-    :meth:`drain` calls :meth:`flush` before reading the file, sorts entries in ascending
-    order by ``receipt["metadata"]["sequence"]`` to preserve the ledger's linear hash
-    chain, and atomically clears the buffer via a ``tempfile`` → ``os.replace`` promotion.
-    If the atomic promotion fails, :meth:`drain` returns an empty list so that no
-    downstream ledger commits are made against an uncleared buffer.
+    :meth:`drain` calls :meth:`flush` before reading the file, merges any pending write-
+    error entries with the on-disk entries, sorts the combined list in ascending order by
+    ``receipt["metadata"]["sequence"]`` to preserve the ledger's linear hash chain, and
+    atomically clears the buffer via a ``tempfile`` → ``os.replace`` promotion.  If the
+    atomic promotion fails, :meth:`drain` returns an empty list so that no downstream
+    ledger commits are made against an uncleared buffer; write-error entries are retained
+    in ``_write_errors`` for the next drain pass.
 
     :param path: Filesystem path to the JSONL buffer file.  The file is created on the
         first background write if it does not already exist.
@@ -55,6 +61,7 @@ class OffGridBuffer:
         self._write_queue: _queue.Queue[str | None] = _queue.Queue()
         self._pending: int = 0
         self._committed: int = 0
+        self._write_errors: list[tuple[dict[str, Any], str]] = []
         self._count_lock: threading.Lock = threading.Lock()
         self._drain_lock: threading.Lock = threading.Lock()
         self._worker_thread: threading.Thread = threading.Thread(
@@ -67,6 +74,11 @@ class OffGridBuffer:
     def _disk_writer(self) -> None:
         """Background daemon worker that serializes JSONL writes to disk.
 
+        When a write or ``fsync`` raises :exc:`OSError`, the serialized entry is
+        deserialized and appended to ``_write_errors`` under the count lock so that
+        :meth:`drain` can surface and recover it on the next pass instead of silently
+        discarding the receipt.
+
         :return: None
         :rtype: None
         """
@@ -74,6 +86,7 @@ class OffGridBuffer:
             entry: str | None = self._write_queue.get()
             stop: bool = entry is None
             written: bool = False
+            error_entry: tuple[dict[str, Any], str] | None = None
             try:
                 if not stop:
                     with open(self._path, "a", encoding="utf-8") as fh:
@@ -82,12 +95,19 @@ class OffGridBuffer:
                         os.fsync(fh.fileno())
                     written = True
             except OSError:
-                pass
+                if entry is not None:
+                    try:
+                        _obj: dict[str, Any] = json.loads(entry)
+                        error_entry = (_obj["receipt"], _obj["sieved_content"])
+                    except (json.JSONDecodeError, KeyError):
+                        pass
             finally:
                 with self._count_lock:
                     self._pending -= 1
                     if written:
                         self._committed += 1
+                    elif error_entry is not None:
+                        self._write_errors.append(error_entry)
                 self._write_queue.task_done()
             if stop:
                 return
@@ -143,21 +163,23 @@ class OffGridBuffer:
         that is about to be replaced and being silently discarded.
 
         Calls :meth:`flush` to ensure all in-flight background writes are committed
-        before reading the file.  Entries are sorted in ascending order by
-        ``receipt["metadata"]["sequence"]`` to protect the ledger's linear hash chain
-        from out-of-order replay when entries arrive from concurrent push paths.  The
-        sort key is evaluated inside a guarded helper that catches :exc:`TypeError` and
-        :exc:`ValueError` so a non-numeric sequence value in a corrupted entry falls
-        back to ``0`` rather than aborting the entire drain pass.
+        before reading the file.  Any entries preserved in ``_write_errors`` from prior
+        background write failures are merged with the on-disk entries.  The combined list
+        is sorted in ascending order by ``receipt["metadata"]["sequence"]`` to protect
+        the ledger's linear hash chain from out-of-order replay when entries arrive from
+        concurrent push paths.  The sort key is evaluated inside a guarded helper that
+        catches :exc:`TypeError` and :exc:`ValueError` so a non-numeric sequence value
+        in a corrupted entry falls back to ``0`` rather than aborting the entire drain
+        pass.
         The buffer file is then replaced with an empty staging file via
-        ``tempfile`` → ``os.replace`` to close the double-replay window, and
-        ``_committed`` is decremented by the exact number of entries drained under the
-        count lock rather than zeroed unconditionally.  This preserves any ``_committed``
-        increments that accumulated for concurrent writes arriving after :meth:`flush`
-        returned but before the file swap completed.  If the atomic promotion fails,
-        an empty list is returned so that no downstream ledger commits are made against
-        an uncleared buffer.  Malformed JSON lines are silently skipped.  Returns an
-        empty list when the buffer file does not exist.
+        ``tempfile`` → ``os.replace`` to close the double-replay window.  If the atomic
+        promotion succeeds, ``_committed`` is decremented by the number of file entries
+        drained and ``_write_errors`` is cleared; write-error entries never accumulated
+        in ``_committed`` so they need no counter adjustment.  If the promotion fails, an
+        empty list is returned and ``_write_errors`` is left intact for the next drain
+        pass so that no entry is permanently discarded.  Malformed JSON lines are
+        silently skipped.  Returns an empty list when the buffer file does not exist and
+        no write-error entries are pending.
 
         :return: List of ``(receipt_dict, sieved_content)`` tuples sorted by sequence,
             or an empty list if the buffer file could not be atomically cleared.
@@ -166,8 +188,20 @@ class OffGridBuffer:
         with self._drain_lock:
             self.flush()
 
+            def _seq_key(entry: tuple[dict[str, Any], str]) -> int:
+                try:
+                    return int(entry[0].get("metadata", {}).get("sequence", 0))
+                except (TypeError, ValueError):
+                    return 0
+
+            with self._count_lock:
+                pending_error_entries: list[tuple[dict[str, Any], str]] = list(self._write_errors)
+
             if not self._path.exists():
-                return []
+                with self._count_lock:
+                    self._write_errors.clear()
+                pending_error_entries.sort(key=_seq_key)
+                return pending_error_entries
 
             try:
                 raw_lines: list[str] = self._path.read_text(encoding="utf-8").splitlines()
@@ -185,15 +219,10 @@ class OffGridBuffer:
                 except (json.JSONDecodeError, KeyError):
                     continue
 
-            def _seq_key(entry: tuple[dict[str, Any], str]) -> int:
-                try:
-                    return int(entry[0].get("metadata", {}).get("sequence", 0))
-                except (TypeError, ValueError):
-                    return 0
-
+            entries.extend(pending_error_entries)
             entries.sort(key=_seq_key)
 
-            drained: int = len(entries)
+            file_entry_count: int = len(entries) - len(pending_error_entries)
 
             tmp_path: str = ""
             replaced: bool = False
@@ -218,7 +247,8 @@ class OffGridBuffer:
 
             if replaced:
                 with self._count_lock:
-                    self._committed = max(0, self._committed - drained)
+                    self._committed = max(0, self._committed - file_entry_count)
+                    self._write_errors.clear()
 
             return entries if replaced else []
 
@@ -238,16 +268,33 @@ class OffGridBuffer:
 
     @property
     def size(self) -> int:
-        """Current count of buffered entries, including in-flight writes.
+        """Current count of buffered entries, including in-flight writes and write errors.
 
-        Returns ``_pending + _committed`` under the count lock — no file read is
-        performed, so no background-worker transition can cause an item to be counted
-        in both the pending snapshot and the on-disk line count simultaneously.
+        Returns ``_pending + _committed + len(_write_errors)`` under the count lock — no
+        file read is performed, so no background-worker transition can cause an item to be
+        counted in both the pending snapshot and the on-disk line count simultaneously.
         ``_pending`` covers items enqueued but not yet fsync'd; ``_committed`` covers
-        items fsync'd but not yet drained.
+        items fsync'd but not yet drained; ``_write_errors`` covers items whose disk write
+        failed and that are awaiting recovery via :meth:`drain`.
 
         :return: Total number of buffered receipt entries awaiting drain.
         :rtype: int
         """
         with self._count_lock:
-            return self._pending + self._committed
+            return self._pending + self._committed + len(self._write_errors)
+
+    @property
+    def write_error_count(self) -> int:
+        """Count of receipt entries preserved after background disk write failures.
+
+        Entries in this count were never written to the JSONL file (due to
+        :exc:`OSError` during the background write or ``fsync``) but are retained
+        in memory and will be included in the next :meth:`drain` call.  A non-zero
+        value indicates a disk condition (full disk, read-only filesystem) that
+        prevented durable persistence.
+
+        :return: Number of entries awaiting recovery via :meth:`drain`.
+        :rtype: int
+        """
+        with self._count_lock:
+            return len(self._write_errors)

@@ -92,6 +92,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ledger's append-only hash chain.  The return statement is now `return entries if replaced else []`
   so that no downstream commits are made unless the buffer file has been provably cleared from disk.
 
+- **`EdgePipeline.__init__()` — explicit `chmod(0o700)` after `mkdir`** (`pipeline.py`):
+  Adds `key_path.parent.chmod(0o700)` immediately after `key_path.parent.mkdir(...)`.  The
+  `mkdir` call sets the permissions bitmask only when creating a new directory; if the
+  directory already existed (e.g. a prior run used a lax default umask), the permissions
+  were never corrected.  The explicit `chmod` call re-enforces owner-only access regardless
+  of the directory's prior state, closing the window where a pre-existing key directory
+  with world-readable permissions could expose private key material.  On Windows the call
+  is silently ignored by the OS, matching the established cross-platform behaviour of
+  `mode=0o700` in `mkdir`.
+
+- **`OffGridBuffer` — disk write error tracking and recovery** (`buffer.py`): Replaces the
+  silent `except OSError: pass` in `_disk_writer` with structured failure preservation.
+  When a write or ``fsync`` raises :exc:`OSError` (full disk, read-only filesystem), the
+  serialized entry is deserialized and appended to a new ``_write_errors`` list under the
+  count lock so the receipt is not silently discarded.  The ``_pending`` decrement and
+  ``_write_errors`` append now happen in a single ``with self._count_lock:`` block inside
+  the worker's ``finally`` path to eliminate any transient over-count.  ``size`` is updated
+  to return ``_pending + _committed + len(_write_errors)`` so ``buffer_depth`` remains
+  accurate after a disk failure.  ``drain()`` snapshots ``_write_errors`` after ``flush()``
+  returns (when the queue is idle and no concurrent push can occur), merges the error
+  entries with the on-disk entries, sorts the combined list by sequence, and clears
+  ``_write_errors`` atomically with the ``_committed`` decrement on successful file
+  rotation.  If the file rotation fails, ``_write_errors`` is left intact for the next
+  drain pass.  A new ``write_error_count: int`` property provides an explicit diagnostic
+  indicator.  Three new tests in ``TestOffGridBufferWriteErrors`` cover: error count
+  increment, ``size`` accuracy under disk failure, and full ``drain()`` recovery.
+
 - **`OffGridBuffer` — `_drain_lock` critical section concurrency guard** (`buffer.py`): A new
   `_drain_lock: threading.Lock` protects the entire `drain()` critical section
   (`flush()` → file read → `os.replace` → counter decrement) and the `push()` enqueue window

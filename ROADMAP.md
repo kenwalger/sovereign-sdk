@@ -488,19 +488,28 @@ committed = pipeline.drain_buffer()
   deterministic, sort-keyed JSON for canonical sieve input.
 * [x] `OffGridBuffer`: durable JSONL-backed queue with background daemon writer thread —
   `push()` returns immediately (non-blocking); `flush()` blocks via `Queue.join()` until all
-  pending writes are committed to disk; `size` returns `_pending + _committed` under a
-  single lock acquisition with no file read, closing the double-count race where a
-  `_in_flight`-plus-file-read approach could count one item twice; `_drain_lock` provides
-  mutual exclusion between the `push()` enqueue window and the entire `drain()` critical
-  section (flush → read → `os.replace` → counter decrement), preventing concurrent `push()`
-  calls from writing to a file inode that is being atomically replaced and losing the write;
-  `drain()` flushes, sorts by ascending `metadata["sequence"]` through a `_seq_key` helper
-  guarded by `try/except (TypeError, ValueError)` so a non-numeric sequence value falls back
-  to `0` rather than aborting the drain (stable sort for FIFO at equal keys), atomically
-  clears via `tempfile` → `os.replace`, returns the parsed entries only when the atomic
-  promotion succeeds (returns `[]` on `OSError` so no downstream ledger commits are made
-  against an uncleared buffer), and decrements `_committed` by the exact drained count to
-  preserve concurrent write increments arriving after `flush()` returns.
+  pending writes are committed to disk; disk write failures (`OSError` during `open` /
+  `fsync`) are preserved in a `_write_errors` list under `_count_lock` so no receipt is
+  silently discarded on a full disk or read-only filesystem; `size` returns
+  `_pending + _committed + len(_write_errors)` under a single lock acquisition with no file
+  read, keeping `buffer_depth` accurate across normal writes, write failures, and in-flight
+  entries simultaneously; `write_error_count: int` property surfaces the failure indicator
+  explicitly; `_drain_lock` provides mutual exclusion between the `push()` enqueue window
+  and the entire `drain()` critical section (flush → read → `os.replace` → counter decrement),
+  preventing concurrent `push()` calls from writing to a file inode that is being atomically
+  replaced and losing the write; `drain()` flushes, merges `_write_errors` entries with
+  on-disk entries, sorts the combined list by ascending `metadata["sequence"]` through a
+  `_seq_key` helper guarded by `try/except (TypeError, ValueError)` so a non-numeric
+  sequence value falls back to `0` rather than aborting the drain (stable sort for FIFO at
+  equal keys), atomically clears via `tempfile` → `os.replace`, returns the combined entries
+  only when the atomic promotion succeeds (returns `[]` on `OSError` so no downstream ledger
+  commits are made against an uncleared buffer; write-error entries are preserved in
+  `_write_errors` for the next pass), and decrements `_committed` by the file-entry count
+  only so write-error entries — which never accumulated in `_committed` — require no counter
+  adjustment.
+* [x] `EdgePipeline.__init__()` — key directory created with `mode=0o700` at first use and
+  explicitly re-enforced via `chmod(0o700)` on every construction, correcting a pre-existing
+  directory whose permissions may have been set with a lax umask.
 * [x] `EdgePipeline`: four-stage orchestrator (deserialize → sieve → sign → commit);
   sieve stage guarded by `try/except Exception` — on failure falls back to raw
   `text_content()`, sets `tax_savings_percentage=0.0`, and stamps `sieve_fault=True`
@@ -509,13 +518,15 @@ committed = pipeline.drain_buffer()
   `drain_buffer()` re-queues entries that still cannot reach the ledger.
 * [x] `EdgeResult` dataclass: structured return type from `process()` with `payload_hash`,
   `receipt`, `sieved_content`, Prose Tax telemetry fields, and `buffered` flag.
-* [x] 55-case desktop validation test suite across six classes (`TestSensorFrame`,
+* [x] 58-case desktop validation test suite across seven classes (`TestSensorFrame`,
   `TestOffGridBuffer`, `TestEdgePipelineProcess`, `TestEdgePipelineBuffering`,
-  `TestEdgePipelineDrainBuffer`, `TestOffGridBufferAsync`, `TestEdgePipelineSieveFault`)
-  covering all fortification scenarios: non-blocking `push()` with immediate `size`
-  reporting, chronological `drain()` sort by sequence, non-integer sequence value
-  tolerance in the sort key guard, `_committed` counter accuracy after drain,
-  sieve fault fallback with raw text and `sieve_fault=True` metadata.
+  `TestEdgePipelineDrainBuffer`, `TestOffGridBufferAsync`, `TestEdgePipelineSieveFault`,
+  `TestOffGridBufferWriteErrors`) covering all fortification scenarios: non-blocking
+  `push()` with immediate `size` reporting, chronological `drain()` sort by sequence,
+  non-integer sequence value tolerance in the sort key guard, `_committed` counter
+  accuracy after drain, sieve fault fallback with raw text and `sieve_fault=True`
+  metadata, disk write error tracking via `write_error_count`, `size` accuracy under
+  disk failure, and full `drain()` recovery of write-error entries.
 
 ---
 

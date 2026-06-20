@@ -726,3 +726,54 @@ class TestEdgePipelineSieveFault:
         assert result.buffered is False
         cur = mem_ledger._conn.execute("SELECT COUNT(*) FROM forensic_ledger")
         assert cur.fetchone()[0] == 1
+
+
+# ---------------------------------------------------------------------------
+# TestOffGridBufferWriteErrors
+# ---------------------------------------------------------------------------
+
+class TestOffGridBufferWriteErrors:
+    """Verify that background disk write failures are tracked and recoverable via drain()."""
+
+    def _make_receipt(self, tag: str = "test", sequence: int = 1) -> dict[str, Any]:
+        return {
+            "timestamp": _TIMESTAMP,
+            "payload_hash": f"hash_{tag}",
+            "public_key": "base64key==",
+            "signature": f"sig_{tag}",
+            "metadata": {"sequence": sequence},
+        }
+
+    def test_disk_write_error_increments_write_error_count(self, tmp_path: Path) -> None:
+        """A background write failure must be reflected in write_error_count rather than
+        silently dropped — the buffer path points into a non-existent directory so open()
+        raises FileNotFoundError (OSError subclass) on every write attempt."""
+        buf = OffGridBuffer(str(tmp_path / "no_such_dir" / "buffer.jsonl"))
+        buf.push(self._make_receipt("A"), "content A")
+        buf.flush()
+        assert buf.write_error_count == 1
+        buf.close()
+
+    def test_size_includes_write_error_entries(self, tmp_path: Path) -> None:
+        """size must count write-error entries so buffer_depth remains accurate after a
+        disk failure; the entry that could not be fsync'd must not vanish from the tally."""
+        buf = OffGridBuffer(str(tmp_path / "no_such_dir" / "buffer.jsonl"))
+        buf.push(self._make_receipt("A"), "content A")
+        buf.flush()
+        assert buf.size == 1
+        buf.close()
+
+    def test_drain_returns_write_error_entries(self, tmp_path: Path) -> None:
+        """drain() must include write-error entries in its return value so the pipeline
+        can commit them to the ledger; write_error_count must reach zero after a successful
+        drain pass."""
+        receipt = self._make_receipt("A")
+        buf = OffGridBuffer(str(tmp_path / "no_such_dir" / "buffer.jsonl"))
+        buf.push(receipt, "content A")
+        buf.flush()
+        entries = buf.drain()
+        assert len(entries) == 1
+        assert entries[0][0] == receipt
+        assert entries[0][1] == "content A"
+        assert buf.write_error_count == 0
+        buf.close()
