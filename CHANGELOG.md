@@ -84,6 +84,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`OffGridBuffer.drain()` — fail-safe file rotation: empty list returned on `os.replace` failure**
+  (`buffer.py`): `drain()` previously returned the parsed entries list regardless of whether the
+  atomic `tempfile` → `os.replace` promotion succeeded.  If `os.replace` raised `OSError`, the
+  buffer file was not cleared, yet `drain_buffer()` would still commit every entry to the ledger.
+  On the next drain the same entries would be read again, yielding double-replay corruption in the
+  ledger's append-only hash chain.  The return statement is now `return entries if replaced else []`
+  so that no downstream commits are made unless the buffer file has been provably cleared from disk.
+
+- **`OffGridBuffer` — `_drain_lock` critical section concurrency guard** (`buffer.py`): A new
+  `_drain_lock: threading.Lock` protects the entire `drain()` critical section
+  (`flush()` → file read → `os.replace` → counter decrement) and the `push()` enqueue window
+  (`_pending` increment + `Queue.put`).  Without this lock a concurrent `push()` arriving after
+  `flush()` returned but before `os.replace` completed could enqueue a new entry to the background
+  worker; if the worker opened the buffer file in append mode before the atomic replace closed
+  the inode, the write would land in the old file and be silently discarded after the replace.
+  Because the background worker never acquires `_drain_lock`, and `push()` holds the lock only
+  for the brief enqueue window (not for any blocking I/O), no deadlock is possible.
+
+- **`packages/sovereign-edge/pyproject.toml` — explicit minimum version constraints**: Each
+  ecosystem dependency now carries a `>=1.1.0` floor:
+  `sovereign-core>=1.1.0`, `sovereign-ledger>=1.1.0`, `sovereign-sieve>=1.1.0`.  The bare
+  package names previously allowed the build backend to resolve any version, including
+  pre-fortification releases that lack the `_pending`/`_committed` counter API and
+  `SovereignStorageError` behaviour required by `EdgePipeline`.
+
 - **`OffGridBuffer.drain()` — sort key guarded against non-numeric sequence values**
   (`buffer.py`): The sequence-sort lambda `int(e[0].get("metadata", {}).get("sequence", 0))`
   is replaced with a local `_seq_key` helper that wraps the cast in

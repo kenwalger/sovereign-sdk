@@ -490,12 +490,17 @@ committed = pipeline.drain_buffer()
   `push()` returns immediately (non-blocking); `flush()` blocks via `Queue.join()` until all
   pending writes are committed to disk; `size` returns `_pending + _committed` under a
   single lock acquisition with no file read, closing the double-count race where a
-  `_in_flight`-plus-file-read approach could count one item twice; `drain()` flushes,
-  sorts by ascending `metadata["sequence"]` through a `_seq_key` helper guarded by
-  `try/except (TypeError, ValueError)` so a non-numeric sequence value falls back to `0`
-  rather than aborting the drain (stable sort for FIFO at equal keys), atomically clears
-  via `tempfile` → `os.replace`, and decrements `_committed` by the exact drained count
-  to preserve concurrent write increments arriving after `flush()` returns.
+  `_in_flight`-plus-file-read approach could count one item twice; `_drain_lock` provides
+  mutual exclusion between the `push()` enqueue window and the entire `drain()` critical
+  section (flush → read → `os.replace` → counter decrement), preventing concurrent `push()`
+  calls from writing to a file inode that is being atomically replaced and losing the write;
+  `drain()` flushes, sorts by ascending `metadata["sequence"]` through a `_seq_key` helper
+  guarded by `try/except (TypeError, ValueError)` so a non-numeric sequence value falls back
+  to `0` rather than aborting the drain (stable sort for FIFO at equal keys), atomically
+  clears via `tempfile` → `os.replace`, returns the parsed entries only when the atomic
+  promotion succeeds (returns `[]` on `OSError` so no downstream ledger commits are made
+  against an uncleared buffer), and decrements `_committed` by the exact drained count to
+  preserve concurrent write increments arriving after `flush()` returns.
 * [x] `EdgePipeline`: four-stage orchestrator (deserialize → sieve → sign → commit);
   sieve stage guarded by `try/except Exception` — on failure falls back to raw
   `text_content()`, sets `tax_savings_percentage=0.0`, and stamps `sieve_fault=True`

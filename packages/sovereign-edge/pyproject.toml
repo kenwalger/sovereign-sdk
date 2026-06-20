@@ -10,9 +10,9 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 dependencies = [
-    "sovereign-core",
-    "sovereign-ledger",
-    "sovereign-sieve",
+    "sovereign-core>=1.1.0",
+    "sovereign-ledger>=1.1.0",
+    "sovereign-sieve>=1.1.0",
 ]
 classifiers = [
     "License :: OSI Approved :: MIT License",

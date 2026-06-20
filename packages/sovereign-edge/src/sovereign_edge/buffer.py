@@ -30,12 +30,20 @@ class OffGridBuffer:
       from disk after the atomic file replace succeeds, so concurrent writes arriving
       mid-drain are not erased from the counter.
 
+    A ``_drain_lock`` provides mutual exclusion between :meth:`push` and the entire
+    :meth:`drain` critical section (flush → read → atomic replace).  :meth:`push` holds
+    the lock for the duration of the ``_pending`` increment and :meth:`queue.Queue.put`,
+    ensuring no new item can be enqueued while :meth:`drain` holds the file open.
+    The background worker never acquires ``_drain_lock``, so no deadlock is possible.
+
     :attr:`size` returns ``_pending + _committed`` without reading the file, so no
     transient queue state can cause an item to be counted twice or omitted.
 
     :meth:`drain` calls :meth:`flush` before reading the file, sorts entries in ascending
     order by ``receipt["metadata"]["sequence"]`` to preserve the ledger's linear hash
     chain, and atomically clears the buffer via a ``tempfile`` → ``os.replace`` promotion.
+    If the atomic promotion fails, :meth:`drain` returns an empty list so that no
+    downstream ledger commits are made against an uncleared buffer.
 
     :param path: Filesystem path to the JSONL buffer file.  The file is created on the
         first background write if it does not already exist.
@@ -48,6 +56,7 @@ class OffGridBuffer:
         self._pending: int = 0
         self._committed: int = 0
         self._count_lock: threading.Lock = threading.Lock()
+        self._drain_lock: threading.Lock = threading.Lock()
         self._worker_thread: threading.Thread = threading.Thread(
             target=self._disk_writer,
             daemon=True,
@@ -92,6 +101,11 @@ class OffGridBuffer:
         :attr:`~sovereign_edge.pipeline.EdgePipeline.buffer_depth` is accurate without
         requiring a :meth:`flush` call.
 
+        Acquires ``_drain_lock`` for the duration of the ``_pending`` increment and
+        :meth:`queue.Queue.put` to prevent a concurrent :meth:`drain` from sweeping the
+        file between the enqueue and the background write, which would silently discard
+        the entry.
+
         :param receipt: A :class:`~sovereign_core.crypto.ForensicReceipt`-compatible
             dict to queue for later ledger submission.
         :type receipt: dict[str, Any]
@@ -104,9 +118,10 @@ class OffGridBuffer:
             sort_keys=True,
             ensure_ascii=False,
         )
-        with self._count_lock:
-            self._pending += 1
-        self._write_queue.put(entry)
+        with self._drain_lock:
+            with self._count_lock:
+                self._pending += 1
+            self._write_queue.put(entry)
 
     def flush(self) -> None:
         """Block until all enqueued entries have been committed to disk.
@@ -122,6 +137,11 @@ class OffGridBuffer:
     def drain(self) -> list[tuple[dict[str, Any], str]]:
         """Flush, read, sort, and atomically clear all buffered entries.
 
+        Acquires ``_drain_lock`` for the entire critical section so that no concurrent
+        :meth:`push` can enqueue to the background worker between :meth:`flush` and the
+        atomic file promotion, preventing an in-flight write from landing in the file
+        that is about to be replaced and being silently discarded.
+
         Calls :meth:`flush` to ensure all in-flight background writes are committed
         before reading the file.  Entries are sorted in ascending order by
         ``receipt["metadata"]["sequence"]`` to protect the ledger's linear hash chain
@@ -134,69 +154,73 @@ class OffGridBuffer:
         ``_committed`` is decremented by the exact number of entries drained under the
         count lock rather than zeroed unconditionally.  This preserves any ``_committed``
         increments that accumulated for concurrent writes arriving after :meth:`flush`
-        returned but before the file swap completed.  Malformed JSON lines are silently
-        skipped.  Returns an empty list when the buffer file does not exist.
+        returned but before the file swap completed.  If the atomic promotion fails,
+        an empty list is returned so that no downstream ledger commits are made against
+        an uncleared buffer.  Malformed JSON lines are silently skipped.  Returns an
+        empty list when the buffer file does not exist.
 
-        :return: List of ``(receipt_dict, sieved_content)`` tuples sorted by sequence.
+        :return: List of ``(receipt_dict, sieved_content)`` tuples sorted by sequence,
+            or an empty list if the buffer file could not be atomically cleared.
         :rtype: list[tuple[dict[str, Any], str]]
         """
-        self.flush()
+        with self._drain_lock:
+            self.flush()
 
-        if not self._path.exists():
-            return []
+            if not self._path.exists():
+                return []
 
-        try:
-            raw_lines: list[str] = self._path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            return []
-
-        entries: list[tuple[dict[str, Any], str]] = []
-        for line in raw_lines:
-            stripped: str = line.strip()
-            if not stripped:
-                continue
             try:
-                obj: dict[str, Any] = json.loads(stripped)
-                entries.append((obj["receipt"], obj["sieved_content"]))
-            except (json.JSONDecodeError, KeyError):
-                continue
+                raw_lines: list[str] = self._path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                return []
 
-        def _seq_key(entry: tuple[dict[str, Any], str]) -> int:
-            try:
-                return int(entry[0].get("metadata", {}).get("sequence", 0))
-            except (TypeError, ValueError):
-                return 0
-
-        entries.sort(key=_seq_key)
-
-        drained: int = len(entries)
-
-        tmp_path: str = ""
-        replaced: bool = False
-        try:
-            with tempfile.NamedTemporaryFile(
-                dir=self._path.parent,
-                delete=False,
-                suffix=".tmp",
-                mode="w",
-                encoding="utf-8",
-            ) as tmp_fh:
-                tmp_path = tmp_fh.name
-            os.replace(tmp_path, self._path)
-            tmp_path = ""
-            replaced = True
-        except OSError:
-            if tmp_path:
+            entries: list[tuple[dict[str, Any], str]] = []
+            for line in raw_lines:
+                stripped: str = line.strip()
+                if not stripped:
+                    continue
                 try:
-                    os.remove(tmp_path)
-                except OSError:
-                    pass
+                    obj: dict[str, Any] = json.loads(stripped)
+                    entries.append((obj["receipt"], obj["sieved_content"]))
+                except (json.JSONDecodeError, KeyError):
+                    continue
 
-        if replaced:
-            with self._count_lock:
-                self._committed = max(0, self._committed - drained)
+            def _seq_key(entry: tuple[dict[str, Any], str]) -> int:
+                try:
+                    return int(entry[0].get("metadata", {}).get("sequence", 0))
+                except (TypeError, ValueError):
+                    return 0
 
-        return entries
+            entries.sort(key=_seq_key)
+
+            drained: int = len(entries)
+
+            tmp_path: str = ""
+            replaced: bool = False
+            try:
+                with tempfile.NamedTemporaryFile(
+                    dir=self._path.parent,
+                    delete=False,
+                    suffix=".tmp",
+                    mode="w",
+                    encoding="utf-8",
+                ) as tmp_fh:
+                    tmp_path = tmp_fh.name
+                os.replace(tmp_path, self._path)
+                tmp_path = ""
+                replaced = True
+            except OSError:
+                if tmp_path:
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+
+            if replaced:
+                with self._count_lock:
+                    self._committed = max(0, self._committed - drained)
+
+            return entries if replaced else []
 
     def close(self) -> None:
         """Flush all pending writes and terminate the background worker thread.
