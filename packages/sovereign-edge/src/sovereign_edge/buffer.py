@@ -51,13 +51,19 @@ class OffGridBuffer:
     ledger commits are made against an uncleared buffer; write-error entries are retained
     in ``_write_errors`` for the next drain pass.
 
-    :param path: Filesystem path to the JSONL buffer file.  The file is created on the
-        first background write if it does not already exist.
+    The parent directory of the buffer file is created (with all intermediate components)
+    at construction time via :meth:`pathlib.Path.mkdir` so that both the background
+    append path and the ``tempfile`` → ``os.replace`` atomic swap in :meth:`drain` are
+    guaranteed a valid directory regardless of how deeply nested the supplied path is.
+
+    :param path: Filesystem path to the JSONL buffer file.  The parent directory is
+        created at construction time if it does not already exist.
     :type path: str
     """
 
     def __init__(self, path: str) -> None:
         self._path: Path = Path(path)
+        self._path.parent.mkdir(parents=True, exist_ok=True)
         self._write_queue: _queue.Queue[str | None] = _queue.Queue()
         self._pending: int = 0
         self._committed: int = 0
@@ -256,15 +262,33 @@ class OffGridBuffer:
         """Flush all pending writes and terminate the background worker thread.
 
         Sends the ``None`` sentinel through the write queue.  The worker processes
-        all prior entries before it encounters the sentinel, then exits.
+        all prior entries before it encounters the sentinel, then exits.  After the
+        worker terminates, ``_write_errors`` is inspected under the count lock; if any
+        receipt entries that failed to reach disk are still unresolved, a
+        :exc:`RuntimeError` is raised so the host application is forced to acknowledge
+        the un-journaled receipts rather than allowing them to vaporize silently.
+        Callers must invoke :meth:`drain` before :meth:`close` whenever there is any
+        possibility of prior disk write failures; :meth:`drain` surfaces and clears
+        ``_write_errors`` so the subsequent :meth:`close` completes without error.
 
         :return: None
         :rtype: None
+        :raises RuntimeError: If one or more receipt entries are preserved in
+            ``_write_errors`` at shutdown time, indicating that they failed to reach
+            disk and have not been recovered via :meth:`drain`.
         """
         with self._count_lock:
             self._pending += 1
         self._write_queue.put(None)
         self._worker_thread.join()
+        with self._count_lock:
+            error_count: int = len(self._write_errors)
+        if error_count:
+            raise RuntimeError(
+                f"OffGridBuffer closed with {error_count} un-journaled "
+                f"receipt{'s' if error_count != 1 else ''} in _write_errors; "
+                "call drain() before close() to recover pending entries"
+            )
 
     @property
     def size(self) -> int:

@@ -487,6 +487,9 @@ committed = pipeline.drain_buffer()
   (`v`, `n`, `t`, `q`, `alg`, `d`, `s`) from UTF-8 JSON bytes; `text_content()` produces
   deterministic, sort-keyed JSON for canonical sieve input.
 * [x] `OffGridBuffer`: durable JSONL-backed queue with background daemon writer thread —
+  `__init__` invokes `self._path.parent.mkdir(parents=True, exist_ok=True)` immediately
+  after resolving the buffer path, guaranteeing that both the background append and the
+  `tempfile` staging directory are available at construction rather than at first write;
   `push()` returns immediately (non-blocking); `flush()` blocks via `Queue.join()` until all
   pending writes are committed to disk; disk write failures (`OSError` during `open` /
   `fsync`) are preserved in a `_write_errors` list under `_count_lock` so no receipt is
@@ -506,7 +509,9 @@ committed = pipeline.drain_buffer()
   commits are made against an uncleared buffer; write-error entries are preserved in
   `_write_errors` for the next pass), and decrements `_committed` by the file-entry count
   only so write-error entries — which never accumulated in `_committed` — require no counter
-  adjustment.
+  adjustment; `close()` joins the worker thread then inspects `_write_errors` and raises
+  `RuntimeError` if any un-journaled entries remain, forcing the host application to
+  acknowledge data loss instead of shutting down silently.
 * [x] `EdgePipeline.__init__()` — key directory created with `mode=0o700` at first use and
   explicitly re-enforced via `chmod(0o700)` on every construction, correcting a pre-existing
   directory whose permissions may have been set with a lax umask.
@@ -518,7 +523,7 @@ committed = pipeline.drain_buffer()
   `drain_buffer()` re-queues entries that still cannot reach the ledger.
 * [x] `EdgeResult` dataclass: structured return type from `process()` with `payload_hash`,
   `receipt`, `sieved_content`, Prose Tax telemetry fields, and `buffered` flag.
-* [x] 58-case desktop validation test suite across seven classes (`TestSensorFrame`,
+* [x] 59-case desktop validation test suite across seven classes (`TestSensorFrame`,
   `TestOffGridBuffer`, `TestEdgePipelineProcess`, `TestEdgePipelineBuffering`,
   `TestEdgePipelineDrainBuffer`, `TestOffGridBufferAsync`, `TestEdgePipelineSieveFault`,
   `TestOffGridBufferWriteErrors`) covering all fortification scenarios: non-blocking
@@ -526,7 +531,8 @@ committed = pipeline.drain_buffer()
   non-integer sequence value tolerance in the sort key guard, `_committed` counter
   accuracy after drain, sieve fault fallback with raw text and `sieve_fault=True`
   metadata, disk write error tracking via `write_error_count`, `size` accuracy under
-  disk failure, and full `drain()` recovery of write-error entries.
+  disk failure, full `drain()` recovery of write-error entries, and `close()` raising
+  `RuntimeError` when un-journaled entries remain at shutdown.
 
 ---
 

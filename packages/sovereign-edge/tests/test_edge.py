@@ -746,29 +746,37 @@ class TestOffGridBufferWriteErrors:
 
     def test_disk_write_error_increments_write_error_count(self, tmp_path: Path) -> None:
         """A background write failure must be reflected in write_error_count rather than
-        silently dropped — the buffer path points into a non-existent directory so open()
-        raises FileNotFoundError (OSError subclass) on every write attempt."""
-        buf = OffGridBuffer(str(tmp_path / "no_such_dir" / "buffer.jsonl"))
+        silently dropped.  __init__ creates the parent directory; removing it immediately
+        afterwards forces FileNotFoundError (an OSError subclass) on every write attempt."""
+        buf_dir: Path = tmp_path / "buf_dir"
+        buf = OffGridBuffer(str(buf_dir / "buffer.jsonl"))
+        buf_dir.rmdir()  # remove the directory __init__ just created to trigger write failure
         buf.push(self._make_receipt("A"), "content A")
         buf.flush()
         assert buf.write_error_count == 1
+        buf.drain()  # clear write errors so close() does not raise
         buf.close()
 
     def test_size_includes_write_error_entries(self, tmp_path: Path) -> None:
         """size must count write-error entries so buffer_depth remains accurate after a
         disk failure; the entry that could not be fsync'd must not vanish from the tally."""
-        buf = OffGridBuffer(str(tmp_path / "no_such_dir" / "buffer.jsonl"))
+        buf_dir: Path = tmp_path / "buf_dir"
+        buf = OffGridBuffer(str(buf_dir / "buffer.jsonl"))
+        buf_dir.rmdir()
         buf.push(self._make_receipt("A"), "content A")
         buf.flush()
         assert buf.size == 1
+        buf.drain()  # clear write errors so close() does not raise
         buf.close()
 
     def test_drain_returns_write_error_entries(self, tmp_path: Path) -> None:
         """drain() must include write-error entries in its return value so the pipeline
         can commit them to the ledger; write_error_count must reach zero after a successful
         drain pass."""
+        buf_dir: Path = tmp_path / "buf_dir"
         receipt = self._make_receipt("A")
-        buf = OffGridBuffer(str(tmp_path / "no_such_dir" / "buffer.jsonl"))
+        buf = OffGridBuffer(str(buf_dir / "buffer.jsonl"))
+        buf_dir.rmdir()
         buf.push(receipt, "content A")
         buf.flush()
         entries = buf.drain()
@@ -777,3 +785,17 @@ class TestOffGridBufferWriteErrors:
         assert entries[0][1] == "content A"
         assert buf.write_error_count == 0
         buf.close()
+
+    def test_close_raises_when_write_errors_remain(self, tmp_path: Path) -> None:
+        """close() must raise RuntimeError rather than silently discard un-journaled
+        receipts.  A patched OSError on open() simulates ENOSPC during the background
+        write; the fault is tracked in _write_errors and close() surfaces it by raising
+        so the host application is forced to acknowledge the data before shutdown."""
+        buf = OffGridBuffer(str(tmp_path / "buffer.jsonl"))
+        receipt = self._make_receipt("A")
+        with patch("builtins.open", side_effect=OSError("ENOSPC: no space left on device")):
+            buf.push(receipt, "content A")
+            buf.flush()
+        assert buf.write_error_count == 1
+        with pytest.raises(RuntimeError, match="un-journaled"):
+            buf.close()

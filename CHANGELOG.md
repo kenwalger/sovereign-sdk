@@ -92,6 +92,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ledger's append-only hash chain.  The return statement is now `return entries if replaced else []`
   so that no downstream commits are made unless the buffer file has been provably cleared from disk.
 
+- **`OffGridBuffer.__init__()` — parent directory guaranteed at construction** (`buffer.py`):
+  Adds `self._path.parent.mkdir(parents=True, exist_ok=True)` as the first action after
+  resolving the buffer path.  Previously, both the background append path
+  (`open(self._path, "a")`) and the `tempfile.NamedTemporaryFile(dir=self._path.parent)`
+  call inside `drain()` assumed the parent directory existed without ensuring it.  A
+  custom nested buffer path such as ``"/opt/sovereign/buffers/node-01/.edge_buffer.jsonl"``
+  would fail at first write rather than at construction, leaving errors invisible until the
+  first receipt arrived.  The explicit `mkdir` call surfaces the failure at object
+  creation time and eliminates the entire class of parent-directory-absent write errors
+  on the happy path.
+
+- **`OffGridBuffer.close()` — `RuntimeError` raised on un-journaled entries** (`buffer.py`):
+  After joining the background worker thread, `close()` inspects ``_write_errors`` under
+  the count lock and raises :exc:`RuntimeError` if any entries remain unresolved.  The
+  previous implementation joined the thread and returned silently regardless of
+  ``_write_errors`` state, allowing the host application to shut down without ever learning
+  that receipts had failed to reach disk.  The raise forces the caller to invoke
+  :meth:`drain` before :meth:`close` when disk failures have occurred; ``drain`` surfaces
+  and clears ``_write_errors``, after which ``close`` completes without error.  One new
+  test (``test_close_raises_when_write_errors_remain``) validates this contract using a
+  ``patch("builtins.open", side_effect=OSError("ENOSPC"))`` mock to simulate a full-disk
+  condition.
+
+- **`TestOffGridBufferWriteErrors` — trigger mechanism hardened to `rmdir` pattern**
+  (`test_edge.py`): The three pre-existing write-error tests previously used a
+  ``no_such_dir`` path to force ``FileNotFoundError``; because ``__init__`` now creates the
+  parent directory, that path would succeed and the write errors would not occur.  All
+  three tests are updated to call ``buf_dir.rmdir()`` immediately after constructing the
+  buffer so the directory is removed from under the writer thread.  Tests
+  ``test_disk_write_error_increments_write_error_count`` and
+  ``test_size_includes_write_error_entries`` also add a ``buf.drain()`` call before
+  ``buf.close()`` to clear ``_write_errors`` so that the new hardened ``close()`` does not
+  raise during test teardown.
+
 - **`EdgePipeline.__init__()` — explicit `chmod(0o700)` after `mkdir`** (`pipeline.py`):
   Adds `key_path.parent.chmod(0o700)` immediately after `key_path.parent.mkdir(...)`.  The
   `mkdir` call sets the permissions bitmask only when creating a new directory; if the
