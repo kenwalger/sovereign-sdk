@@ -128,9 +128,13 @@ class OffGridBuffer:
         requiring a :meth:`flush` call.
 
         Acquires ``_drain_lock`` for the duration of the ``_pending`` increment and
-        :meth:`queue.Queue.put` to prevent a concurrent :meth:`drain` from sweeping the
-        file between the enqueue and the background write, which would silently discard
-        the entry.
+        :meth:`queue.Queue.put` to protect counter modifications and prevent a concurrent
+        :meth:`drain` from sweeping the file between the enqueue and the background write,
+        which would silently discard the entry.  Under active, heavy :meth:`drain`
+        playback operations — where :meth:`drain` holds ``_drain_lock`` across the full
+        flush → read → atomic-replace critical section — :meth:`push` callers will
+        experience brief lock contention and block until the active drain batch
+        transaction yields the lock.
 
         :param receipt: A :class:`~sovereign_core.crypto.ForensicReceipt`-compatible
             dict to queue for later ledger submission.
@@ -205,6 +209,7 @@ class OffGridBuffer:
 
             if not self._path.exists():
                 with self._count_lock:
+                    self._committed = 0
                     self._write_errors.clear()
                 pending_error_entries.sort(key=_seq_key)
                 return pending_error_entries

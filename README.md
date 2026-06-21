@@ -194,8 +194,9 @@ Three fortification properties are enforced at the architecture level:
 
 1. **Backpressure isolation** — `push()` dispatches to a background daemon thread;
    the calling sensor-read loop is never blocked on `os.fsync` latency.  `buffer_depth`
-   reflects in-flight entries immediately via an atomic `_in_flight` counter, and
-   `flush()` provides an explicit synchronization point via `Queue.join()`.
+   reflects in-flight entries immediately via the dual-counter pair `_pending` (enqueued,
+   not yet fsync'd) and `_committed` (fsync'd, not yet drained), and `flush()` provides
+   an explicit synchronization point via `Queue.join()`.
 
 2. **Chronological replay** — the receipt `metadata` carries `"sequence": frame.q`.
    `drain()` sorts all buffered entries by this key before returning them, protecting
