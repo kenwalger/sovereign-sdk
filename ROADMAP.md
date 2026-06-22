@@ -523,7 +523,10 @@ committed = pipeline.drain_buffer()
   `drain_buffer()` re-queues entries that still cannot reach the ledger.
 * [x] `EdgeResult` dataclass: structured return type from `process()` with `payload_hash`,
   `receipt`, `sieved_content`, Prose Tax telemetry fields, and `buffered` flag.
-* [x] 61-case desktop validation test suite across eight classes (`TestSensorFrame`,
+* [x] `EdgePipeline.close()`: best-effort `drain_buffer()` then `OffGridBuffer.close()`;
+  pipeline owns buffer lifecycle; `RuntimeError` from un-journaled write errors propagates
+  unmodified to enforce clean teardown invariant.
+* [x] 62-case desktop validation test suite across eight classes (`TestSensorFrame`,
   `TestOffGridBuffer`, `TestEdgePipelineProcess`, `TestEdgePipelineBuffering`,
   `TestEdgePipelineDrainBuffer`, `TestOffGridBufferAsync`, `TestEdgePipelineSieveFault`,
   `TestOffGridBufferWriteErrors`) covering all fortification scenarios: non-blocking
@@ -531,8 +534,9 @@ committed = pipeline.drain_buffer()
   non-integer sequence value tolerance in the sort key guard, `_committed` counter
   accuracy after drain, sieve fault fallback with raw text and `sieve_fault=True`
   metadata, disk write error tracking via `write_error_count`, `size` accuracy under
-  disk failure, full `drain()` recovery of write-error entries, and `close()` raising
-  `RuntimeError` when un-journaled entries remain at shutdown.
+  disk failure, full `drain()` recovery of write-error entries, `close()` raising
+  `RuntimeError` when un-journaled entries remain at shutdown, and `EdgePipeline.close()`
+  propagating `RuntimeError` when un-journaled write errors survive the drain pass.
 
 ---
 

@@ -68,9 +68,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     workspace member at version `0.1.0` with workspace-source dependencies on
     `sovereign-core`, `sovereign-ledger`, and `sovereign-sieve`.
 
-  - **`packages/sovereign-edge/tests/test_edge.py`** — 61 test cases across eight
+  - **`packages/sovereign-edge/tests/test_edge.py`** — 62 test cases across eight
     classes (`TestSensorFrame`: 11 cases; `TestOffGridBuffer`: 10 cases;
-    `TestEdgePipelineProcess`: 16 cases; `TestEdgePipelineBuffering`: 4 cases;
+    `TestEdgePipelineProcess`: 16 cases; `TestEdgePipelineBuffering`: 5 cases;
     `TestEdgePipelineDrainBuffer`: 5 cases; `TestOffGridBufferAsync`: 6 cases;
     `TestEdgePipelineSieveFault`: 4 cases; `TestOffGridBufferWriteErrors`: 5 cases)
     verifying: wire frame deserialization, sort-keyed `text_content()` determinism,
@@ -83,8 +83,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     on closed ledger, buffer depth increment, drain-on-recovery, re-queue on persistent
     failure, post-drain ledger integrity, disk write error tracking via `write_error_count`,
     `size` accuracy under disk failure, full `drain()` recovery of write-error entries,
-    `close()` raising `RuntimeError` when un-journaled entries remain, and `push()` raising
-    `RuntimeError` when called after `close()`.  **61 passed, 0 failed.**
+    `close()` raising `RuntimeError` when un-journaled entries remain, `push()` raising
+    `RuntimeError` when called after `close()`, and `EdgePipeline.close()` propagating
+    `RuntimeError` from `OffGridBuffer.close()` when un-journaled write errors survive the
+    internal `drain_buffer()` pass.  **62 passed, 0 failed.**
 
 ### Changed
 
@@ -239,6 +241,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   window.  `_pending` and `_committed` are both updated atomically inside the same
   `with self._count_lock:` block in the worker `finally`, so their sum is always
   exact.
+
+- **`EdgePipeline` — `close()` lifecycle method** (`pipeline.py`): Adds a `close()` method
+  that performs a best-effort :meth:`drain_buffer` pass before delegating to
+  :meth:`OffGridBuffer.close` to join the background daemon writer thread.  Without this
+  method the pipeline leaked the daemon thread on every process exit and left the
+  `OffGridBuffer` lifecycle guard unreachable; any un-journaled write errors at shutdown
+  would be silently abandoned.  The drain-before-close sequence commits any buffered
+  receipts if the ledger has recovered since they were queued, then enforces the
+  un-journaled-entry invariant via ``OffGridBuffer.close()``.  ``RuntimeError`` raised by
+  ``OffGridBuffer.close()`` propagates unmodified so the caller can distinguish clean
+  teardown from a dirty shutdown carrying unrecoverable receipts.  One new test
+  (``test_close_propagates_buffer_write_error_as_runtime_error``) validates the invariant by
+  simulating a full-disk condition with ``patch("builtins.open", side_effect=OSError)``
+  and asserting that ``pipeline.close()`` raises ``RuntimeError`` matching ``"un-journaled"``.
 
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing

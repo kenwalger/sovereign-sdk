@@ -219,6 +219,7 @@ class TestOffGridBuffer:
         buf_path = tmp_path / "buf.jsonl"
         buf = OffGridBuffer(str(buf_path))
         buf.push(self._make_receipt("good"), "good content")
+        buf.flush()  # ensure background writer closes its file handle before we append
         with open(buf_path, "a", encoding="utf-8") as fh:
             fh.write("{corrupt-json\n")
         entries = buf.drain()
@@ -473,6 +474,39 @@ class TestEdgePipelineBuffering:
     ) -> None:
         """buffer_depth must be 0 before any processing errors occur."""
         assert edge_pipeline.buffer_depth == 0
+
+    def test_close_propagates_buffer_write_error_as_runtime_error(
+        self, tmp_path: Path
+    ) -> None:
+        """EdgePipeline.close() must propagate RuntimeError from OffGridBuffer.close()
+        when un-journaled write errors survive the internal drain_buffer() pass.
+
+        Setup: close the ledger to force buffering, pre-seal both frames outside the
+        patch context so sequence-file writes succeed, then patch builtins.open with
+        ENOSPC to make the background writer place the receipt in _write_errors instead
+        of on disk.  A second identical patch during close() ensures the drain_buffer()
+        re-queue also fails, keeping _write_errors non-empty when buffer.close()
+        inspects it and raises."""
+        ledger = SovereignLedger(":memory:")
+        pipeline = EdgePipeline(
+            ledger=ledger,
+            signing_key=str(tmp_path / ".keys" / "edge_identity.pem"),
+            buffer_path=str(tmp_path / ".edge_buffer.jsonl"),
+        )
+        frame_a: bytes = _seal_frame(tmp_path)
+        pipeline.process(frame_a)  # warm up key manager before any open() patch
+        ledger.close()
+
+        frame_b: bytes = _seal_frame(tmp_path)
+        with patch("builtins.open", side_effect=OSError("ENOSPC: no space left on device")):
+            pipeline.process(frame_b)
+            pipeline._buffer.flush()
+
+        assert pipeline._buffer.write_error_count == 1
+
+        with patch("builtins.open", side_effect=OSError("ENOSPC: no space left on device")):
+            with pytest.raises(RuntimeError, match="un-journaled"):
+                pipeline.close()
 
 
 # ---------------------------------------------------------------------------

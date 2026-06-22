@@ -24,7 +24,9 @@ class EdgePipeline:
     :meth:`drain_buffer`.
 
     The pipeline does not own the ledger lifecycle; the caller is responsible for opening
-    and closing it.
+    and closing it.  The pipeline does own the off-grid buffer lifecycle; callers must
+    invoke :meth:`close` to terminate the background buffer writer thread and ensure any
+    un-journaled receipts are surfaced before process exit.
 
     :param ledger: An open :class:`~sovereign_ledger.SovereignLedger` instance.
     :type ledger: SovereignLedger
@@ -177,6 +179,29 @@ class EdgePipeline:
             self._buffer.push(receipt_dict, sieved_content)
 
         return committed
+
+    def close(self) -> None:
+        """Flush outstanding buffered receipts and terminate the background buffer worker.
+
+        Executes a best-effort :meth:`drain_buffer` pass before shutdown so that any
+        receipts queued while the ledger was unreachable are committed to the ledger if
+        it has since recovered.  After the drain attempt, delegates to
+        :meth:`~sovereign_edge.buffer.OffGridBuffer.close` to join the background daemon
+        writer thread and enforce the un-journaled-receipt invariant.
+
+        The pipeline does not own the ledger lifecycle; the caller remains responsible
+        for invoking :meth:`~sovereign_ledger.SovereignLedger.close` on the ledger
+        instance after calling this method.
+
+        :return: None
+        :rtype: None
+        :raises RuntimeError: If :meth:`~sovereign_edge.buffer.OffGridBuffer.close`
+            detects one or more receipt entries still preserved in ``_write_errors``
+            after the drain attempt, indicating that they failed to reach either the
+            JSONL file or the ledger and remain un-journaled at shutdown.
+        """
+        self.drain_buffer()
+        self._buffer.close()
 
     @property
     def buffer_depth(self) -> int:
