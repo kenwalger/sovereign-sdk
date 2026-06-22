@@ -39,11 +39,17 @@ class OffGridBuffer:
       structurally unrecoverable as typed receipt pairs but are retained for out-of-band
       inspection; :attr:`dead_letter_count` exposes the accumulated count.
 
-    A ``_drain_lock`` provides mutual exclusion between :meth:`push` and the entire
-    :meth:`drain` critical section (flush → read → atomic replace).  :meth:`push` holds
-    the lock for the duration of the ``_pending`` increment and :meth:`queue.Queue.put`,
-    ensuring no new item can be enqueued while :meth:`drain` holds the file open.
-    The background worker never acquires ``_drain_lock``, so no deadlock is possible.
+    A ``_drain_lock`` provides mutual exclusion across three operations: :meth:`push`
+    (``_pending`` increment + :meth:`queue.Queue.put`), the entire :meth:`drain` critical
+    section (flush → read → atomic replace), and the sentinel placement in :meth:`close`
+    (``_closed = True`` + ``queue.put(None)``).  Holding the same lock for both the
+    ``push()`` enqueue window and the ``close()`` sentinel placement guarantees that the
+    sentinel is always the last item in the queue: a ``push()`` in progress when ``close()``
+    is called either completes its :meth:`queue.Queue.put` before the sentinel is placed
+    (because it already held ``_drain_lock``), or observes ``_closed = True`` after
+    acquiring ``_drain_lock`` and raises without enqueuing.  The background worker never
+    acquires ``_drain_lock``, and :meth:`close` calls :meth:`threading.Thread.join` outside
+    the lock window, so no deadlock is possible.
 
     :attr:`size` returns ``_pending + _committed + len(_write_errors)`` without reading
     the file, so no transient queue state can cause an item to be counted twice or omitted,
@@ -303,20 +309,28 @@ class OffGridBuffer:
     def close(self) -> None:
         """Flush all pending writes and terminate the background worker thread.
 
-        Sets ``_closed = True`` and increments ``_pending`` atomically under the count
-        lock before dispatching the ``None`` sentinel.  Setting the flag inside the lock
-        guarantees that any concurrent :meth:`push` call that has not yet entered its own
-        ``_count_lock`` block will observe ``_closed = True`` and raise immediately rather
-        than enqueuing an entry into a queue that has no living consumer.  Sends the
-        ``None`` sentinel through the write queue.  The worker processes all prior entries
-        before it encounters the sentinel, then exits.  After the worker terminates,
-        ``_write_errors`` is inspected under the count lock; if any receipt entries that
-        failed to reach disk are still unresolved, a :exc:`RuntimeError` is raised so the
-        host application is forced to acknowledge the un-journaled receipts rather than
-        allowing them to vaporize silently.  Callers must invoke :meth:`drain` before
-        :meth:`close` whenever there is any possibility of prior disk write failures;
-        :meth:`drain` surfaces and clears ``_write_errors`` so the subsequent :meth:`close`
-        completes without error.
+        Acquires ``_drain_lock`` before modifying shared state or placing the sentinel,
+        then sets ``_closed = True`` and increments ``_pending`` atomically under the
+        count lock, and finally dispatches the ``None`` sentinel — all while holding
+        ``_drain_lock``.  Performing the sentinel placement inside ``_drain_lock``
+        eliminates the shutdown race: a concurrent :meth:`push` that has already acquired
+        ``_drain_lock`` and passed the ``_closed`` gate will finish its
+        :meth:`queue.Queue.put` before the sentinel is placed (both operations are
+        serialized by the lock); a :meth:`push` that has not yet acquired ``_drain_lock``
+        will observe ``_closed = True`` and raise without enqueuing.  This guarantees
+        that the sentinel is always the last item the worker ever processes.
+
+        ``_worker_thread.join()`` is called **outside** the lock window so that the
+        caller does not hold ``_drain_lock`` while waiting for the worker to drain the
+        queue, which would prevent any concurrent :meth:`drain` call from completing.
+
+        After the worker terminates, ``_write_errors`` is inspected under the count lock;
+        if any receipt entries that failed to reach disk are still unresolved, a
+        :exc:`RuntimeError` is raised so the host application is forced to acknowledge
+        the un-journaled receipts rather than allowing them to vaporize silently.
+        Callers must invoke :meth:`drain` before :meth:`close` whenever there is any
+        possibility of prior disk write failures; :meth:`drain` surfaces and clears
+        ``_write_errors`` so the subsequent :meth:`close` completes without error.
 
         :return: None
         :rtype: None
@@ -324,10 +338,11 @@ class OffGridBuffer:
             ``_write_errors`` at shutdown time, indicating that they failed to reach
             disk and have not been recovered via :meth:`drain`.
         """
-        with self._count_lock:
-            self._closed = True
-            self._pending += 1
-        self._write_queue.put(None)
+        with self._drain_lock:
+            with self._count_lock:
+                self._closed = True
+                self._pending += 1
+            self._write_queue.put(None)
         self._worker_thread.join()
         with self._count_lock:
             error_count: int = len(self._write_errors)

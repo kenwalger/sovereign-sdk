@@ -29,6 +29,7 @@ Invariants verified across every test:
 """
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -722,6 +723,76 @@ class TestOffGridBufferAsync:
         buf.drain()
         buf.push(self._make_receipt("B"), "content B")
         assert buf.size == 1
+
+    def test_concurrent_push_vs_close_no_orphan_entries(self, tmp_path: Path) -> None:
+        """Every push() racing against close() must be resolved without orphaning entries.
+
+        Verifies the _drain_lock sentinel-placement invariant: push() and close() both
+        acquire _drain_lock before touching the queue, so the sentinel is always the last
+        item the worker processes.  After the worker joins, queue.unfinished_tasks must be
+        zero — any non-zero value indicates an entry was enqueued after the sentinel and
+        the worker exited without calling task_done() for it.  All accepted pushes must be
+        fully accounted for between the on-disk JSONL lines and write_error_count.
+        """
+        buf_path = tmp_path / "buf.jsonl"
+        buf = OffGridBuffer(str(buf_path))
+
+        n_threads: int = 20
+        accepted: list[int] = []
+        rejected: list[int] = []
+        result_lock: threading.Lock = threading.Lock()
+
+        def attempt_push(index: int) -> None:
+            try:
+                buf.push(
+                    self._make_receipt(f"node_{index}", sequence=index),
+                    f"content {index}",
+                )
+                with result_lock:
+                    accepted.append(index)
+            except RuntimeError:
+                with result_lock:
+                    rejected.append(index)
+
+        push_threads: list[threading.Thread] = [
+            threading.Thread(target=attempt_push, args=(i,), daemon=True)
+            for i in range(n_threads)
+        ]
+        for t in push_threads:
+            t.start()
+
+        # Race close() against the active push threads — the critical window under test.
+        try:
+            buf.close()
+        except RuntimeError:
+            pass  # write errors are not expected in tmp_path but are acceptable here
+
+        for t in push_threads:
+            t.join()
+
+        # Every push was deterministically resolved — no thread crashed silently.
+        assert len(accepted) + len(rejected) == n_threads, (
+            f"accepted={len(accepted)}, rejected={len(rejected)}, expected total={n_threads}"
+        )
+
+        # No orphan entries: sentinel was last item; worker called task_done() for all items.
+        assert buf._write_queue.unfinished_tasks == 0, (
+            f"queue has {buf._write_queue.unfinished_tasks} unfinished tasks after close(); "
+            "an entry was enqueued behind the sentinel"
+        )
+
+        # All accepted entries are on disk or preserved in write_errors — none vaporized.
+        on_disk_count: int = 0
+        if buf_path.exists():
+            on_disk_count = sum(
+                1
+                for ln in buf_path.read_text(encoding="utf-8").splitlines()
+                if ln.strip()
+            )
+        assert on_disk_count + buf.write_error_count == len(accepted), (
+            f"on_disk={on_disk_count}, write_errors={buf.write_error_count}, "
+            f"accepted={len(accepted)}: entry count mismatch"
+        )
 
 
 # ---------------------------------------------------------------------------

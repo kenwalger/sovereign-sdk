@@ -526,7 +526,10 @@ committed = pipeline.drain_buffer()
 * [x] `EdgePipeline.close()`: best-effort `drain_buffer()` then `OffGridBuffer.close()`;
   pipeline owns buffer lifecycle; `RuntimeError` from un-journaled write errors propagates
   unmodified to enforce clean teardown invariant.
-* [x] 62-case desktop validation test suite across eight classes (`TestSensorFrame`,
+* [x] `OffGridBuffer.close()` shutdown race eliminated: sentinel `queue.put(None)` moved
+  inside `_drain_lock` so `push()` and `close()` are fully serialized; no payload can
+  be enqueued behind the sentinel; `_worker_thread.join()` remains outside the lock.
+* [x] 63-case desktop validation test suite across eight classes (`TestSensorFrame`,
   `TestOffGridBuffer`, `TestEdgePipelineProcess`, `TestEdgePipelineBuffering`,
   `TestEdgePipelineDrainBuffer`, `TestOffGridBufferAsync`, `TestEdgePipelineSieveFault`,
   `TestOffGridBufferWriteErrors`) covering all fortification scenarios: non-blocking
@@ -535,8 +538,9 @@ committed = pipeline.drain_buffer()
   accuracy after drain, sieve fault fallback with raw text and `sieve_fault=True`
   metadata, disk write error tracking via `write_error_count`, `size` accuracy under
   disk failure, full `drain()` recovery of write-error entries, `close()` raising
-  `RuntimeError` when un-journaled entries remain at shutdown, and `EdgePipeline.close()`
-  propagating `RuntimeError` when un-journaled write errors survive the drain pass.
+  `RuntimeError` when un-journaled entries remain at shutdown, `EdgePipeline.close()`
+  propagating `RuntimeError` when un-journaled write errors survive the drain pass, and
+  20-thread concurrent `push()`-vs-`close()` stress test asserting zero orphan entries.
 
 ---
 

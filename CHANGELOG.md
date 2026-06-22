@@ -68,10 +68,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     workspace member at version `0.1.0` with workspace-source dependencies on
     `sovereign-core`, `sovereign-ledger`, and `sovereign-sieve`.
 
-  - **`packages/sovereign-edge/tests/test_edge.py`** — 62 test cases across eight
+  - **`packages/sovereign-edge/tests/test_edge.py`** — 63 test cases across eight
     classes (`TestSensorFrame`: 11 cases; `TestOffGridBuffer`: 10 cases;
     `TestEdgePipelineProcess`: 16 cases; `TestEdgePipelineBuffering`: 5 cases;
-    `TestEdgePipelineDrainBuffer`: 5 cases; `TestOffGridBufferAsync`: 6 cases;
+    `TestEdgePipelineDrainBuffer`: 5 cases; `TestOffGridBufferAsync`: 7 cases;
     `TestEdgePipelineSieveFault`: 4 cases; `TestOffGridBufferWriteErrors`: 5 cases)
     verifying: wire frame deserialization, sort-keyed `text_content()` determinism,
     in-flight `size` accounting, `flush()` disk-commit guarantee, ascending-sequence sort
@@ -84,9 +84,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     failure, post-drain ledger integrity, disk write error tracking via `write_error_count`,
     `size` accuracy under disk failure, full `drain()` recovery of write-error entries,
     `close()` raising `RuntimeError` when un-journaled entries remain, `push()` raising
-    `RuntimeError` when called after `close()`, and `EdgePipeline.close()` propagating
+    `RuntimeError` when called after `close()`, `EdgePipeline.close()` propagating
     `RuntimeError` from `OffGridBuffer.close()` when un-journaled write errors survive the
-    internal `drain_buffer()` pass.  **62 passed, 0 failed.**
+    internal `drain_buffer()` pass, and 20-thread concurrent `push()`-vs-`close()` race
+    producing zero orphaned queue entries.  **63 passed, 0 failed.**
 
 ### Changed
 
@@ -194,6 +195,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the inode, the write would land in the old file and be silently discarded after the replace.
   Because the background worker never acquires `_drain_lock`, and `push()` holds the lock only
   for the brief enqueue window (not for any blocking I/O), no deadlock is possible.
+
+- **`OffGridBuffer.close()` — sentinel placement moved inside `_drain_lock`** (`buffer.py`):
+  The ``_count_lock`` state mutation (``_closed = True``, ``_pending += 1``) and the sentinel
+  ``queue.put(None)`` are now wrapped in ``with self._drain_lock:`` before delegating to
+  ``_worker_thread.join()``.  Without this change, a ``push()`` call that had already observed
+  ``_closed = False`` and incremented ``_pending`` — but had not yet called ``Queue.put`` —
+  could enqueue its payload *after* ``close()`` placed the sentinel, because ``close()``
+  previously held only ``_count_lock`` (not ``_drain_lock``) when calling ``queue.put(None)``.
+  The worker would exit on the sentinel, leaving the payload with no ``task_done()`` — an
+  orphaned entry that causes any subsequent ``Queue.join()`` to block indefinitely.  Serializing
+  both operations under ``_drain_lock`` eliminates the window: either ``push()`` holds the lock
+  and completes its enqueue before the sentinel is placed, or ``close()`` holds the lock first
+  and ``push()`` observes ``_closed = True`` and raises.  ``_worker_thread.join()`` is called
+  outside the lock so that ``drain()`` can still make progress concurrently during a long worker
+  flush.  A new 20-thread stress test (``test_concurrent_push_vs_close_no_orphan_entries``)
+  asserts that ``queue.unfinished_tasks == 0`` after the worker joins, directly verifying the
+  absence of orphan entries.
 
 - **`packages/sovereign-edge/pyproject.toml` — explicit minimum version constraints**: Each
   ecosystem dependency now carries a `>=1.1.0` floor:
