@@ -68,24 +68,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     workspace member at version `0.1.0` with workspace-source dependencies on
     `sovereign-core`, `sovereign-ledger`, and `sovereign-sieve`.
 
-  - **`packages/sovereign-edge/tests/test_edge.py`** — 59 test cases across eight
-    classes (`TestSensorFrame`: 11 cases; `TestOffGridBuffer`: 9 cases;
+  - **`packages/sovereign-edge/tests/test_edge.py`** — 61 test cases across eight
+    classes (`TestSensorFrame`: 11 cases; `TestOffGridBuffer`: 10 cases;
     `TestEdgePipelineProcess`: 16 cases; `TestEdgePipelineBuffering`: 4 cases;
     `TestEdgePipelineDrainBuffer`: 5 cases; `TestOffGridBufferAsync`: 6 cases;
-    `TestEdgePipelineSieveFault`: 4 cases; `TestOffGridBufferWriteErrors`: 4 cases)
+    `TestEdgePipelineSieveFault`: 4 cases; `TestOffGridBufferWriteErrors`: 5 cases)
     verifying: wire frame deserialization, sort-keyed `text_content()` determinism,
     in-flight `size` accounting, `flush()` disk-commit guarantee, ascending-sequence sort
     in `drain()`, FIFO stable-sort preservation for equal sequence keys, non-integer
-    sequence value tolerance, `_committed` counter accuracy after drain, happy-path ledger
-    commit, receipt signature verifiability, `sieve_fault` metadata marking, raw-text
-    fallback on sieve failure, zero savings percentage on fault path, fault-path ledger
-    commit, buffering on closed ledger, buffer depth increment, drain-on-recovery, re-queue
-    on persistent failure, post-drain ledger integrity, disk write error tracking via
-    `write_error_count`, `size` accuracy under disk failure, full `drain()` recovery of
-    write-error entries, and `close()` raising `RuntimeError` when un-journaled entries
-    remain.  **59 passed, 0 failed.**
+    sequence value tolerance, `_committed` counter accuracy after drain (including
+    post-write disk corruption producing zero drift), happy-path ledger commit, receipt
+    signature verifiability, `sieve_fault` metadata marking, raw-text fallback on sieve
+    failure, zero savings percentage on fault path, fault-path ledger commit, buffering
+    on closed ledger, buffer depth increment, drain-on-recovery, re-queue on persistent
+    failure, post-drain ledger integrity, disk write error tracking via `write_error_count`,
+    `size` accuracy under disk failure, full `drain()` recovery of write-error entries,
+    `close()` raising `RuntimeError` when un-journaled entries remain, and `push()` raising
+    `RuntimeError` when called after `close()`.  **61 passed, 0 failed.**
 
 ### Changed
+
+- **`OffGridBuffer.drain()` — `_committed` decrement based on total disk line count, not valid-only count**
+  (`buffer.py`): `file_entry_count` was derived as `len(entries) - len(pending_error_entries)`,
+  counting only successfully parsed disk lines.  If a line was written by the background worker
+  (incrementing ``_committed``) but subsequently corrupted on disk, it would parse into
+  ``_dead_letter`` and be excluded from the decrement, leaving ``_committed = 1`` after a drain that
+  cleared the file — permanent counter drift surfacing as ``size > 0`` on an empty buffer.  A new
+  ``disk_line_count`` variable increments for every non-blank line regardless of parse outcome;
+  ``file_entry_count`` is now set to ``disk_line_count`` so the ``_committed`` decrement covers the
+  exact byte footprint removed from disk.  The ``max(0, …)`` floor prevents the counter going
+  negative in cross-instance drain scenarios.  A new regression test
+  (``test_drain_size_zero_after_committed_line_corrupted_on_disk``) reproduces the drift by overwriting
+  a fsync'd buffer file with corrupt JSON and asserting ``size == 0`` and ``dead_letter_count == 1``
+  after drain.
+
+- **`OffGridBuffer` — `_closed` lifecycle guard on `push()` and `close()`** (`buffer.py`): A new
+  ``_closed: bool = False`` flag is set to ``True`` atomically with the ``_pending += 1`` sentinel
+  increment inside ``close()``'s count-lock block, ensuring any concurrent ``push()`` that has not
+  yet entered its own ``_count_lock`` section will observe the flag and raise immediately.  ``push()``
+  checks ``self._closed`` inside its ``_drain_lock → _count_lock`` critical section and raises
+  :exc:`RuntimeError` with the message ``"OffGridBuffer is closed"`` before incrementing ``_pending``
+  or calling ``queue.Queue.put``.  Without this guard, a post-close ``push()`` would increment
+  ``_pending`` and enqueue to a dead queue, causing any subsequent ``flush()`` to block indefinitely
+  because no worker ever calls ``task_done()``.  A new regression test
+  (``test_push_raises_after_close``) validates the guard by calling ``push()`` on a cleanly closed
+  buffer and asserting :exc:`RuntimeError` with ``"closed"`` in the message.
 
 - **`OffGridBuffer.drain()` — fail-safe file rotation: empty list returned on `os.replace` failure**
   (`buffer.py`): `drain()` previously returned the parsed entries list regardless of whether the

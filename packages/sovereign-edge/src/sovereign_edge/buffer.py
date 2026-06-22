@@ -75,6 +75,7 @@ class OffGridBuffer:
         self._committed: int = 0
         self._write_errors: list[tuple[dict[str, Any], str]] = []
         self._dead_letter: list[str] = []
+        self._closed: bool = False
         self._count_lock: threading.Lock = threading.Lock()
         self._drain_lock: threading.Lock = threading.Lock()
         self._worker_thread: threading.Thread = threading.Thread(
@@ -149,12 +150,19 @@ class OffGridBuffer:
         experience brief lock contention and block until the active drain batch
         transaction yields the lock.
 
+        Raises :exc:`RuntimeError` immediately if :meth:`close` has already been called.
+        After :meth:`close` the background worker thread has exited and the internal queue
+        has no consumer; enqueueing would increment ``_pending`` and place an entry into a
+        dead queue that never calls ``task_done()``, causing any subsequent :meth:`flush`
+        call to block indefinitely.
+
         :param receipt: A :class:`~sovereign_core.crypto.ForensicReceipt`-compatible
             dict to queue for later ledger submission.
         :type receipt: dict[str, Any]
         :param sieved_content: The Prose-Tax-minimized string payload associated with
             ``receipt``.
         :type sieved_content: str
+        :raises RuntimeError: If the buffer has been closed via :meth:`close`.
         """
         entry: str = json.dumps(
             {"receipt": receipt, "sieved_content": sieved_content},
@@ -163,6 +171,11 @@ class OffGridBuffer:
         )
         with self._drain_lock:
             with self._count_lock:
+                if self._closed:
+                    raise RuntimeError(
+                        "OffGridBuffer is closed; push() cannot enqueue new entries "
+                        "after close() has been called"
+                    )
                 self._pending += 1
             self._write_queue.put(entry)
 
@@ -196,16 +209,20 @@ class OffGridBuffer:
         pass.
         The buffer file is then replaced with an empty staging file via
         ``tempfile`` → ``os.replace`` to close the double-replay window.  If the atomic
-        promotion succeeds, ``_committed`` is decremented by the number of file entries
-        drained and ``_write_errors`` is cleared; write-error entries never accumulated
-        in ``_committed`` so they need no counter adjustment.  If the promotion fails, an
-        empty list is returned and ``_write_errors`` is left intact for the next drain
-        pass so that no entry is permanently discarded.  Disk lines that cannot be parsed
-        as valid JSON or that are missing the ``receipt`` / ``sieved_content`` keys are
-        quarantined in ``_dead_letter`` under the count lock rather than silently dropped;
-        :attr:`dead_letter_count` reflects the accumulated quarantine count.  Returns an
-        empty list when the buffer file does not exist and no write-error entries are
-        pending.
+        promotion succeeds, ``_committed`` is decremented by the total count of non-blank
+        disk lines (valid entries plus dead-letter lines) so that every byte footprint
+        removed from disk is reflected in the counter — including lines whose payload was
+        successfully fsync'd (incrementing ``_committed``) but subsequently corrupted on
+        disk; basing the decrement on valid-only parse count would leave ``_committed``
+        above zero for an empty file.  ``_write_errors`` is also cleared on success;
+        write-error entries never accumulated in ``_committed`` so they need no counter
+        adjustment.  If the promotion fails, an empty list is returned and ``_write_errors``
+        is left intact for the next drain pass so that no entry is permanently discarded.
+        Disk lines that cannot be parsed as valid JSON or that are missing the
+        ``receipt`` / ``sieved_content`` keys are quarantined in ``_dead_letter`` under
+        the count lock rather than silently dropped; :attr:`dead_letter_count` reflects
+        the accumulated quarantine count.  Returns an empty list when the buffer file does
+        not exist and no write-error entries are pending.
 
         :return: List of ``(receipt_dict, sieved_content)`` tuples sorted by sequence,
             or an empty list if the buffer file could not be atomically cleared.
@@ -236,10 +253,12 @@ class OffGridBuffer:
                 return []
 
             entries: list[tuple[dict[str, Any], str]] = []
+            disk_line_count: int = 0
             for line in raw_lines:
                 stripped: str = line.strip()
                 if not stripped:
                     continue
+                disk_line_count += 1
                 try:
                     obj: dict[str, Any] = json.loads(stripped)
                     entries.append((obj["receipt"], obj["sieved_content"]))
@@ -251,7 +270,7 @@ class OffGridBuffer:
             entries.extend(pending_error_entries)
             entries.sort(key=_seq_key)
 
-            file_entry_count: int = len(entries) - len(pending_error_entries)
+            file_entry_count: int = disk_line_count
 
             tmp_path: str = ""
             replaced: bool = False
@@ -284,15 +303,20 @@ class OffGridBuffer:
     def close(self) -> None:
         """Flush all pending writes and terminate the background worker thread.
 
-        Sends the ``None`` sentinel through the write queue.  The worker processes
-        all prior entries before it encounters the sentinel, then exits.  After the
-        worker terminates, ``_write_errors`` is inspected under the count lock; if any
-        receipt entries that failed to reach disk are still unresolved, a
-        :exc:`RuntimeError` is raised so the host application is forced to acknowledge
-        the un-journaled receipts rather than allowing them to vaporize silently.
-        Callers must invoke :meth:`drain` before :meth:`close` whenever there is any
-        possibility of prior disk write failures; :meth:`drain` surfaces and clears
-        ``_write_errors`` so the subsequent :meth:`close` completes without error.
+        Sets ``_closed = True`` and increments ``_pending`` atomically under the count
+        lock before dispatching the ``None`` sentinel.  Setting the flag inside the lock
+        guarantees that any concurrent :meth:`push` call that has not yet entered its own
+        ``_count_lock`` block will observe ``_closed = True`` and raise immediately rather
+        than enqueuing an entry into a queue that has no living consumer.  Sends the
+        ``None`` sentinel through the write queue.  The worker processes all prior entries
+        before it encounters the sentinel, then exits.  After the worker terminates,
+        ``_write_errors`` is inspected under the count lock; if any receipt entries that
+        failed to reach disk are still unresolved, a :exc:`RuntimeError` is raised so the
+        host application is forced to acknowledge the un-journaled receipts rather than
+        allowing them to vaporize silently.  Callers must invoke :meth:`drain` before
+        :meth:`close` whenever there is any possibility of prior disk write failures;
+        :meth:`drain` surfaces and clears ``_write_errors`` so the subsequent :meth:`close`
+        completes without error.
 
         :return: None
         :rtype: None
@@ -301,6 +325,7 @@ class OffGridBuffer:
             disk and have not been recovered via :meth:`drain`.
         """
         with self._count_lock:
+            self._closed = True
             self._pending += 1
         self._write_queue.put(None)
         self._worker_thread.join()

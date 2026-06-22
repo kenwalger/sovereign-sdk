@@ -225,6 +225,24 @@ class TestOffGridBuffer:
         assert len(entries) == 1
         assert entries[0][0]["payload_hash"] == "hash_good"
 
+    def test_drain_size_zero_after_committed_line_corrupted_on_disk(
+        self, tmp_path: Path
+    ) -> None:
+        """size must reach exactly 0 after drain() when a fsync'd line is subsequently
+        corrupted on disk.  The _committed decrement must cover total disk line count
+        (valid + dead-letter), not only successfully parsed lines; otherwise _committed
+        stays at 1 for an empty file, producing permanent counter drift."""
+        buf_path = tmp_path / "buf.jsonl"
+        buf = OffGridBuffer(str(buf_path))
+        buf.push(self._make_receipt("good"), "good content")
+        buf.flush()
+        assert buf.size == 1  # _committed == 1 after successful fsync
+        buf_path.write_text("{corrupted-line\n", encoding="utf-8")
+        entries = buf.drain()
+        assert entries == []
+        assert buf.size == 0
+        assert buf.dead_letter_count == 1
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -799,3 +817,12 @@ class TestOffGridBufferWriteErrors:
         assert buf.write_error_count == 1
         with pytest.raises(RuntimeError, match="un-journaled"):
             buf.close()
+
+    def test_push_raises_after_close(self, tmp_path: Path) -> None:
+        """push() must raise RuntimeError when called on a closed buffer rather than
+        enqueue into a dead queue; enqueueing after close would increment _pending but
+        never receive task_done(), causing any subsequent flush() to block indefinitely."""
+        buf = OffGridBuffer(str(tmp_path / "buffer.jsonl"))
+        buf.close()
+        with pytest.raises(RuntimeError, match="closed"):
+            buf.push(self._make_receipt("post-close"), "content")
