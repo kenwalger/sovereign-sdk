@@ -292,6 +292,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   honors fixture dependency order and tears down ``edge_pipeline`` before ``mem_ledger``,
   ensuring the ledger is still open when ``pipeline.close()`` calls ``drain_buffer()``.
 
+- **`TestEdgePipelineBuffering` — `try/finally` teardown on ad-hoc pipeline instances**
+  (`test_edge.py`): The three test methods that construct a local ``EdgePipeline`` directly
+  (``test_process_sets_buffered_true_when_ledger_closed``,
+  ``test_process_increments_buffer_depth_on_ledger_error``, and
+  ``test_process_returns_payload_hash_even_when_buffered``) previously exited without calling
+  ``pipeline.close()``, leaving a live daemon thread after each test.  Each method now wraps
+  its body in ``try/finally`` with ``pipeline.close()`` in the ``finally`` block so the
+  background writer thread is joined even when an assertion fails mid-test.
+
+- **`TestEdgePipelineDrainBuffer` — `flush()` sync points and `try/finally` teardown**
+  (`test_edge.py`): All four drain-buffer tests that write via ``pipeline_a`` and then read
+  via ``pipeline_b`` now call ``pipeline_a._buffer.flush()`` immediately after each
+  ``process()`` call.  Without the explicit flush the background writer thread may not have
+  fsync-committed the JSONL line to disk before ``pipeline_b.drain_buffer()`` calls
+  ``drain()`` → ``flush()``; on a loaded scheduler the two flush calls can race and
+  ``pipeline_b`` may read an empty file.  All seven local pipeline instances across the four
+  methods are now closed in ``try/finally`` blocks; ``pipeline_b.close()`` is always called
+  before the recovery ledger is closed so the ``drain_buffer()`` pass inside ``close()``
+  still has an open ledger to commit against.
+
+- **`EdgePipeline.process()` — sieve-fault fallback calls `frame.text_content()` once**
+  (`pipeline.py`): The ``except Exception`` fallback block previously called
+  ``frame.text_content()`` a second time (the ``try`` branch called it once inside
+  ``sieve_with_metrics(frame.text_content())``, the ``except`` branch called it again to
+  obtain ``raw_text``).  ``text_content()`` performs a ``json.dumps`` on the observation
+  payload on every invocation; calling it twice on the fault path is redundant and
+  inconsistent with the non-redundant optimization principle.  ``raw_text`` is now assigned
+  from a single ``frame.text_content()`` call before the ``try`` block; both the happy path
+  (``sieve_with_metrics(raw_text)``) and the fault path (``SieveOutput(text=raw_text, …)``)
+  consume the same string reference.
+
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing
   sensor observations into versioned, tamper-evident, minified JSON transmission envelopes with

@@ -530,6 +530,12 @@ committed = pipeline.drain_buffer()
 * [x] `edge_pipeline` fixture refactored to `yield` + `pipeline.close()` teardown:
   background writer thread joined after every test; pytest dependency order ensures
   ledger remains open during the teardown drain pass.
+* [x] Ad-hoc pipeline teardown hardened: `TestEdgePipelineBuffering` local instances
+  closed in `try/finally`; `TestEdgePipelineDrainBuffer` adds `_buffer.flush()` after
+  each `process()` call and closes both `pipeline_a` and `pipeline_b` in `try/finally`
+  with recovery ledger closed after `pipeline_b.close()`.
+* [x] `process()` sieve-fault fallback: `frame.text_content()` called once before the
+  `try` block; both happy and fault paths consume the single `raw_text` reference.
 * [x] `OffGridBuffer.close()` shutdown race eliminated: sentinel `queue.put(None)` moved
   inside `_drain_lock` so `push()` and `close()` are fully serialized; no payload can
   be enqueued behind the sentinel; `_worker_thread.join()` remains outside the lock.

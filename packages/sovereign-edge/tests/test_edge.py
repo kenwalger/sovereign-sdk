@@ -449,9 +449,11 @@ class TestEdgePipelineBuffering:
             buffer_path=str(tmp_path / ".edge_buffer.jsonl"),
         )
         ledger.close()
-
-        result = pipeline.process(_seal_frame(tmp_path))
-        assert result.buffered is True
+        try:
+            result = pipeline.process(_seal_frame(tmp_path))
+            assert result.buffered is True
+        finally:
+            pipeline.close()
 
     def test_process_increments_buffer_depth_on_ledger_error(self, tmp_path: Path) -> None:
         """buffer_depth must reflect each receipt queued after a ledger failure."""
@@ -462,9 +464,11 @@ class TestEdgePipelineBuffering:
             buffer_path=str(tmp_path / ".edge_buffer.jsonl"),
         )
         ledger.close()
-
-        pipeline.process(_seal_frame(tmp_path))
-        assert pipeline.buffer_depth == 1
+        try:
+            pipeline.process(_seal_frame(tmp_path))
+            assert pipeline.buffer_depth == 1
+        finally:
+            pipeline.close()
 
     def test_process_returns_payload_hash_even_when_buffered(self, tmp_path: Path) -> None:
         """payload_hash must be the ForensicReceipt hash even when the receipt is buffered."""
@@ -475,9 +479,11 @@ class TestEdgePipelineBuffering:
             buffer_path=str(tmp_path / ".edge_buffer.jsonl"),
         )
         ledger.close()
-
-        result = pipeline.process(_seal_frame(tmp_path))
-        assert len(result.payload_hash) == 64
+        try:
+            result = pipeline.process(_seal_frame(tmp_path))
+            assert len(result.payload_hash) == 64
+        finally:
+            pipeline.close()
 
     def test_buffer_depth_zero_before_any_error(
         self, edge_pipeline: EdgePipeline
@@ -540,10 +546,13 @@ class TestEdgePipelineDrainBuffer:
             buffer_path=buffer_path,
         )
         closed_ledger.close()
-
-        result = pipeline_a.process(_seal_frame(tmp_path))
-        assert result.buffered is True
-        buffered_hash = result.payload_hash
+        try:
+            result = pipeline_a.process(_seal_frame(tmp_path))
+            pipeline_a._buffer.flush()
+            assert result.buffered is True
+            buffered_hash = result.payload_hash
+        finally:
+            pipeline_a.close()
 
         # Phase 2: drain via a fresh pipeline wired to a new open ledger.
         open_ledger = SovereignLedger(str(tmp_path / "recovery.db"))
@@ -552,10 +561,12 @@ class TestEdgePipelineDrainBuffer:
             signing_key=key_path,
             buffer_path=buffer_path,
         )
-
-        committed = pipeline_b.drain_buffer()
-        assert buffered_hash in committed
-        open_ledger.close()
+        try:
+            committed = pipeline_b.drain_buffer()
+            assert buffered_hash in committed
+        finally:
+            pipeline_b.close()
+            open_ledger.close()
 
     def test_drain_buffer_clears_buffer_on_success(self, tmp_path: Path) -> None:
         """buffer_depth must be 0 after a successful drain_buffer() pass."""
@@ -569,7 +580,11 @@ class TestEdgePipelineDrainBuffer:
             buffer_path=buffer_path,
         )
         closed_ledger.close()
-        pipeline_a.process(_seal_frame(tmp_path))
+        try:
+            pipeline_a.process(_seal_frame(tmp_path))
+            pipeline_a._buffer.flush()
+        finally:
+            pipeline_a.close()
 
         open_ledger = SovereignLedger(str(tmp_path / "recovery2.db"))
         pipeline_b = EdgePipeline(
@@ -577,10 +592,12 @@ class TestEdgePipelineDrainBuffer:
             signing_key=key_path,
             buffer_path=buffer_path,
         )
-        pipeline_b.drain_buffer()
-
-        assert pipeline_b.buffer_depth == 0
-        open_ledger.close()
+        try:
+            pipeline_b.drain_buffer()
+            assert pipeline_b.buffer_depth == 0
+        finally:
+            pipeline_b.close()
+            open_ledger.close()
 
     def test_drain_buffer_requeues_on_persistent_ledger_failure(
         self, tmp_path: Path
@@ -597,8 +614,12 @@ class TestEdgePipelineDrainBuffer:
             buffer_path=buffer_path,
         )
         closed_ledger_a.close()
-        pipeline_a.process(_seal_frame(tmp_path))
-        assert pipeline_a.buffer_depth == 1
+        try:
+            pipeline_a.process(_seal_frame(tmp_path))
+            pipeline_a._buffer.flush()
+            assert pipeline_a.buffer_depth == 1
+        finally:
+            pipeline_a.close()
 
         # Attempt drain with another closed ledger — must re-queue.
         closed_ledger_b = SovereignLedger(":memory:")
@@ -608,10 +629,12 @@ class TestEdgePipelineDrainBuffer:
             buffer_path=buffer_path,
         )
         closed_ledger_b.close()
-
-        committed = pipeline_b.drain_buffer()
-        assert committed == []
-        assert pipeline_b.buffer_depth == 1
+        try:
+            committed = pipeline_b.drain_buffer()
+            assert committed == []
+            assert pipeline_b.buffer_depth == 1
+        finally:
+            pipeline_b.close()
 
     def test_drain_buffer_returns_empty_list_when_nothing_buffered(
         self, edge_pipeline: EdgePipeline
@@ -632,10 +655,14 @@ class TestEdgePipelineDrainBuffer:
             buffer_path=buffer_path,
         )
         closed_ledger.close()
-
-        # Buffer two receipts.
-        pipeline_a.process(_seal_frame(tmp_path))
-        pipeline_a.process(_seal_frame(tmp_path))
+        try:
+            # Buffer two receipts.
+            pipeline_a.process(_seal_frame(tmp_path))
+            pipeline_a._buffer.flush()
+            pipeline_a.process(_seal_frame(tmp_path))
+            pipeline_a._buffer.flush()
+        finally:
+            pipeline_a.close()
 
         recovery_ledger = SovereignLedger(str(tmp_path / "integrity_recovery.db"))
         pipeline_b = EdgePipeline(
@@ -643,10 +670,13 @@ class TestEdgePipelineDrainBuffer:
             signing_key=key_path,
             buffer_path=buffer_path,
         )
-        committed = pipeline_b.drain_buffer()
-        assert len(committed) == 2
-        assert recovery_ledger.verify_ledger_integrity() is True
-        recovery_ledger.close()
+        try:
+            committed = pipeline_b.drain_buffer()
+            assert len(committed) == 2
+            assert recovery_ledger.verify_ledger_integrity() is True
+        finally:
+            pipeline_b.close()
+            recovery_ledger.close()
 
 
 # ---------------------------------------------------------------------------

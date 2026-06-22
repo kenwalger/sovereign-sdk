@@ -92,12 +92,12 @@ class EdgePipeline:
         """
         frame: SensorFrame = SensorFrame.from_bytes(frame_bytes)
 
+        raw_text: str = frame.text_content()
         sieve_fault: bool = False
         try:
-            sieve_result: SieveOutput = sieve_with_metrics(frame.text_content())
+            sieve_result: SieveOutput = sieve_with_metrics(raw_text)
         except Exception:
             sieve_fault = True
-            raw_text: str = frame.text_content()
             token_estimate: int = max(0, len(raw_text.encode("utf-8")) // 4)
             sieve_result = SieveOutput(
                 text=raw_text,
