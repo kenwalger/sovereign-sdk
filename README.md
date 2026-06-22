@@ -623,3 +623,6 @@ uv run sovereign-node --tool analyze
 | `"public_key": "<base64>"` | Base64-encoded raw Ed25519 public key; verified by `_audit_receipt` before process exit. |
 | `"signature": "<base64>"` | Ed25519 signature over `{"metadata": …, "payload_hash": …, "timestamp": …}`. Any mutation of these fields after issuance causes `verify_receipt` to return `False`. |
 | `"execution_success": true` | The tool completed without raising an exception; the receipt is audit-clean. |
+
+---
+(c) 2026 - Ken W. Alger
