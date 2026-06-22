@@ -27,5 +27,10 @@ Homepage = "https://github.com/kenwalger/sovereign-sdk"
 Repository = "https://github.com/kenwalger/sovereign-sdk"
 Changelog = "https://github.com/kenwalger/sovereign-sdk/blob/main/CHANGELOG.md"
 
+[project.optional-dependencies]
+dev = [
+    "sovereign-sensor>=0.1.0",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]

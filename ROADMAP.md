@@ -523,7 +523,7 @@ committed = pipeline.drain_buffer()
   `drain_buffer()` re-queues entries that still cannot reach the ledger.
 * [x] `EdgeResult` dataclass: structured return type from `process()` with `payload_hash`,
   `receipt`, `sieved_content`, Prose Tax telemetry fields, and `buffered` flag.
-* [x] 59-case desktop validation test suite across seven classes (`TestSensorFrame`,
+* [x] 59-case desktop validation test suite across eight classes (`TestSensorFrame`,
   `TestOffGridBuffer`, `TestEdgePipelineProcess`, `TestEdgePipelineBuffering`,
   `TestEdgePipelineDrainBuffer`, `TestOffGridBufferAsync`, `TestEdgePipelineSieveFault`,
   `TestOffGridBufferWriteErrors`) covering all fortification scenarios: non-blocking

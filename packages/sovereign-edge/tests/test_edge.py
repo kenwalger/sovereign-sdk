@@ -215,7 +215,7 @@ class TestOffGridBuffer:
         assert entries[0][0]["payload_hash"] == "hash_B"
 
     def test_drain_skips_malformed_json_lines(self, tmp_path: Path) -> None:
-        """drain() must silently skip corrupt lines and return the remaining valid entries."""
+        """drain() must quarantine corrupt lines in dead_letter and return only valid entries."""
         buf_path = tmp_path / "buf.jsonl"
         buf = OffGridBuffer(str(buf_path))
         buf.push(self._make_receipt("good"), "good content")

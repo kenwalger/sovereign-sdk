@@ -445,12 +445,19 @@ dependencies = [
     { name = "sovereign-sieve" },
 ]
 
+[package.optional-dependencies]
+dev = [
+    { name = "sovereign-sensor" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "sovereign-core", editable = "packages/sovereign-core" },
     { name = "sovereign-ledger", editable = "packages/sovereign-ledger" },
+    { name = "sovereign-sensor", marker = "extra == 'dev'", editable = "packages/sovereign-sensor" },
     { name = "sovereign-sieve", editable = "packages/sovereign-sieve" },
 ]
+provides-extras = ["dev"]
 
 [[package]]
 name = "sovereign-fastapi"

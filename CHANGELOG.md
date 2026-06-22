@@ -68,19 +68,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     workspace member at version `0.1.0` with workspace-source dependencies on
     `sovereign-core`, `sovereign-ledger`, and `sovereign-sieve`.
 
-  - **`packages/sovereign-edge/tests/test_edge.py`** — 55 test cases across six
+  - **`packages/sovereign-edge/tests/test_edge.py`** — 59 test cases across eight
     classes (`TestSensorFrame`: 11 cases; `TestOffGridBuffer`: 9 cases;
     `TestEdgePipelineProcess`: 16 cases; `TestEdgePipelineBuffering`: 4 cases;
     `TestEdgePipelineDrainBuffer`: 5 cases; `TestOffGridBufferAsync`: 6 cases;
-    `TestEdgePipelineSieveFault`: 4 cases) verifying: wire frame deserialization,
-    sort-keyed `text_content()` determinism, in-flight `size` accounting, `flush()`
-    disk-commit guarantee, ascending-sequence sort in `drain()`, FIFO stable-sort
-    preservation for equal sequence keys, non-integer sequence value tolerance,
-    `_committed` counter accuracy after drain, happy-path ledger commit, receipt
-    signature verifiability, `sieve_fault` metadata marking, raw-text fallback on sieve
-    failure, zero savings percentage on fault path, fault-path ledger commit, buffering
-    on closed ledger, buffer depth increment, drain-on-recovery, re-queue on persistent
-    failure, and post-drain ledger integrity.  **55 passed, 0 failed.**
+    `TestEdgePipelineSieveFault`: 4 cases; `TestOffGridBufferWriteErrors`: 4 cases)
+    verifying: wire frame deserialization, sort-keyed `text_content()` determinism,
+    in-flight `size` accounting, `flush()` disk-commit guarantee, ascending-sequence sort
+    in `drain()`, FIFO stable-sort preservation for equal sequence keys, non-integer
+    sequence value tolerance, `_committed` counter accuracy after drain, happy-path ledger
+    commit, receipt signature verifiability, `sieve_fault` metadata marking, raw-text
+    fallback on sieve failure, zero savings percentage on fault path, fault-path ledger
+    commit, buffering on closed ledger, buffer depth increment, drain-on-recovery, re-queue
+    on persistent failure, post-drain ledger integrity, disk write error tracking via
+    `write_error_count`, `size` accuracy under disk failure, full `drain()` recovery of
+    write-error entries, and `close()` raising `RuntimeError` when un-journaled entries
+    remain.  **59 passed, 0 failed.**
 
 ### Changed
 

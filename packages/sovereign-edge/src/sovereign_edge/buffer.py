@@ -32,6 +32,12 @@ class OffGridBuffer:
       under the count lock when a background write raises :exc:`OSError`.  These entries
       never reached disk and are surfaced by :meth:`drain` so that no receipt is silently
       discarded on a full disk or read-only filesystem.
+    - ``_dead_letter``: a list of raw JSON strings quarantined under the count lock when
+      a write-failed entry cannot be deserialized (``json.JSONDecodeError`` or ``KeyError``
+      in the background worker), or when a disk line cannot be mapped to the canonical
+      ``(receipt_dict, sieved_content)`` tuple during :meth:`drain`.  These strings are
+      structurally unrecoverable as typed receipt pairs but are retained for out-of-band
+      inspection; :attr:`dead_letter_count` exposes the accumulated count.
 
     A ``_drain_lock`` provides mutual exclusion between :meth:`push` and the entire
     :meth:`drain` critical section (flush → read → atomic replace).  :meth:`push` holds
@@ -68,6 +74,7 @@ class OffGridBuffer:
         self._pending: int = 0
         self._committed: int = 0
         self._write_errors: list[tuple[dict[str, Any], str]] = []
+        self._dead_letter: list[str] = []
         self._count_lock: threading.Lock = threading.Lock()
         self._drain_lock: threading.Lock = threading.Lock()
         self._worker_thread: threading.Thread = threading.Thread(
@@ -83,7 +90,10 @@ class OffGridBuffer:
         When a write or ``fsync`` raises :exc:`OSError`, the serialized entry is
         deserialized and appended to ``_write_errors`` under the count lock so that
         :meth:`drain` can surface and recover it on the next pass instead of silently
-        discarding the receipt.
+        discarding the receipt.  If the entry cannot be deserialized due to
+        :exc:`json.JSONDecodeError` or :exc:`KeyError`, the raw string is quarantined in
+        ``_dead_letter`` under the count lock so that the corrupt payload is not silently
+        discarded and remains available for out-of-band inspection.
 
         :return: None
         :rtype: None
@@ -93,6 +103,7 @@ class OffGridBuffer:
             stop: bool = entry is None
             written: bool = False
             error_entry: tuple[dict[str, Any], str] | None = None
+            dead_letter_entry: str | None = None
             try:
                 if not stop:
                     with open(self._path, "a", encoding="utf-8") as fh:
@@ -106,7 +117,7 @@ class OffGridBuffer:
                         _obj: dict[str, Any] = json.loads(entry)
                         error_entry = (_obj["receipt"], _obj["sieved_content"])
                     except (json.JSONDecodeError, KeyError):
-                        pass
+                        dead_letter_entry = entry
             finally:
                 with self._count_lock:
                     self._pending -= 1
@@ -114,6 +125,8 @@ class OffGridBuffer:
                         self._committed += 1
                     elif error_entry is not None:
                         self._write_errors.append(error_entry)
+                    elif dead_letter_entry is not None:
+                        self._dead_letter.append(dead_letter_entry)
                 self._write_queue.task_done()
             if stop:
                 return
@@ -187,9 +200,12 @@ class OffGridBuffer:
         drained and ``_write_errors`` is cleared; write-error entries never accumulated
         in ``_committed`` so they need no counter adjustment.  If the promotion fails, an
         empty list is returned and ``_write_errors`` is left intact for the next drain
-        pass so that no entry is permanently discarded.  Malformed JSON lines are
-        silently skipped.  Returns an empty list when the buffer file does not exist and
-        no write-error entries are pending.
+        pass so that no entry is permanently discarded.  Disk lines that cannot be parsed
+        as valid JSON or that are missing the ``receipt`` / ``sieved_content`` keys are
+        quarantined in ``_dead_letter`` under the count lock rather than silently dropped;
+        :attr:`dead_letter_count` reflects the accumulated quarantine count.  Returns an
+        empty list when the buffer file does not exist and no write-error entries are
+        pending.
 
         :return: List of ``(receipt_dict, sieved_content)`` tuples sorted by sequence,
             or an empty list if the buffer file could not be atomically cleared.
@@ -228,6 +244,8 @@ class OffGridBuffer:
                     obj: dict[str, Any] = json.loads(stripped)
                     entries.append((obj["receipt"], obj["sieved_content"]))
                 except (json.JSONDecodeError, KeyError):
+                    with self._count_lock:
+                        self._dead_letter.append(stripped)
                     continue
 
             entries.extend(pending_error_entries)
@@ -327,3 +345,21 @@ class OffGridBuffer:
         """
         with self._count_lock:
             return len(self._write_errors)
+
+    @property
+    def dead_letter_count(self) -> int:
+        """Count of raw strings quarantined after deserialization failures.
+
+        Entries in this count are raw JSONL strings that could not be mapped to a
+        valid ``(receipt_dict, sieved_content)`` pair — either because the background
+        worker encountered a :exc:`json.JSONDecodeError` or :exc:`KeyError` while
+        attempting to recover a write-failed entry, or because a disk line in
+        :meth:`drain` was structurally malformed.  These strings are not recoverable
+        as typed receipt data but are retained in ``_dead_letter`` for out-of-band
+        inspection.
+
+        :return: Number of quarantined raw strings accumulated since construction.
+        :rtype: int
+        """
+        with self._count_lock:
+            return len(self._dead_letter)
