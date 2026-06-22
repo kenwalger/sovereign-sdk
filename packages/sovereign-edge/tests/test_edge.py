@@ -261,12 +261,21 @@ def mem_ledger() -> SovereignLedger:
 
 @pytest.fixture
 def edge_pipeline(mem_ledger: SovereignLedger, tmp_path: Path) -> EdgePipeline:
-    """EdgePipeline wired to an in-memory ledger with isolated key and buffer paths."""
-    return EdgePipeline(
+    """EdgePipeline wired to an in-memory ledger with isolated key and buffer paths.
+
+    Yields the pipeline and closes it in teardown so the background buffer writer
+    thread is always joined before the test process continues, preventing thread
+    leakage across the suite.  The mem_ledger fixture is torn down after this one
+    (pytest respects dependency order), so drain_buffer() can safely attempt ledger
+    commits during the close() pass.
+    """
+    pipeline = EdgePipeline(
         ledger=mem_ledger,
         signing_key=str(tmp_path / ".keys" / "edge_identity.pem"),
         buffer_path=str(tmp_path / ".edge_buffer.jsonl"),
     )
+    yield pipeline
+    pipeline.close()
 
 
 # ---------------------------------------------------------------------------

@@ -183,11 +183,13 @@ class EdgePipeline:
     def close(self) -> None:
         """Flush outstanding buffered receipts and terminate the background buffer worker.
 
-        Executes a best-effort :meth:`drain_buffer` pass before shutdown so that any
-        receipts queued while the ledger was unreachable are committed to the ledger if
-        it has since recovered.  After the drain attempt, delegates to
-        :meth:`~sovereign_edge.buffer.OffGridBuffer.close` to join the background daemon
-        writer thread and enforce the un-journaled-receipt invariant.
+        Executes a best-effort :meth:`drain_buffer` pass inside a ``try`` block before
+        shutdown so that any receipts queued while the ledger was unreachable are committed
+        to the ledger if it has since recovered.  :meth:`~sovereign_edge.buffer.OffGridBuffer.close`
+        is invoked inside the corresponding ``finally`` block, guaranteeing that the background
+        daemon writer thread is joined and resources are reclaimed even if the drain pass
+        raises an unhandled exception — for example, an unexpected error propagating from the
+        ledger layer that is not caught by :meth:`drain_buffer`'s internal error handling.
 
         The pipeline does not own the ledger lifecycle; the caller remains responsible
         for invoking :meth:`~sovereign_ledger.SovereignLedger.close` on the ledger
@@ -200,8 +202,10 @@ class EdgePipeline:
             after the drain attempt, indicating that they failed to reach either the
             JSONL file or the ledger and remain un-journaled at shutdown.
         """
-        self.drain_buffer()
-        self._buffer.close()
+        try:
+            self.drain_buffer()
+        finally:
+            self._buffer.close()
 
     @property
     def buffer_depth(self) -> int:

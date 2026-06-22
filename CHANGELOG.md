@@ -274,6 +274,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   simulating a full-disk condition with ``patch("builtins.open", side_effect=OSError)``
   and asserting that ``pipeline.close()`` raises ``RuntimeError`` matching ``"un-journaled"``.
 
+- **`EdgePipeline.close()` — `drain_buffer()` wrapped in `try/finally`** (`pipeline.py`):
+  ``drain_buffer()`` is now executed inside a ``try`` block with ``self._buffer.close()``
+  in the corresponding ``finally`` block.  Previously, an unhandled exception propagating
+  from the drain pass (for example, an unexpected error from the ledger layer that bypasses
+  ``drain_buffer()``'s internal ``except`` clauses) would abort ``close()`` before
+  ``OffGridBuffer.close()`` was reached, leaving the background daemon writer thread
+  running indefinitely and the buffer file handle unclosed.  The ``finally`` guarantee means
+  the daemon thread is joined and resources are reclaimed regardless of what the drain
+  pass raises.
+
+- **`edge_pipeline` test fixture — `yield` teardown with `pipeline.close()`**
+  (`test_edge.py`): The fixture previously used a bare ``return``, leaving the
+  ``OffGridBuffer`` background writer thread alive for the entire pytest process lifetime
+  after each test completed.  Refactored to a ``yield pipeline`` / ``pipeline.close()``
+  pattern so the thread is joined immediately after each test's teardown phase.  Pytest
+  honors fixture dependency order and tears down ``edge_pipeline`` before ``mem_ledger``,
+  ensuring the ledger is still open when ``pipeline.close()`` calls ``drain_buffer()``.
+
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing
   sensor observations into versioned, tamper-evident, minified JSON transmission envelopes with

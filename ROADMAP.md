@@ -525,7 +525,11 @@ committed = pipeline.drain_buffer()
   `receipt`, `sieved_content`, Prose Tax telemetry fields, and `buffered` flag.
 * [x] `EdgePipeline.close()`: best-effort `drain_buffer()` then `OffGridBuffer.close()`;
   pipeline owns buffer lifecycle; `RuntimeError` from un-journaled write errors propagates
-  unmodified to enforce clean teardown invariant.
+  unmodified to enforce clean teardown invariant; `drain_buffer()` wrapped in `try/finally`
+  so `OffGridBuffer.close()` is reached even if the drain pass raises unexpectedly.
+* [x] `edge_pipeline` fixture refactored to `yield` + `pipeline.close()` teardown:
+  background writer thread joined after every test; pytest dependency order ensures
+  ledger remains open during the teardown drain pass.
 * [x] `OffGridBuffer.close()` shutdown race eliminated: sentinel `queue.put(None)` moved
   inside `_drain_lock` so `push()` and `close()` are fully serialized; no payload can
   be enqueued behind the sentinel; `_worker_thread.join()` remains outside the lock.
