@@ -332,18 +332,26 @@ class OffGridBuffer:
         possibility of prior disk write failures; :meth:`drain` surfaces and clears
         ``_write_errors`` so the subsequent :meth:`close` completes without error.
 
+        This method is idempotent: if the worker thread is no longer alive (because a
+        previous :meth:`close` call already joined it), the sentinel placement and join
+        are skipped entirely, and only the ``_write_errors`` invariant check is repeated.
+        This makes it safe to call :meth:`close` from multiple teardown paths (e.g., a
+        ``try/finally`` in the caller and a ``yield``-based pytest fixture teardown) without
+        deadlocking or corrupting counter state.
+
         :return: None
         :rtype: None
         :raises RuntimeError: If one or more receipt entries are preserved in
             ``_write_errors`` at shutdown time, indicating that they failed to reach
             disk and have not been recovered via :meth:`drain`.
         """
-        with self._drain_lock:
-            with self._count_lock:
-                self._closed = True
-                self._pending += 1
-            self._write_queue.put(None)
-        self._worker_thread.join()
+        if self._worker_thread.is_alive():
+            with self._drain_lock:
+                with self._count_lock:
+                    self._closed = True
+                    self._pending += 1
+                self._write_queue.put(None)
+            self._worker_thread.join()
         with self._count_lock:
             error_count: int = len(self._write_errors)
         if error_count:

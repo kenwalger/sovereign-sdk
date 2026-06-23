@@ -130,7 +130,7 @@ class EdgePipeline:
             expected_sig: str = binascii.hexlify(
                 _hmac.new(self._sensor_secret, preimage, hashlib.sha256).digest()
             ).decode("utf-8")
-            if not _hmac.compare_digest(expected_sig, frame.s):
+            if not _hmac.compare_digest(expected_sig, frame.s.lower()):
                 raise ValueError(
                     f"Sensor frame signature verification failed for node '{frame.n}' "
                     f"sequence {frame.q}: HMAC-SHA256 digest mismatch"
@@ -140,7 +140,7 @@ class EdgePipeline:
         sieve_fault: bool = False
         try:
             sieve_result: SieveOutput = sieve_with_metrics(raw_text)
-        except Exception:
+        except (ValueError, KeyError, RuntimeError, AttributeError, TypeError):
             sieve_fault = True
             token_estimate: int = max(0, len(raw_text.encode("utf-8")) // 4)
             sieve_result = SieveOutput(

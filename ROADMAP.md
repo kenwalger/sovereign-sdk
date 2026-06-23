@@ -549,6 +549,17 @@ committed = pipeline.drain_buffer()
   digest against `frame.s` via `hmac.compare_digest`; mismatch raises `ValueError` before
   the sieve or ledger is reached; empty secret disables verification for backwards
   compatibility with unauthenticated deployments.
+* [x] `OffGridBuffer.close()` — idempotent guard: `if self._worker_thread.is_alive()`
+  skips sentinel placement and join on repeated calls, preventing counter corruption
+  and indefinite `Queue.join()` block from overlapping teardown paths.
+* [x] `EdgePipeline.process()` — HMAC hex case normalisation: `frame.s.lower()` passed
+  to `hmac.compare_digest` so uppercase hex from bare-metal hardware drivers is accepted
+  without a spurious signature mismatch.
+* [x] `EdgePipeline.process()` — sieve-fault exception boundary tightened to
+  `except (ValueError, KeyError, RuntimeError, AttributeError, TypeError):`; fatal host
+  signals (`MemoryError`, `SystemExit`) now propagate rather than being absorbed.
+* [x] `test_close_is_idempotent` (`TestEdgePipelineBuffering`): two explicit calls plus
+  the fixture teardown third call all complete without deadlock or state corruption.
 * [x] `EdgePipeline.process()` — algorithm-gate hard-block: when `sensor_secret` is
   provisioned, `frame.alg != "hmac-sha256"` immediately raises `ValueError`
   (`"Unsupported or unauthenticated algorithm …"`) before the HMAC digest is even
@@ -575,8 +586,11 @@ committed = pipeline.drain_buffer()
   propagating `RuntimeError` when un-journaled write errors survive the drain pass,
   20-thread concurrent `push()`-vs-`close()` stress test asserting zero orphan entries,
   HMAC-SHA256 inbound signature rejection of forged frames verified before the sieve or
-  ledger is reached, and algorithm-gate rejection of any non-`hmac-sha256` `alg` value
-  when `sensor_secret` is provisioned.
+  ledger is reached, algorithm-gate rejection of any non-`hmac-sha256` `alg` value when
+  `sensor_secret` is provisioned, idempotent `OffGridBuffer.close()` guarded by
+  `is_alive()`, HMAC hex case normalisation via `frame.s.lower()`, tightened sieve-fault
+  exception boundary, and `test_close_is_idempotent` validating three consecutive close
+  calls complete without deadlock.
 
 ---
 

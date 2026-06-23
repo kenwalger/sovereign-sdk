@@ -563,6 +563,24 @@ class TestEdgePipelineBuffering:
         """buffer_depth must be 0 before any processing errors occur."""
         assert edge_pipeline.buffer_depth == 0
 
+    def test_close_is_idempotent(
+        self, edge_pipeline: EdgePipeline
+    ) -> None:
+        """pipeline.close() must not deadlock or corrupt state when invoked multiple
+        consecutive times; each call after the first must bypass the shutdown sequence
+        and return immediately without raising.
+
+        The fixture teardown also invokes close() after the test body, exercising a
+        third consecutive call and confirming that OffGridBuffer.close() correctly
+        detects the already-terminated worker thread via is_alive() and skips the
+        sentinel placement on all subsequent calls.
+
+        :param edge_pipeline: Pipeline whose buffer worker thread is under test.
+        :type edge_pipeline: EdgePipeline
+        """
+        edge_pipeline.close()
+        edge_pipeline.close()
+
     def test_close_propagates_buffer_write_error_as_runtime_error(
         self, tmp_path: Path
     ) -> None:

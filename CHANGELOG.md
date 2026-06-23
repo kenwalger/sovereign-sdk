@@ -68,9 +68,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     workspace member at version `0.1.0` with workspace-source dependencies on
     `sovereign-core`, `sovereign-ledger`, and `sovereign-sieve`.
 
-  - **`packages/sovereign-edge/tests/test_edge.py`** — 65 test cases across eight
+  - **`packages/sovereign-edge/tests/test_edge.py`** — 66 test cases across eight
     classes (`TestSensorFrame`: 11 cases; `TestOffGridBuffer`: 10 cases;
-    `TestEdgePipelineProcess`: 18 cases; `TestEdgePipelineBuffering`: 5 cases;
+    `TestEdgePipelineProcess`: 18 cases; `TestEdgePipelineBuffering`: 6 cases;
     `TestEdgePipelineDrainBuffer`: 5 cases; `TestOffGridBufferAsync`: 7 cases;
     `TestEdgePipelineSieveFault`: 4 cases; `TestOffGridBufferWriteErrors`: 5 cases)
     verifying: wire frame deserialization, sort-keyed `text_content()` determinism,
@@ -91,7 +91,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     forged frames before the sieve or ledger is reached, algorithm-gate rejection of any
     non-`hmac-sha256` `alg` field when `sensor_secret` is provisioned, and `try/finally`
     teardown on all 16 previously unclosed `OffGridBuffer` instances in `TestOffGridBuffer`
-    and `TestOffGridBufferAsync`.  **65 passed, 0 failed.**
+    and `TestOffGridBufferAsync`, idempotent `OffGridBuffer.close()` guarded by
+    `_worker_thread.is_alive()`, HMAC hex case normalisation via `frame.s.lower()`,
+    tightened sieve-fault exception boundary `except (ValueError, KeyError, RuntimeError,
+    AttributeError, TypeError):`, and `test_close_is_idempotent` confirming three
+    consecutive `pipeline.close()` calls complete without deadlock.
+    **66 passed, 0 failed.**
 
 ### Changed
 
@@ -351,6 +356,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provisioned with ``_SENSOR_SECRET = SoftwareFallbackDriver._MOCK_KEY`` so a genuine
   frame passes but the forged frame is deterministically rejected.  ``TestEdgePipelineProcess``
   grows from 16 to 17 cases.
+
+- **`OffGridBuffer.close()` — idempotent guard via `_worker_thread.is_alive()`** (`buffer.py`):
+  The previous implementation unconditionally acquired ``_drain_lock``, set ``_closed = True``,
+  incremented ``_pending``, and enqueued the ``None`` sentinel regardless of whether the worker
+  thread was already terminated.  A second ``close()`` call would corrupt ``_pending`` with an
+  orphan increment (the sentinel placed in the dead queue is never processed, so
+  ``task_done()`` is never called and the counter never decremented) and would block indefinitely
+  on ``Queue.join()`` if ``flush()`` was subsequently called.  The shutdown sequence is now
+  guarded by ``if self._worker_thread.is_alive():``: when the thread has already been joined
+  (because a prior ``close()`` completed), the sentinel placement and join are skipped entirely
+  and only the ``_write_errors`` invariant check is repeated, which is safe and cheap.  This
+  makes ``close()`` safe to call from overlapping teardown paths — a ``try/finally`` in the
+  caller, a ``yield``-based pytest fixture, and ``EdgePipeline.close()`` — without deadlocking
+  or inflating counter state.
+
+- **`EdgePipeline.process()` — HMAC hex case normalisation** (`pipeline.py`): The comparison
+  ``_hmac.compare_digest(expected_sig, frame.s)`` assumed the incoming signature was lowercase
+  hex.  ``binascii.hexlify`` always produces lowercase output, but raw bare-metal hardware
+  drivers (e.g. an ESP32 HMAC peripheral) may emit uppercase hex.  ``frame.s.lower()`` is
+  now applied before passing to ``compare_digest`` so that any mix of upper- and lower-case
+  hex characters in ``frame.s`` is accepted without a spurious mismatch.  ``compare_digest``
+  retains its constant-time guarantee because the normalised strings have the same length.
+
+- **`EdgePipeline.process()` — sieve-fault exception boundary tightened** (`pipeline.py`):
+  The broad ``except Exception:`` guard around ``sieve_with_metrics(raw_text)`` was replaced
+  with ``except (ValueError, KeyError, RuntimeError, AttributeError, TypeError):``.  The
+  previous catch-all silently swallowed host-level exhaustion signals — ``MemoryError``,
+  ``SystemExit``, and ``KeyboardInterrupt`` — stamping ``sieve_fault=True`` on the receipt
+  and continuing into the sign/commit path even as the Python runtime was entering an
+  unrecoverable state.  The explicit tuple catches the realistic failure surface of
+  ``sieve_with_metrics`` (parse, key, and runtime faults) while allowing fatal signals to
+  propagate unobstructed.
 
 - **`EdgePipeline.process()` — algorithm-gate hard-block when `sensor_secret` is provisioned**
   (`pipeline.py`): The previous condition ``if self._sensor_secret and frame.alg ==
