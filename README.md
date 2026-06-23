@@ -177,17 +177,21 @@ pipeline = EdgePipeline(
     ledger=ledger,
     signing_key=".keys/edge_identity.pem",
     buffer_path=".edge_buffer.jsonl",
+    sensor_secret=b"<shared-hmac-secret>",  # omit to disable inbound verification
 )
+try:
+    # Intercept a sealed wire frame from sovereign-sensor
+    wire_bytes = envelope.seal("2026-06-19T00:00:00Z", {"sensor": "temp", "value": 21.4})
+    result = pipeline.process(wire_bytes)
+    # result.payload_hash  — hex receipt identifier committed to the ledger
+    # result.sieved_content — Prose-Tax-minimized observation payload
+    # result.buffered       — True when the ledger was unreachable
 
-# Intercept a sealed wire frame from sovereign-sensor
-wire_bytes = envelope.seal("2026-06-19T00:00:00Z", {"sensor": "temp", "value": 21.4})
-result = pipeline.process(wire_bytes)
-# result.payload_hash  — hex receipt identifier committed to the ledger
-# result.sieved_content — Prose-Tax-minimized observation payload
-# result.buffered       — True when the ledger was unreachable
-
-# When the ledger recovers, flush the off-grid buffer
-committed_hashes = pipeline.drain_buffer()
+    # When the ledger recovers, flush the off-grid buffer
+    committed_hashes = pipeline.drain_buffer()
+finally:
+    pipeline.close()
+    ledger.close()
 ```
 
 Three fortification properties are enforced at the architecture level:

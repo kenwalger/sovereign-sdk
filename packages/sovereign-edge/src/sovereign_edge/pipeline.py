@@ -104,12 +104,19 @@ class EdgePipeline:
         :raises json.JSONDecodeError: If ``frame_bytes`` is not valid JSON.
         :raises KeyError: If any mandatory sensor wire frame key is absent.
         :raises UnicodeDecodeError: If ``frame_bytes`` is not valid UTF-8.
-        :raises ValueError: If ``sensor_secret`` is non-empty and the frame's HMAC-SHA256
-            digest does not match the locally recomputed expected signature.
+        :raises ValueError: If ``sensor_secret`` is non-empty and ``frame.alg`` is not
+            ``"hmac-sha256"`` (unsupported or unauthenticated algorithm), or if the
+            frame's HMAC-SHA256 digest does not match the locally recomputed expected
+            signature.
         """
         frame: SensorFrame = SensorFrame.from_bytes(frame_bytes)
 
-        if self._sensor_secret and frame.alg == "hmac-sha256":
+        if self._sensor_secret:
+            if frame.alg != "hmac-sha256":
+                raise ValueError(
+                    f"Unsupported or unauthenticated algorithm '{frame.alg}' for node "
+                    f"'{frame.n}' sequence {frame.q}: sensor_secret requires hmac-sha256"
+                )
             node_bytes: bytes = frame.n.encode("utf-8")
             time_bytes: bytes = frame.t.encode("utf-8")
             algo_bytes: bytes = frame.alg.encode("utf-8")

@@ -549,11 +549,20 @@ committed = pipeline.drain_buffer()
   digest against `frame.s` via `hmac.compare_digest`; mismatch raises `ValueError` before
   the sieve or ledger is reached; empty secret disables verification for backwards
   compatibility with unauthenticated deployments.
+* [x] `EdgePipeline.process()` — algorithm-gate hard-block: when `sensor_secret` is
+  provisioned, `frame.alg != "hmac-sha256"` immediately raises `ValueError`
+  (`"Unsupported or unauthenticated algorithm …"`) before the HMAC digest is even
+  computed; no frame can bypass verification by spoofing the `alg` field.
 * [x] Test suite — private attribute access eliminated: three `_conn.execute()` calls
   replaced with `SovereignLedger.verify_ledger_integrity(expected_tip_hash=...)`;
   `_closed` guard in `mem_ledger` fixture simplified to unconditional `ledger.close()`
   (idempotent); all 13 `EdgePipeline` constructions pass `sensor_secret=_SENSOR_SECRET`.
-* [x] 64-case desktop validation test suite across eight classes (`TestSensorFrame`,
+* [x] `TestOffGridBuffer` and `TestOffGridBufferAsync` — all 16 test methods that
+  construct an `OffGridBuffer` directly now close it in `try/finally` teardown, joining
+  the background daemon writer thread before the next test begins.
+* [x] `README.md` — `sovereign-edge` example extended with `sensor_secret` parameter and
+  `try/finally` teardown calling `pipeline.close()` and `ledger.close()`.
+* [x] 65-case desktop validation test suite across eight classes (`TestSensorFrame`,
   `TestOffGridBuffer`, `TestEdgePipelineProcess`, `TestEdgePipelineBuffering`,
   `TestEdgePipelineDrainBuffer`, `TestOffGridBufferAsync`, `TestEdgePipelineSieveFault`,
   `TestOffGridBufferWriteErrors`) covering all fortification scenarios: non-blocking
@@ -565,8 +574,9 @@ committed = pipeline.drain_buffer()
   `RuntimeError` when un-journaled entries remain at shutdown, `EdgePipeline.close()`
   propagating `RuntimeError` when un-journaled write errors survive the drain pass,
   20-thread concurrent `push()`-vs-`close()` stress test asserting zero orphan entries,
-  and HMAC-SHA256 inbound signature rejection of forged frames verified before the sieve
-  or ledger is reached.
+  HMAC-SHA256 inbound signature rejection of forged frames verified before the sieve or
+  ledger is reached, and algorithm-gate rejection of any non-`hmac-sha256` `alg` value
+  when `sensor_secret` is provisioned.
 
 ---
 

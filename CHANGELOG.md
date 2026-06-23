@@ -68,9 +68,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     workspace member at version `0.1.0` with workspace-source dependencies on
     `sovereign-core`, `sovereign-ledger`, and `sovereign-sieve`.
 
-  - **`packages/sovereign-edge/tests/test_edge.py`** — 64 test cases across eight
+  - **`packages/sovereign-edge/tests/test_edge.py`** — 65 test cases across eight
     classes (`TestSensorFrame`: 11 cases; `TestOffGridBuffer`: 10 cases;
-    `TestEdgePipelineProcess`: 17 cases; `TestEdgePipelineBuffering`: 5 cases;
+    `TestEdgePipelineProcess`: 18 cases; `TestEdgePipelineBuffering`: 5 cases;
     `TestEdgePipelineDrainBuffer`: 5 cases; `TestOffGridBufferAsync`: 7 cases;
     `TestEdgePipelineSieveFault`: 4 cases; `TestOffGridBufferWriteErrors`: 5 cases)
     verifying: wire frame deserialization, sort-keyed `text_content()` determinism,
@@ -87,8 +87,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `RuntimeError` when called after `close()`, `EdgePipeline.close()` propagating
     `RuntimeError` from `OffGridBuffer.close()` when un-journaled write errors survive the
     internal `drain_buffer()` pass, 20-thread concurrent `push()`-vs-`close()` race
-    producing zero orphaned queue entries, and HMAC-SHA256 inbound signature rejection of
-    forged frames before the sieve or ledger is reached.  **64 passed, 0 failed.**
+    producing zero orphaned queue entries, HMAC-SHA256 inbound signature rejection of
+    forged frames before the sieve or ledger is reached, algorithm-gate rejection of any
+    non-`hmac-sha256` `alg` field when `sensor_secret` is provisioned, and `try/finally`
+    teardown on all 16 previously unclosed `OffGridBuffer` instances in `TestOffGridBuffer`
+    and `TestOffGridBufferAsync`.  **65 passed, 0 failed.**
 
 ### Changed
 
@@ -348,6 +351,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provisioned with ``_SENSOR_SECRET = SoftwareFallbackDriver._MOCK_KEY`` so a genuine
   frame passes but the forged frame is deterministically rejected.  ``TestEdgePipelineProcess``
   grows from 16 to 17 cases.
+
+- **`EdgePipeline.process()` — algorithm-gate hard-block when `sensor_secret` is provisioned**
+  (`pipeline.py`): The previous condition ``if self._sensor_secret and frame.alg ==
+  "hmac-sha256"`` silently skipped verification when ``frame.alg`` was any value other than
+  ``"hmac-sha256"``.  A sensor frame spoofing ``"alg": "none"`` or ``"alg": "ecdsa-p256"``
+  bypassed the HMAC check entirely and was admitted to the sieve and ledger stages without any
+  cryptographic validation.  The condition is restructured to ``if self._sensor_secret:`` with
+  an inner ``if frame.alg != "hmac-sha256": raise ValueError(...)`` guard placed before the
+  digest computation.  When ``sensor_secret`` is provisioned, the only accepted algorithm is
+  ``"hmac-sha256"``; any other ``alg`` value raises :exc:`ValueError` with message
+  ``"Unsupported or unauthenticated algorithm '{alg}' for node '{n}' sequence {q}:
+  sensor_secret requires hmac-sha256"`` before the payload reaches the sieve or ledger.
+  A new test (``test_process_rejects_unsupported_algorithm``) validates the gate by submitting
+  a frame with ``"alg": "ecdsa-p256"`` and asserting :exc:`ValueError` matching
+  ``"Unsupported or unauthenticated algorithm"``.  ``TestEdgePipelineProcess`` grows from
+  17 to 18 cases.
+
+- **`TestOffGridBuffer` and `TestOffGridBufferAsync` — `try/finally` teardown on all buffer
+  instances** (`test_edge.py`): All 16 test methods across the two classes that construct an
+  ``OffGridBuffer`` directly previously exited without calling ``buf.close()``, leaving the
+  background daemon writer thread live for the remainder of the pytest process.  Each method
+  now wraps its body in ``try/finally`` with ``buf.close()`` in the ``finally`` block, joining
+  the worker thread immediately after the test regardless of assertion outcome.
+
+- **`README.md` — `EdgePipeline` example updated with `sensor_secret` and `try/finally`
+  teardown**: The code snippet in the ``sovereign-edge`` section is extended with the
+  ``sensor_secret`` parameter and a ``try/finally`` block that calls ``pipeline.close()``
+  and ``ledger.close()`` in the ``finally`` branch, demonstrating correct resource management
+  to integrators.
 
 - **Test suite — private attribute access eliminated** (`test_edge.py`):
   Three ``mem_ledger._conn.execute(...)`` direct-SQL queries are replaced with the

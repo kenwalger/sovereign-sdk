@@ -159,74 +159,101 @@ class TestOffGridBuffer:
     def test_size_is_zero_when_buffer_absent(self, tmp_path: Path) -> None:
         """size must return 0 when the buffer file has not yet been created."""
         buf = OffGridBuffer(str(tmp_path / "nonexistent.jsonl"))
-        assert buf.size == 0
+        try:
+            assert buf.size == 0
+        finally:
+            buf.close()
 
     def test_drain_returns_empty_list_when_buffer_absent(self, tmp_path: Path) -> None:
         """drain() must return an empty list when the buffer file does not exist."""
         buf = OffGridBuffer(str(tmp_path / "nonexistent.jsonl"))
-        assert buf.drain() == []
+        try:
+            assert buf.drain() == []
+        finally:
+            buf.close()
 
     def test_push_increments_size(self, tmp_path: Path) -> None:
         """size must reflect the number of entries written via push()."""
         buf = OffGridBuffer(str(tmp_path / "buf.jsonl"))
-        buf.push(self._make_receipt("A"), "content A")
-        assert buf.size == 1
-        buf.push(self._make_receipt("B"), "content B")
-        assert buf.size == 2
+        try:
+            buf.push(self._make_receipt("A"), "content A")
+            assert buf.size == 1
+            buf.push(self._make_receipt("B"), "content B")
+            assert buf.size == 2
+        finally:
+            buf.close()
 
     def test_drain_returns_all_entries(self, tmp_path: Path) -> None:
         """drain() must return every (receipt, sieved_content) pair previously pushed."""
         buf = OffGridBuffer(str(tmp_path / "buf.jsonl"))
-        buf.push(self._make_receipt("X"), "payload X")
-        buf.push(self._make_receipt("Y"), "payload Y")
-        entries = buf.drain()
-        assert len(entries) == 2
+        try:
+            buf.push(self._make_receipt("X"), "payload X")
+            buf.push(self._make_receipt("Y"), "payload Y")
+            entries = buf.drain()
+            assert len(entries) == 2
+        finally:
+            buf.close()
 
     def test_drain_returns_entries_in_fifo_order(self, tmp_path: Path) -> None:
         """drain() must preserve push() insertion order."""
         buf = OffGridBuffer(str(tmp_path / "buf.jsonl"))
-        buf.push(self._make_receipt("first"), "first content")
-        buf.push(self._make_receipt("second"), "second content")
-        entries = buf.drain()
-        assert entries[0][0]["payload_hash"] == "hash_first"
-        assert entries[1][0]["payload_hash"] == "hash_second"
+        try:
+            buf.push(self._make_receipt("first"), "first content")
+            buf.push(self._make_receipt("second"), "second content")
+            entries = buf.drain()
+            assert entries[0][0]["payload_hash"] == "hash_first"
+            assert entries[1][0]["payload_hash"] == "hash_second"
+        finally:
+            buf.close()
 
     def test_drain_clears_buffer_after_read(self, tmp_path: Path) -> None:
         """size must be 0 after drain() empties the buffer."""
         buf = OffGridBuffer(str(tmp_path / "buf.jsonl"))
-        buf.push(self._make_receipt("Z"), "content Z")
-        buf.drain()
-        assert buf.size == 0
+        try:
+            buf.push(self._make_receipt("Z"), "content Z")
+            buf.drain()
+            assert buf.size == 0
+        finally:
+            buf.close()
 
     def test_drain_preserves_sieved_content_verbatim(self, tmp_path: Path) -> None:
         """drain() must return the exact sieved_content string supplied to push()."""
         buf = OffGridBuffer(str(tmp_path / "buf.jsonl"))
-        content = "temperature reading: 42°C — no filler here"
-        buf.push(self._make_receipt("V"), content)
-        entries = buf.drain()
-        assert entries[0][1] == content
+        try:
+            content = "temperature reading: 42°C — no filler here"
+            buf.push(self._make_receipt("V"), content)
+            entries = buf.drain()
+            assert entries[0][1] == content
+        finally:
+            buf.close()
 
     def test_push_after_drain_works(self, tmp_path: Path) -> None:
         """push() must succeed after drain() has cleared the buffer."""
         buf = OffGridBuffer(str(tmp_path / "buf.jsonl"))
-        buf.push(self._make_receipt("A"), "content A")
-        buf.drain()
-        buf.push(self._make_receipt("B"), "content B")
-        assert buf.size == 1
-        entries = buf.drain()
-        assert entries[0][0]["payload_hash"] == "hash_B"
+        try:
+            buf.push(self._make_receipt("A"), "content A")
+            buf.drain()
+            buf.push(self._make_receipt("B"), "content B")
+            assert buf.size == 1
+            entries = buf.drain()
+            assert entries[0][0]["payload_hash"] == "hash_B"
+        finally:
+            buf.close()
 
     def test_drain_skips_malformed_json_lines(self, tmp_path: Path) -> None:
         """drain() must quarantine corrupt lines in dead_letter and return only valid entries."""
         buf_path = tmp_path / "buf.jsonl"
         buf = OffGridBuffer(str(buf_path))
-        buf.push(self._make_receipt("good"), "good content")
-        buf.flush()  # ensure background writer closes its file handle before we append
-        with open(buf_path, "a", encoding="utf-8") as fh:
-            fh.write("{corrupt-json\n")
-        entries = buf.drain()
-        assert len(entries) == 1
-        assert entries[0][0]["payload_hash"] == "hash_good"
+        try:
+            buf.push(self._make_receipt("good"), "good content")
+            buf.flush()  # ensure background writer closes its file handle before we append
+            with open(buf_path, "a", encoding="utf-8") as fh:
+                fh.write("{corrupt-json\n")
+            entries = buf.drain()
+            assert len(entries) == 1
+            assert entries[0][0]["payload_hash"] == "hash_good"
+        finally:
+            buf.close()
 
     def test_drain_size_zero_after_committed_line_corrupted_on_disk(
         self, tmp_path: Path
@@ -237,14 +264,17 @@ class TestOffGridBuffer:
         stays at 1 for an empty file, producing permanent counter drift."""
         buf_path = tmp_path / "buf.jsonl"
         buf = OffGridBuffer(str(buf_path))
-        buf.push(self._make_receipt("good"), "good content")
-        buf.flush()
-        assert buf.size == 1  # _committed == 1 after successful fsync
-        buf_path.write_text("{corrupted-line\n", encoding="utf-8")
-        entries = buf.drain()
-        assert entries == []
-        assert buf.size == 0
-        assert buf.dead_letter_count == 1
+        try:
+            buf.push(self._make_receipt("good"), "good content")
+            buf.flush()
+            assert buf.size == 1  # _committed == 1 after successful fsync
+            buf_path.write_text("{corrupted-line\n", encoding="utf-8")
+            entries = buf.drain()
+            assert entries == []
+            assert buf.size == 0
+            assert buf.dead_letter_count == 1
+        finally:
+            buf.close()
 
 
 # ---------------------------------------------------------------------------
@@ -449,6 +479,27 @@ class TestEdgePipelineProcess:
         ).encode("utf-8")
         with pytest.raises(ValueError, match="signature verification failed"):
             edge_pipeline.process(forged_bytes)
+
+    def test_process_rejects_unsupported_algorithm(
+        self, edge_pipeline: EdgePipeline, tmp_path: Path
+    ) -> None:
+        """process() must raise ValueError when sensor_secret is provisioned and the
+        frame declares an algorithm other than hmac-sha256; no frame may bypass
+        HMAC verification by spoofing the alg field to an unsupported identifier.
+
+        :param edge_pipeline: Pipeline under test, provisioned with the mock HMAC secret.
+        :type edge_pipeline: EdgePipeline
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        frame_bytes: bytes = _seal_frame(tmp_path)
+        frame_dict: dict[str, Any] = json.loads(frame_bytes.decode("utf-8"))
+        frame_dict["alg"] = "ecdsa-p256"
+        spoofed_bytes: bytes = json.dumps(
+            frame_dict, separators=(",", ":"), sort_keys=True, ensure_ascii=False
+        ).encode("utf-8")
+        with pytest.raises(ValueError, match="Unsupported or unauthenticated algorithm"):
+            edge_pipeline.process(spoofed_bytes)
 
 
 # ---------------------------------------------------------------------------
@@ -728,59 +779,74 @@ class TestOffGridBufferAsync:
     def test_size_reflects_inflight_entry_before_flush(self, tmp_path: Path) -> None:
         """size must count in-flight queue entries before they reach disk."""
         buf = OffGridBuffer(str(tmp_path / "buf.jsonl"))
-        buf.push(self._make_receipt("A"), "content A")
-        assert buf.size >= 1
+        try:
+            buf.push(self._make_receipt("A"), "content A")
+            assert buf.size >= 1
+        finally:
+            buf.close()
 
     def test_flush_ensures_entry_is_on_disk(self, tmp_path: Path) -> None:
         """flush() must block until the background writer commits the entry to disk."""
         buf_path = tmp_path / "buf.jsonl"
         buf = OffGridBuffer(str(buf_path))
-        buf.push(self._make_receipt("A"), "content A")
-        buf.flush()
-        assert buf_path.exists()
-        non_empty = [ln for ln in buf_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
-        assert len(non_empty) == 1
+        try:
+            buf.push(self._make_receipt("A"), "content A")
+            buf.flush()
+            assert buf_path.exists()
+            non_empty = [ln for ln in buf_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+            assert len(non_empty) == 1
+        finally:
+            buf.close()
 
     def test_drain_sorts_entries_ascending_by_sequence(self, tmp_path: Path) -> None:
         """drain() must return entries in ascending sequence order regardless of push order."""
         buf = OffGridBuffer(str(tmp_path / "buf.jsonl"))
-        r_late = self._make_receipt("late", sequence=5)
-        r_early = self._make_receipt("early", sequence=2)
-        buf.push(r_late, "late content")
-        buf.push(r_early, "early content")
-        entries = buf.drain()
-        assert len(entries) == 2
-        assert entries[0][0]["payload_hash"] == "hash_early"
-        assert entries[1][0]["payload_hash"] == "hash_late"
+        try:
+            r_late = self._make_receipt("late", sequence=5)
+            r_early = self._make_receipt("early", sequence=2)
+            buf.push(r_late, "late content")
+            buf.push(r_early, "early content")
+            entries = buf.drain()
+            assert len(entries) == 2
+            assert entries[0][0]["payload_hash"] == "hash_early"
+            assert entries[1][0]["payload_hash"] == "hash_late"
+        finally:
+            buf.close()
 
     def test_drain_stable_sort_preserves_fifo_for_equal_sequence(
         self, tmp_path: Path
     ) -> None:
         """drain() must preserve FIFO push order when entries share the same sequence key."""
         buf = OffGridBuffer(str(tmp_path / "buf.jsonl"))
-        buf.push(self._make_receipt("first"), "first content")
-        buf.push(self._make_receipt("second"), "second content")
-        entries = buf.drain()
-        assert entries[0][0]["payload_hash"] == "hash_first"
-        assert entries[1][0]["payload_hash"] == "hash_second"
+        try:
+            buf.push(self._make_receipt("first"), "first content")
+            buf.push(self._make_receipt("second"), "second content")
+            entries = buf.drain()
+            assert entries[0][0]["payload_hash"] == "hash_first"
+            assert entries[1][0]["payload_hash"] == "hash_second"
+        finally:
+            buf.close()
 
     def test_drain_tolerates_non_integer_sequence_value(self, tmp_path: Path) -> None:
         """drain() must not raise when a sequence value cannot be cast to int; entry
         falls back to sort key 0 rather than aborting the entire drain pass."""
         buf_path = tmp_path / "buf.jsonl"
         buf = OffGridBuffer(str(buf_path))
-        r_corrupt = {
-            "timestamp": _TIMESTAMP,
-            "payload_hash": "hash_corrupt_seq",
-            "public_key": "key==",
-            "signature": "sig_c",
-            "metadata": {"sequence": "not-a-number"},
-        }
-        r_normal = self._make_receipt("normal", sequence=3)
-        buf.push(r_corrupt, "corrupt seq content")
-        buf.push(r_normal, "normal content")
-        entries = buf.drain()
-        assert len(entries) == 2
+        try:
+            r_corrupt = {
+                "timestamp": _TIMESTAMP,
+                "payload_hash": "hash_corrupt_seq",
+                "public_key": "key==",
+                "signature": "sig_c",
+                "metadata": {"sequence": "not-a-number"},
+            }
+            r_normal = self._make_receipt("normal", sequence=3)
+            buf.push(r_corrupt, "corrupt seq content")
+            buf.push(r_normal, "normal content")
+            entries = buf.drain()
+            assert len(entries) == 2
+        finally:
+            buf.close()
 
     def test_size_correct_after_drain_preserves_concurrent_committed_count(
         self, tmp_path: Path
@@ -788,10 +854,13 @@ class TestOffGridBufferAsync:
         """_committed is decremented by the drained count, not zeroed, so entries
         committed after flush() but before the file swap are not lost from the counter."""
         buf = OffGridBuffer(str(tmp_path / "buf.jsonl"))
-        buf.push(self._make_receipt("A"), "content A")
-        buf.drain()
-        buf.push(self._make_receipt("B"), "content B")
-        assert buf.size == 1
+        try:
+            buf.push(self._make_receipt("A"), "content A")
+            buf.drain()
+            buf.push(self._make_receipt("B"), "content B")
+            assert buf.size == 1
+        finally:
+            buf.close()
 
     def test_concurrent_push_vs_close_no_orphan_entries(self, tmp_path: Path) -> None:
         """Every push() racing against close() must be resolved without orphaning entries.
