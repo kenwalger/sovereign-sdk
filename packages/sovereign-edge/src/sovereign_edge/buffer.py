@@ -8,6 +8,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
+_DEAD_LETTER_MAX: int = 100
+
 
 class OffGridBuffer:
     """Durable JSONL-backed queue that absorbs ForensicReceipt payloads when the ledger
@@ -37,7 +39,10 @@ class OffGridBuffer:
       in the background worker), or when a disk line cannot be mapped to the canonical
       ``(receipt_dict, sieved_content)`` tuple during :meth:`drain`.  These strings are
       structurally unrecoverable as typed receipt pairs but are retained for out-of-band
-      inspection; :attr:`dead_letter_count` exposes the accumulated count.
+      inspection; :attr:`dead_letter_count` exposes the accumulated count.  The list is
+      capped at ``_DEAD_LETTER_MAX`` (100) entries: when the ceiling is reached, the oldest
+      entry is evicted before the new one is appended, bounding memory consumption when a
+      rogue sensor continuously floods the buffer with malformed payloads.
 
     A ``_drain_lock`` provides mutual exclusion across three operations: :meth:`push`
     (``_pending`` increment + :meth:`queue.Queue.put`), the entire :meth:`drain` critical
@@ -133,6 +138,8 @@ class OffGridBuffer:
                     elif error_entry is not None:
                         self._write_errors.append(error_entry)
                     elif dead_letter_entry is not None:
+                        if len(self._dead_letter) >= _DEAD_LETTER_MAX:
+                            del self._dead_letter[0]
                         self._dead_letter.append(dead_letter_entry)
                 self._write_queue.task_done()
             if stop:
@@ -270,6 +277,8 @@ class OffGridBuffer:
                     entries.append((obj["receipt"], obj["sieved_content"]))
                 except (json.JSONDecodeError, KeyError):
                     with self._count_lock:
+                        if len(self._dead_letter) >= _DEAD_LETTER_MAX:
+                            del self._dead_letter[0]
                         self._dead_letter.append(stripped)
                     continue
 

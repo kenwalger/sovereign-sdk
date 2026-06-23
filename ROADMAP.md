@@ -549,6 +549,15 @@ committed = pipeline.drain_buffer()
   digest against `frame.s` via `hmac.compare_digest`; mismatch raises `ValueError` before
   the sieve or ledger is reached; empty secret disables verification for backwards
   compatibility with unauthenticated deployments.
+* [x] `SensorFrame.from_bytes()` — protocol version gate: `if frame["v"] != 1` raises
+  `ValueError("Unsupported wire format version …")` immediately after JSON decode,
+  before dataclass construction, HMAC verification, or ledger interaction.
+  `test_from_bytes_raises_on_unsupported_version` covers the `v=2` rejection path.
+  `TestSensorFrame` grows from 11 to 12 cases.
+* [x] `OffGridBuffer._dead_letter` — 100-entry eviction cap: `_DEAD_LETTER_MAX = 100`
+  constant; both append sites (worker OSError path and `drain()` malformed-line path)
+  evict the oldest entry under `_count_lock` when the ceiling is reached, bounding
+  heap growth under sustained malformed-payload injection.
 * [x] `OffGridBuffer.close()` — idempotent guard: `if self._worker_thread.is_alive()`
   skips sentinel placement and join on repeated calls, preventing counter corruption
   and indefinite `Queue.join()` block from overlapping teardown paths.
@@ -589,8 +598,10 @@ committed = pipeline.drain_buffer()
   ledger is reached, algorithm-gate rejection of any non-`hmac-sha256` `alg` value when
   `sensor_secret` is provisioned, idempotent `OffGridBuffer.close()` guarded by
   `is_alive()`, HMAC hex case normalisation via `frame.s.lower()`, tightened sieve-fault
-  exception boundary, and `test_close_is_idempotent` validating three consecutive close
-  calls complete without deadlock.
+  exception boundary, `test_close_is_idempotent` validating three consecutive close
+  calls complete without deadlock, `SensorFrame.from_bytes()` protocol version gate
+  rejecting ``v != 1``, and `OffGridBuffer._dead_letter` capped at 100 entries with
+  oldest-first eviction.
 
 ---
 

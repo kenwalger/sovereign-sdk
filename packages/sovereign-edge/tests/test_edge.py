@@ -139,6 +139,17 @@ class TestSensorFrame:
         with pytest.raises(KeyError):
             SensorFrame.from_bytes(incomplete)
 
+    def test_from_bytes_raises_on_unsupported_version(self) -> None:
+        """from_bytes must raise ValueError when the wire frame declares a protocol
+        version other than 1; future or unknown versions are rejected immediately
+        to prevent silent misinterpretation of structurally incompatible envelopes."""
+        payload: bytes = json.dumps({
+            "v": 2, "n": "node", "t": "2026-06-23T00:00:00Z", "q": 1,
+            "alg": "hmac-sha256", "d": {}, "s": "aabbcc",
+        }).encode("utf-8")
+        with pytest.raises(ValueError, match="Unsupported wire format version"):
+            SensorFrame.from_bytes(payload)
+
 
 # ---------------------------------------------------------------------------
 # TestOffGridBuffer

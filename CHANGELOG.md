@@ -68,8 +68,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     workspace member at version `0.1.0` with workspace-source dependencies on
     `sovereign-core`, `sovereign-ledger`, and `sovereign-sieve`.
 
-  - **`packages/sovereign-edge/tests/test_edge.py`** — 66 test cases across eight
-    classes (`TestSensorFrame`: 11 cases; `TestOffGridBuffer`: 10 cases;
+  - **`packages/sovereign-edge/tests/test_edge.py`** — 67 test cases across eight
+    classes (`TestSensorFrame`: 12 cases; `TestOffGridBuffer`: 10 cases;
     `TestEdgePipelineProcess`: 18 cases; `TestEdgePipelineBuffering`: 6 cases;
     `TestEdgePipelineDrainBuffer`: 5 cases; `TestOffGridBufferAsync`: 7 cases;
     `TestEdgePipelineSieveFault`: 4 cases; `TestOffGridBufferWriteErrors`: 5 cases)
@@ -95,8 +95,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `_worker_thread.is_alive()`, HMAC hex case normalisation via `frame.s.lower()`,
     tightened sieve-fault exception boundary `except (ValueError, KeyError, RuntimeError,
     AttributeError, TypeError):`, and `test_close_is_idempotent` confirming three
-    consecutive `pipeline.close()` calls complete without deadlock.
-    **66 passed, 0 failed.**
+    consecutive `pipeline.close()` calls complete without deadlock,
+    `SensorFrame.from_bytes()` protocol version gate rejecting ``v != 1``, and
+    `OffGridBuffer._dead_letter` capped at 100 entries with oldest-first eviction.
+    **67 passed, 0 failed.**
 
 ### Changed
 
@@ -356,6 +358,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provisioned with ``_SENSOR_SECRET = SoftwareFallbackDriver._MOCK_KEY`` so a genuine
   frame passes but the forged frame is deterministically rejected.  ``TestEdgePipelineProcess``
   grows from 16 to 17 cases.
+
+- **`SensorFrame.from_bytes()` — protocol version gate** (`models.py`): After decoding the
+  JSON dict, an explicit ``if frame["v"] != 1:`` check now raises :exc:`ValueError` with
+  message ``"Unsupported wire format version {v!r}: sovereign-edge requires protocol version 1"``
+  before constructing the dataclass.  The previous implementation silently accepted any integer
+  value in the ``v`` field, which would allow a future or malformed wire envelope (where key
+  positions may carry different semantics) to be deserialized without error and passed to the
+  HMAC verifier, sieve, and ledger with structurally wrong field bindings.  A new test
+  (``test_from_bytes_raises_on_unsupported_version``) validates the gate by submitting a frame
+  with ``"v": 2`` and asserting :exc:`ValueError` matching ``"Unsupported wire format version"``.
+  ``TestSensorFrame`` grows from 11 to 12 cases.
+
+- **`OffGridBuffer._dead_letter` — 100-entry eviction cap** (`buffer.py`): A module-level
+  constant ``_DEAD_LETTER_MAX = 100`` is introduced.  Both append sites — the ``_disk_writer``
+  OSError recovery path and the ``drain()`` malformed-line path — now check
+  ``if len(self._dead_letter) >= _DEAD_LETTER_MAX: del self._dead_letter[0]`` under the count
+  lock before appending.  Without this cap, a rogue sensor emitting a continuous stream of
+  malformed payloads would grow ``_dead_letter`` without bound, consuming heap memory
+  proportional to the number of corrupt lines ever received.  The eviction drops the oldest
+  entry (index 0) first so the most recent quarantined strings are always retained for
+  out-of-band inspection.  The ``dead_letter_count`` property continues to reflect the current
+  list length (bounded at 100 under sustained fault injection).
 
 - **`OffGridBuffer.close()` — idempotent guard via `_worker_thread.is_alive()`** (`buffer.py`):
   The previous implementation unconditionally acquired ``_drain_lock``, set ``_closed = True``,

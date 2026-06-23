@@ -51,8 +51,16 @@ class SensorFrame:
         :raises KeyError: If any mandatory wire frame key is absent from the
             decoded object.
         :raises UnicodeDecodeError: If ``raw`` is not valid UTF-8.
+        :raises ValueError: If the ``v`` field is not ``1``; future or unknown
+            wire format versions are rejected immediately to prevent silent
+            misinterpretation of structurally incompatible envelopes.
         """
         frame: dict[str, Any] = json.loads(raw.decode("utf-8"))
+        if frame["v"] != 1:
+            raise ValueError(
+                f"Unsupported wire format version {frame['v']!r}: "
+                "sovereign-edge requires protocol version 1"
+            )
         return cls(
             v=frame["v"],
             n=frame["n"],
