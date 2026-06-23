@@ -558,6 +558,23 @@ committed = pipeline.drain_buffer()
   constant; both append sites (worker OSError path and `drain()` malformed-line path)
   evict the oldest entry under `_count_lock` when the ceiling is reached, bounding
   heap growth under sustained malformed-payload injection.
+* [x] `OffGridBuffer._disk_writer` — non-OSError exception catch and `_worker_failed` flag:
+  `except Exception:` added after `except OSError:` to prevent silent thread death;
+  affected entry preserved in `_write_errors` / `_dead_letter`; `_worker_failed = True`
+  set under `_count_lock`; drain loop under `_drain_lock` exhausts remaining queue items
+  and calls `task_done()` for each before the thread returns; `worker_failed: bool`
+  read-only property exposes the flag; `push()` raises `RuntimeError` immediately when
+  the flag is set.
+* [x] `SensorFrame.from_bytes()` — strict runtime type validation: `isinstance` checks
+  for all seven fields immediately after JSON decode; boolean masquerading as int blocked
+  via `and not isinstance(_val, bool)` guard on `v` and `q`; type mismatch raises
+  `TypeError` before the version gate, HMAC verifier, sieve, or ledger.
+  `test_from_bytes_raises_on_wrong_field_type` covers the `q="not-an-int"` rejection path.
+  `TestSensorFrame` grows from 12 to 13 cases.
+* [x] `test_worker_non_oserror_failure_does_not_hang` (`TestOffGridBufferWriteErrors`):
+  patches `builtins.open` with `RuntimeError`; asserts `flush()` returns, `worker_failed`
+  is `True`, `push()` raises, `drain()` recovers entries, `close()` completes cleanly.
+  `TestOffGridBufferWriteErrors` grows from 5 to 6 cases.
 * [x] `OffGridBuffer.close()` — idempotent guard: `if self._worker_thread.is_alive()`
   skips sentinel placement and join on repeated calls, preventing counter corruption
   and indefinite `Queue.join()` block from overlapping teardown paths.
@@ -582,26 +599,25 @@ committed = pipeline.drain_buffer()
   the background daemon writer thread before the next test begins.
 * [x] `README.md` — `sovereign-edge` example extended with `sensor_secret` parameter and
   `try/finally` teardown calling `pipeline.close()` and `ledger.close()`.
-* [x] 65-case desktop validation test suite across eight classes (`TestSensorFrame`,
-  `TestOffGridBuffer`, `TestEdgePipelineProcess`, `TestEdgePipelineBuffering`,
-  `TestEdgePipelineDrainBuffer`, `TestOffGridBufferAsync`, `TestEdgePipelineSieveFault`,
-  `TestOffGridBufferWriteErrors`) covering all fortification scenarios: non-blocking
-  `push()` with immediate `size` reporting, chronological `drain()` sort by sequence,
-  non-integer sequence value tolerance in the sort key guard, `_committed` counter
-  accuracy after drain, sieve fault fallback with raw text and `sieve_fault=True`
-  metadata, disk write error tracking via `write_error_count`, `size` accuracy under
-  disk failure, full `drain()` recovery of write-error entries, `close()` raising
-  `RuntimeError` when un-journaled entries remain at shutdown, `EdgePipeline.close()`
-  propagating `RuntimeError` when un-journaled write errors survive the drain pass,
-  20-thread concurrent `push()`-vs-`close()` stress test asserting zero orphan entries,
-  HMAC-SHA256 inbound signature rejection of forged frames verified before the sieve or
-  ledger is reached, algorithm-gate rejection of any non-`hmac-sha256` `alg` value when
-  `sensor_secret` is provisioned, idempotent `OffGridBuffer.close()` guarded by
-  `is_alive()`, HMAC hex case normalisation via `frame.s.lower()`, tightened sieve-fault
-  exception boundary, `test_close_is_idempotent` validating three consecutive close
-  calls complete without deadlock, `SensorFrame.from_bytes()` protocol version gate
-  rejecting ``v != 1``, and `OffGridBuffer._dead_letter` capped at 100 entries with
-  oldest-first eviction.
+* [x] 69-case desktop validation test suite across eight classes (`TestSensorFrame`: 13;
+  `TestOffGridBuffer`: 10; `TestEdgePipelineProcess`: 18; `TestEdgePipelineBuffering`: 6;
+  `TestEdgePipelineDrainBuffer`: 5; `TestOffGridBufferAsync`: 7;
+  `TestEdgePipelineSieveFault`: 4; `TestOffGridBufferWriteErrors`: 6) covering all
+  fortification scenarios: non-blocking `push()` with immediate `size` reporting,
+  chronological `drain()` sort by sequence, non-integer sequence value tolerance in the
+  sort key guard, `_committed` counter accuracy after drain, sieve fault fallback with
+  raw text and `sieve_fault=True` metadata, disk write error tracking via
+  `write_error_count`, `size` accuracy under disk failure, full `drain()` recovery of
+  write-error entries, `close()` raising `RuntimeError` when un-journaled entries remain
+  at shutdown, `EdgePipeline.close()` propagating `RuntimeError` when un-journaled write
+  errors survive the drain pass, 20-thread concurrent `push()`-vs-`close()` stress test
+  asserting zero orphan entries, HMAC-SHA256 inbound signature rejection, algorithm-gate
+  rejection of non-`hmac-sha256` `alg`, idempotent `OffGridBuffer.close()`, HMAC hex
+  case normalisation, tightened sieve-fault exception boundary, idempotent `close()`
+  triple-call coverage, protocol version gate rejecting `v != 1`, dead-letter eviction
+  cap at 100 entries, non-OSError worker failure detection with `worker_failed` flag, and
+  strict runtime type validation on all seven wire frame fields.
+  **69 passed, 1 skipped, 358 workspace tests passed.**
 
 ---
 

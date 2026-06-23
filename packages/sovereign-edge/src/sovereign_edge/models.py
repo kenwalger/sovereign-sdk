@@ -51,11 +51,30 @@ class SensorFrame:
         :raises KeyError: If any mandatory wire frame key is absent from the
             decoded object.
         :raises UnicodeDecodeError: If ``raw`` is not valid UTF-8.
+        :raises TypeError: If any field carries a value whose runtime type is
+            incompatible with its wire format contract (e.g., a string where an
+            integer is required, or a boolean masquerading as an int).
         :raises ValueError: If the ``v`` field is not ``1``; future or unknown
             wire format versions are rejected immediately to prevent silent
             misinterpretation of structurally incompatible envelopes.
         """
         frame: dict[str, Any] = json.loads(raw.decode("utf-8"))
+        for _field, _expected_type in (
+            ("n", str), ("t", str), ("alg", str), ("s", str), ("d", dict),
+        ):
+            _val: Any = frame[_field]
+            if not isinstance(_val, _expected_type):
+                raise TypeError(
+                    f"SensorFrame field '{_field}' must be {_expected_type.__name__}, "
+                    f"got {type(_val).__name__!r}"
+                )
+        for _int_field in ("v", "q"):
+            _val = frame[_int_field]
+            if not isinstance(_val, int) or isinstance(_val, bool):
+                raise TypeError(
+                    f"SensorFrame field '{_int_field}' must be int, "
+                    f"got {type(_val).__name__!r}"
+                )
         if frame["v"] != 1:
             raise ValueError(
                 f"Unsupported wire format version {frame['v']!r}: "

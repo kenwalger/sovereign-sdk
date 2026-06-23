@@ -68,11 +68,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     workspace member at version `0.1.0` with workspace-source dependencies on
     `sovereign-core`, `sovereign-ledger`, and `sovereign-sieve`.
 
-  - **`packages/sovereign-edge/tests/test_edge.py`** — 67 test cases across eight
-    classes (`TestSensorFrame`: 12 cases; `TestOffGridBuffer`: 10 cases;
+  - **`packages/sovereign-edge/tests/test_edge.py`** — 69 test cases across eight
+    classes (`TestSensorFrame`: 13 cases; `TestOffGridBuffer`: 10 cases;
     `TestEdgePipelineProcess`: 18 cases; `TestEdgePipelineBuffering`: 6 cases;
     `TestEdgePipelineDrainBuffer`: 5 cases; `TestOffGridBufferAsync`: 7 cases;
-    `TestEdgePipelineSieveFault`: 4 cases; `TestOffGridBufferWriteErrors`: 5 cases)
+    `TestEdgePipelineSieveFault`: 4 cases; `TestOffGridBufferWriteErrors`: 6 cases)
     verifying: wire frame deserialization, sort-keyed `text_content()` determinism,
     in-flight `size` accounting, `flush()` disk-commit guarantee, ascending-sequence sort
     in `drain()`, FIFO stable-sort preservation for equal sequence keys, non-integer
@@ -96,9 +96,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     tightened sieve-fault exception boundary `except (ValueError, KeyError, RuntimeError,
     AttributeError, TypeError):`, and `test_close_is_idempotent` confirming three
     consecutive `pipeline.close()` calls complete without deadlock,
-    `SensorFrame.from_bytes()` protocol version gate rejecting ``v != 1``, and
-    `OffGridBuffer._dead_letter` capped at 100 entries with oldest-first eviction.
-    **67 passed, 0 failed.**
+    `SensorFrame.from_bytes()` protocol version gate rejecting ``v != 1``,
+    `OffGridBuffer._dead_letter` capped at 100 entries with oldest-first eviction,
+    `OffGridBuffer` background writer thread failure detection via ``worker_failed``
+    property with orphan-drain loop under ``_drain_lock``, strict runtime type
+    validation in `SensorFrame.from_bytes()` blocking wrong-type fields at the
+    deserialization boundary, and two new tests covering non-OSError worker failure
+    and field type anomaly rejection.
+    **69 passed, 0 failed.**
 
 ### Changed
 
@@ -453,6 +458,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``SovereignLedger.close()`` is idempotent.  All 13 ``EdgePipeline`` constructions across
   the suite now pass ``sensor_secret=_SENSOR_SECRET`` so every test exercises inbound
   verification on the happy path.
+
+- **`OffGridBuffer._disk_writer` — non-OSError exception caught; `_worker_failed` flag set**
+  (`buffer.py`): An ``except Exception:`` clause is added after the ``except OSError:`` handler
+  in the background writer loop.  When a non-:exc:`OSError` exception escapes the write path
+  (e.g. a corrupted file descriptor or unexpected runtime error), the affected entry is preserved
+  in ``_write_errors`` or ``_dead_letter`` (same logic as the ``OSError`` path), ``_worker_failed``
+  is set to ``True`` under the count lock in the ``finally`` block, and the thread enters a drain
+  loop that acquires ``_drain_lock`` and exhausts all remaining queue items — calling ``task_done()``
+  for each — before returning.  This prevents :meth:`flush` from blocking indefinitely (all
+  ``task_done()`` calls are made before the thread exits) and ensures no queued receipt is silently
+  discarded when the worker terminates abnormally.  A new ``worker_failed: bool`` read-only property
+  exposes the flag under the count lock.  :meth:`push` checks ``_worker_failed`` inside its
+  ``_drain_lock → _count_lock`` critical section and raises :exc:`RuntimeError` immediately when the
+  flag is set, preventing new entries from being enqueued into a dead queue.
+
+- **`SensorFrame.from_bytes()` — strict runtime type validation on all seven wire fields**
+  (`models.py`): Immediately after JSON decoding and before the protocol version check, each field
+  is validated against its expected runtime type.  String fields (``n``, ``t``, ``alg``, ``s``) and
+  the dict field (``d``) are checked via :func:`isinstance`; integer fields (``v``, ``q``) require
+  ``isinstance(_val, int) and not isinstance(_val, bool)`` to exclude JSON booleans that Python's
+  ``isinstance(True, int)`` would otherwise accept.  A type mismatch raises :exc:`TypeError` with a
+  precise message naming the field, its expected type, and the received type before the frame can
+  reach the version gate, HMAC verifier, sieve, or ledger.
+
+- **`TestSensorFrame` — field type anomaly rejection test** (`test_edge.py`): New test
+  ``test_from_bytes_raises_on_wrong_field_type`` submits a frame with ``"q": "not-an-int"`` and
+  asserts :exc:`TypeError`, verifying the type gate blocks structurally invalid frames at the
+  deserialization boundary.  ``TestSensorFrame`` grows from 12 to 13 cases.
+
+- **`TestOffGridBufferWriteErrors` — non-OSError worker failure test** (`test_edge.py`): New test
+  ``test_worker_non_oserror_failure_does_not_hang`` patches ``builtins.open`` with
+  ``side_effect=RuntimeError("unexpected worker crash")`` to simulate a non-:exc:`OSError` exception
+  in the background writer.  The test asserts that ``flush()`` returns without hanging, that
+  ``worker_failed is True``, that a subsequent ``push()`` raises :exc:`RuntimeError` matching
+  ``"background writer"``, and that ``drain()`` followed by ``close()`` complete normally.
+  ``TestOffGridBufferWriteErrors`` grows from 5 to 6 cases.  **Suite: 69 edge tests, 358 workspace
+  tests passed, 1 skipped.**
 
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing

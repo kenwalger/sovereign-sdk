@@ -87,6 +87,7 @@ class OffGridBuffer:
         self._write_errors: list[tuple[dict[str, Any], str]] = []
         self._dead_letter: list[str] = []
         self._closed: bool = False
+        self._worker_failed: bool = False
         self._count_lock: threading.Lock = threading.Lock()
         self._drain_lock: threading.Lock = threading.Lock()
         self._worker_thread: threading.Thread = threading.Thread(
@@ -107,6 +108,13 @@ class OffGridBuffer:
         ``_dead_letter`` under the count lock so that the corrupt payload is not silently
         discarded and remains available for out-of-band inspection.
 
+        If an unexpected non-:exc:`OSError` exception is raised during a write, the
+        thread sets ``_worker_failed`` under the count lock and immediately drains all
+        remaining queue items under ``_drain_lock`` — preserving each in ``_write_errors``
+        or ``_dead_letter`` — before returning.  This prevents :meth:`flush` from blocking
+        indefinitely and ensures no queued receipt is silently lost when the thread
+        terminates abnormally.
+
         :return: None
         :rtype: None
         """
@@ -116,6 +124,7 @@ class OffGridBuffer:
             written: bool = False
             error_entry: tuple[dict[str, Any], str] | None = None
             dead_letter_entry: str | None = None
+            worker_failed: bool = False
             try:
                 if not stop:
                     with open(self._path, "a", encoding="utf-8") as fh:
@@ -130,6 +139,14 @@ class OffGridBuffer:
                         error_entry = (_obj["receipt"], _obj["sieved_content"])
                     except (json.JSONDecodeError, KeyError):
                         dead_letter_entry = entry
+            except Exception:
+                worker_failed = True
+                if entry is not None:
+                    try:
+                        _obj = json.loads(entry)
+                        error_entry = (_obj["receipt"], _obj["sieved_content"])
+                    except (json.JSONDecodeError, KeyError):
+                        dead_letter_entry = entry
             finally:
                 with self._count_lock:
                     self._pending -= 1
@@ -141,8 +158,37 @@ class OffGridBuffer:
                         if len(self._dead_letter) >= _DEAD_LETTER_MAX:
                             del self._dead_letter[0]
                         self._dead_letter.append(dead_letter_entry)
+                    if worker_failed:
+                        self._worker_failed = True
                 self._write_queue.task_done()
-            if stop:
+            if stop or worker_failed:
+                if worker_failed:
+                    with self._drain_lock:
+                        while True:
+                            try:
+                                orphan: str | None = self._write_queue.get_nowait()
+                                if orphan is not None:
+                                    try:
+                                        _orphan_obj: dict[str, Any] = json.loads(orphan)
+                                        orphan_pair: tuple[dict[str, Any], str] = (
+                                            _orphan_obj["receipt"],
+                                            _orphan_obj["sieved_content"],
+                                        )
+                                        with self._count_lock:
+                                            self._pending -= 1
+                                            self._write_errors.append(orphan_pair)
+                                    except (json.JSONDecodeError, KeyError):
+                                        with self._count_lock:
+                                            self._pending -= 1
+                                            if len(self._dead_letter) >= _DEAD_LETTER_MAX:
+                                                del self._dead_letter[0]
+                                            self._dead_letter.append(orphan)
+                                else:
+                                    with self._count_lock:
+                                        self._pending -= 1
+                                self._write_queue.task_done()
+                            except _queue.Empty:
+                                break
                 return
 
     def push(self, receipt: dict[str, Any], sieved_content: str) -> None:
@@ -163,11 +209,13 @@ class OffGridBuffer:
         experience brief lock contention and block until the active drain batch
         transaction yields the lock.
 
-        Raises :exc:`RuntimeError` immediately if :meth:`close` has already been called.
-        After :meth:`close` the background worker thread has exited and the internal queue
-        has no consumer; enqueueing would increment ``_pending`` and place an entry into a
-        dead queue that never calls ``task_done()``, causing any subsequent :meth:`flush`
-        call to block indefinitely.
+        Raises :exc:`RuntimeError` immediately if :meth:`close` has already been called
+        or if the background worker thread has terminated due to an unexpected exception
+        (``_worker_failed`` is ``True``).  In either case the queue has no active consumer;
+        enqueueing would increment ``_pending`` and place an entry into a queue that never
+        calls ``task_done()``, causing any subsequent :meth:`flush` call to block
+        indefinitely.  When ``_worker_failed`` is detected, call :meth:`drain` to recover
+        any preserved receipts from ``_write_errors`` and :meth:`close` to shut down.
 
         :param receipt: A :class:`~sovereign_core.crypto.ForensicReceipt`-compatible
             dict to queue for later ledger submission.
@@ -175,7 +223,9 @@ class OffGridBuffer:
         :param sieved_content: The Prose-Tax-minimized string payload associated with
             ``receipt``.
         :type sieved_content: str
-        :raises RuntimeError: If the buffer has been closed via :meth:`close`.
+        :raises RuntimeError: If the buffer has been closed via :meth:`close` or if the
+            background writer thread terminated unexpectedly (``_worker_failed`` is
+            ``True``).
         """
         entry: str = json.dumps(
             {"receipt": receipt, "sieved_content": sieved_content},
@@ -188,6 +238,12 @@ class OffGridBuffer:
                     raise RuntimeError(
                         "OffGridBuffer is closed; push() cannot enqueue new entries "
                         "after close() has been called"
+                    )
+                if self._worker_failed:
+                    raise RuntimeError(
+                        "OffGridBuffer background writer thread terminated unexpectedly; "
+                        "new entries cannot be enqueued — call drain() to recover pending "
+                        "receipts and close() to shut down"
                     )
                 self._pending += 1
             self._write_queue.put(entry)
@@ -420,3 +476,18 @@ class OffGridBuffer:
         """
         with self._count_lock:
             return len(self._dead_letter)
+
+    @property
+    def worker_failed(self) -> bool:
+        """True if the background writer thread terminated due to an unexpected exception.
+
+        Set to ``True`` under the count lock by the worker thread when a non-:exc:`OSError`
+        exception escapes the write path.  Once set, :meth:`push` raises :exc:`RuntimeError`
+        immediately rather than enqueueing into a dead queue.  Call :meth:`drain` to recover
+        any receipts preserved in ``_write_errors``, then :meth:`close` to shut down.
+
+        :return: True if the worker thread exited due to an unhandled non-OSError exception.
+        :rtype: bool
+        """
+        with self._count_lock:
+            return self._worker_failed

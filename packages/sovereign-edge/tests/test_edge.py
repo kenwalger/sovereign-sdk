@@ -150,6 +150,17 @@ class TestSensorFrame:
         with pytest.raises(ValueError, match="Unsupported wire format version"):
             SensorFrame.from_bytes(payload)
 
+    def test_from_bytes_raises_on_wrong_field_type(self) -> None:
+        """from_bytes must raise TypeError when a critical field carries the wrong
+        runtime type; a string value for the integer 'q' field must be blocked at
+        the deserialization boundary before the frame reaches the pipeline."""
+        payload: bytes = json.dumps({
+            "v": 1, "n": "node", "t": "2026-06-23T00:00:00Z", "q": "not-an-int",
+            "alg": "hmac-sha256", "d": {}, "s": "aabbcc",
+        }).encode("utf-8")
+        with pytest.raises(TypeError):
+            SensorFrame.from_bytes(payload)
+
 
 # ---------------------------------------------------------------------------
 # TestOffGridBuffer
@@ -1097,3 +1108,18 @@ class TestOffGridBufferWriteErrors:
         buf.close()
         with pytest.raises(RuntimeError, match="closed"):
             buf.push(self._make_receipt("post-close"), "content")
+
+    def test_worker_non_oserror_failure_does_not_hang(self, tmp_path: Path) -> None:
+        """A non-OSError exception inside the background writer must set worker_failed,
+        drain remaining queue items so that flush() returns without blocking, and allow
+        close() to complete without deadlocking.  push() must raise immediately after."""
+        buf = OffGridBuffer(str(tmp_path / "buf.jsonl"))
+        receipt = self._make_receipt("A")
+        with patch("builtins.open", side_effect=RuntimeError("unexpected worker crash")):
+            buf.push(receipt, "content A")
+            buf.flush()  # must not hang even though the worker crashed
+        assert buf.worker_failed is True
+        with pytest.raises(RuntimeError, match="background writer"):
+            buf.push(self._make_receipt("B"), "content B")
+        buf.drain()  # recover write-error entries so close() succeeds
+        buf.close()  # must not hang
