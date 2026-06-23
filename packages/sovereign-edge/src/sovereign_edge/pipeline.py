@@ -1,5 +1,9 @@
 # packages/sovereign-edge/src/sovereign_edge/pipeline.py
 """EdgePipeline: intercept → sieve → sign → ledger dispatch orchestrator."""
+import binascii
+import hashlib
+import hmac as _hmac
+import json
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -39,6 +43,13 @@ class EdgePipeline:
     :param buffer_path: Filesystem path for the off-grid JSONL receipt buffer.  Defaults
         to ``".edge_buffer.jsonl"`` in the current working directory.
     :type buffer_path: str
+    :param sensor_secret: Shared HMAC-SHA256 secret provisioned to every sensor node in
+        this deployment.  When non-empty, :meth:`process` verifies the incoming frame's
+        ``s`` field against a locally recomputed digest and raises :exc:`ValueError` on
+        mismatch before the payload reaches the sieve or ledger.  Accepts either a
+        ``str`` (UTF-8 encoded on assignment) or raw ``bytes``.  Pass an empty string or
+        ``b""`` to disable inbound verification (default).
+    :type sensor_secret: str | bytes
     """
 
     def __init__(
@@ -46,6 +57,7 @@ class EdgePipeline:
         ledger: SovereignLedger,
         signing_key: str = ".keys/edge_identity.pem",
         buffer_path: str = ".edge_buffer.jsonl",
+        sensor_secret: str | bytes = b"",
     ) -> None:
         self._ledger: SovereignLedger = ledger
         self._buffer: OffGridBuffer = OffGridBuffer(buffer_path)
@@ -55,6 +67,9 @@ class EdgePipeline:
         self._key_manager: SovereignKeyManager = SovereignKeyManager(key_dir=key_path.parent)
         self._key_manager.private_key_path = key_path
         self._key_manager.public_key_path = key_path.with_suffix(".pub")
+        self._sensor_secret: bytes = (
+            sensor_secret.encode("utf-8") if isinstance(sensor_secret, str) else sensor_secret
+        )
 
     def process(self, frame_bytes: bytes) -> EdgeResult:
         """Parse, sieve, sign, and commit a sealed sensor wire frame.
@@ -89,8 +104,30 @@ class EdgePipeline:
         :raises json.JSONDecodeError: If ``frame_bytes`` is not valid JSON.
         :raises KeyError: If any mandatory sensor wire frame key is absent.
         :raises UnicodeDecodeError: If ``frame_bytes`` is not valid UTF-8.
+        :raises ValueError: If ``sensor_secret`` is non-empty and the frame's HMAC-SHA256
+            digest does not match the locally recomputed expected signature.
         """
         frame: SensorFrame = SensorFrame.from_bytes(frame_bytes)
+
+        if self._sensor_secret and frame.alg == "hmac-sha256":
+            node_bytes: bytes = frame.n.encode("utf-8")
+            time_bytes: bytes = frame.t.encode("utf-8")
+            algo_bytes: bytes = frame.alg.encode("utf-8")
+            canonical: str = json.dumps(
+                frame.d, separators=(",", ":"), sort_keys=True, ensure_ascii=False
+            )
+            preimage: bytes = (
+                f"1|{len(node_bytes)}:{frame.n}|{len(time_bytes)}:{frame.t}"
+                f"|{frame.q}|{len(algo_bytes)}:{frame.alg}|{canonical}"
+            ).encode("utf-8")
+            expected_sig: str = binascii.hexlify(
+                _hmac.new(self._sensor_secret, preimage, hashlib.sha256).digest()
+            ).decode("utf-8")
+            if not _hmac.compare_digest(expected_sig, frame.s):
+                raise ValueError(
+                    f"Sensor frame signature verification failed for node '{frame.n}' "
+                    f"sequence {frame.q}: HMAC-SHA256 digest mismatch"
+                )
 
         raw_text: str = frame.text_content()
         sieve_fault: bool = False

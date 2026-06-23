@@ -49,6 +49,7 @@ _NODE_ID: str = "edge-test-node-001"
 _TIMESTAMP: str = "2026-06-19T00:00:00Z"
 _PAYLOAD: dict[str, Any] = {"sensor": "temperature", "unit": "C", "value": 23}
 _KEY_PATH: str = SoftwareFallbackDriver.MOCK_KEY_SENTINEL
+_SENSOR_SECRET: bytes = SoftwareFallbackDriver._MOCK_KEY
 
 
 def _seal_frame(tmp_path: Path, payload: dict[str, Any] | None = None) -> bytes:
@@ -255,8 +256,7 @@ def mem_ledger() -> SovereignLedger:
     """In-memory ledger — fast, side-effect free."""
     ledger = SovereignLedger(":memory:")
     yield ledger
-    if not ledger._closed:
-        ledger.close()
+    ledger.close()
 
 
 @pytest.fixture
@@ -273,6 +273,7 @@ def edge_pipeline(mem_ledger: SovereignLedger, tmp_path: Path) -> EdgePipeline:
         ledger=mem_ledger,
         signing_key=str(tmp_path / ".keys" / "edge_identity.pem"),
         buffer_path=str(tmp_path / ".edge_buffer.jsonl"),
+        sensor_secret=_SENSOR_SECRET,
     )
     yield pipeline
     pipeline.close()
@@ -367,20 +368,16 @@ class TestEdgePipelineProcess:
         self, edge_pipeline: EdgePipeline, mem_ledger: SovereignLedger, tmp_path: Path
     ) -> None:
         """process() must insert exactly one row into the ledger on the happy path."""
-        edge_pipeline.process(_seal_frame(tmp_path))
-        cur = mem_ledger._conn.execute("SELECT COUNT(*) FROM forensic_ledger")
-        assert cur.fetchone()[0] == 1
+        result = edge_pipeline.process(_seal_frame(tmp_path))
+        assert result.buffered is False
+        assert mem_ledger.verify_ledger_integrity(expected_tip_hash=result.payload_hash) is True
 
     def test_process_ledger_row_matches_result_payload_hash(
         self, edge_pipeline: EdgePipeline, mem_ledger: SovereignLedger, tmp_path: Path
     ) -> None:
         """The payload_hash stored in the ledger must match EdgeResult.payload_hash."""
         result = edge_pipeline.process(_seal_frame(tmp_path))
-        cur = mem_ledger._conn.execute(
-            "SELECT payload_hash FROM forensic_ledger WHERE payload_hash = ?",
-            (result.payload_hash,),
-        )
-        assert cur.fetchone() is not None
+        assert mem_ledger.verify_ledger_integrity(expected_tip_hash=result.payload_hash) is True
 
     def test_process_ledger_integrity_holds_after_single_frame(
         self, edge_pipeline: EdgePipeline, mem_ledger: SovereignLedger, tmp_path: Path
@@ -432,6 +429,27 @@ class TestEdgePipelineProcess:
         }
         assert SovereignKeyManager.verify_receipt(result.receipt, reconstructed_payload) is True
 
+    def test_process_rejects_forged_sensor_signature(
+        self, edge_pipeline: EdgePipeline, tmp_path: Path
+    ) -> None:
+        """process() must raise ValueError when the sensor frame signature fails
+        HMAC-SHA256 verification; the forged payload must be rejected before reaching
+        the sieve or ledger.
+
+        :param edge_pipeline: Pipeline under test, provisioned with the mock HMAC secret.
+        :type edge_pipeline: EdgePipeline
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        frame_bytes: bytes = _seal_frame(tmp_path)
+        frame_dict: dict[str, Any] = json.loads(frame_bytes.decode("utf-8"))
+        frame_dict["s"] = "00" * (len(frame_dict["s"]) // 2)
+        forged_bytes: bytes = json.dumps(
+            frame_dict, separators=(",", ":"), sort_keys=True, ensure_ascii=False
+        ).encode("utf-8")
+        with pytest.raises(ValueError, match="signature verification failed"):
+            edge_pipeline.process(forged_bytes)
+
 
 # ---------------------------------------------------------------------------
 # TestEdgePipelineBuffering
@@ -447,6 +465,7 @@ class TestEdgePipelineBuffering:
             ledger=ledger,
             signing_key=str(tmp_path / ".keys" / "edge_identity.pem"),
             buffer_path=str(tmp_path / ".edge_buffer.jsonl"),
+            sensor_secret=_SENSOR_SECRET,
         )
         ledger.close()
         try:
@@ -462,6 +481,7 @@ class TestEdgePipelineBuffering:
             ledger=ledger,
             signing_key=str(tmp_path / ".keys" / "edge_identity.pem"),
             buffer_path=str(tmp_path / ".edge_buffer.jsonl"),
+            sensor_secret=_SENSOR_SECRET,
         )
         ledger.close()
         try:
@@ -477,6 +497,7 @@ class TestEdgePipelineBuffering:
             ledger=ledger,
             signing_key=str(tmp_path / ".keys" / "edge_identity.pem"),
             buffer_path=str(tmp_path / ".edge_buffer.jsonl"),
+            sensor_secret=_SENSOR_SECRET,
         )
         ledger.close()
         try:
@@ -508,6 +529,7 @@ class TestEdgePipelineBuffering:
             ledger=ledger,
             signing_key=str(tmp_path / ".keys" / "edge_identity.pem"),
             buffer_path=str(tmp_path / ".edge_buffer.jsonl"),
+            sensor_secret=_SENSOR_SECRET,
         )
         frame_a: bytes = _seal_frame(tmp_path)
         pipeline.process(frame_a)  # warm up key manager before any open() patch
@@ -544,6 +566,7 @@ class TestEdgePipelineDrainBuffer:
             ledger=closed_ledger,
             signing_key=key_path,
             buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
         )
         closed_ledger.close()
         try:
@@ -560,6 +583,7 @@ class TestEdgePipelineDrainBuffer:
             ledger=open_ledger,
             signing_key=key_path,
             buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
         )
         try:
             committed = pipeline_b.drain_buffer()
@@ -578,6 +602,7 @@ class TestEdgePipelineDrainBuffer:
             ledger=closed_ledger,
             signing_key=key_path,
             buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
         )
         closed_ledger.close()
         try:
@@ -591,6 +616,7 @@ class TestEdgePipelineDrainBuffer:
             ledger=open_ledger,
             signing_key=key_path,
             buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
         )
         try:
             pipeline_b.drain_buffer()
@@ -612,6 +638,7 @@ class TestEdgePipelineDrainBuffer:
             ledger=closed_ledger_a,
             signing_key=key_path,
             buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
         )
         closed_ledger_a.close()
         try:
@@ -627,6 +654,7 @@ class TestEdgePipelineDrainBuffer:
             ledger=closed_ledger_b,
             signing_key=key_path,
             buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
         )
         closed_ledger_b.close()
         try:
@@ -653,6 +681,7 @@ class TestEdgePipelineDrainBuffer:
             ledger=closed_ledger,
             signing_key=key_path,
             buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
         )
         closed_ledger.close()
         try:
@@ -669,6 +698,7 @@ class TestEdgePipelineDrainBuffer:
             ledger=recovery_ledger,
             signing_key=key_path,
             buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
         )
         try:
             committed = pipeline_b.drain_buffer()
@@ -886,8 +916,7 @@ class TestEdgePipelineSieveFault:
         ):
             result = edge_pipeline.process(_seal_frame(tmp_path))
         assert result.buffered is False
-        cur = mem_ledger._conn.execute("SELECT COUNT(*) FROM forensic_ledger")
-        assert cur.fetchone()[0] == 1
+        assert mem_ledger.verify_ledger_integrity(expected_tip_hash=result.payload_hash) is True
 
 
 # ---------------------------------------------------------------------------

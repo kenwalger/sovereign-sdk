@@ -68,9 +68,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     workspace member at version `0.1.0` with workspace-source dependencies on
     `sovereign-core`, `sovereign-ledger`, and `sovereign-sieve`.
 
-  - **`packages/sovereign-edge/tests/test_edge.py`** — 63 test cases across eight
+  - **`packages/sovereign-edge/tests/test_edge.py`** — 64 test cases across eight
     classes (`TestSensorFrame`: 11 cases; `TestOffGridBuffer`: 10 cases;
-    `TestEdgePipelineProcess`: 16 cases; `TestEdgePipelineBuffering`: 5 cases;
+    `TestEdgePipelineProcess`: 17 cases; `TestEdgePipelineBuffering`: 5 cases;
     `TestEdgePipelineDrainBuffer`: 5 cases; `TestOffGridBufferAsync`: 7 cases;
     `TestEdgePipelineSieveFault`: 4 cases; `TestOffGridBufferWriteErrors`: 5 cases)
     verifying: wire frame deserialization, sort-keyed `text_content()` determinism,
@@ -86,8 +86,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `close()` raising `RuntimeError` when un-journaled entries remain, `push()` raising
     `RuntimeError` when called after `close()`, `EdgePipeline.close()` propagating
     `RuntimeError` from `OffGridBuffer.close()` when un-journaled write errors survive the
-    internal `drain_buffer()` pass, and 20-thread concurrent `push()`-vs-`close()` race
-    producing zero orphaned queue entries.  **63 passed, 0 failed.**
+    internal `drain_buffer()` pass, 20-thread concurrent `push()`-vs-`close()` race
+    producing zero orphaned queue entries, and HMAC-SHA256 inbound signature rejection of
+    forged frames before the sieve or ledger is reached.  **64 passed, 0 failed.**
 
 ### Changed
 
@@ -322,6 +323,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from a single ``frame.text_content()`` call before the ``try`` block; both the happy path
   (``sieve_with_metrics(raw_text)``) and the fault path (``SieveOutput(text=raw_text, …)``)
   consume the same string reference.
+
+- **`EdgePipeline` — HMAC-SHA256 inbound signature verification** (`pipeline.py`): A new
+  ``sensor_secret: str | bytes = b""`` parameter is added to ``EdgePipeline.__init__()``.
+  When non-empty, ``process()`` immediately reconstructs the exact HMAC-SHA256 preimage
+  from the deserialized ``SensorFrame`` fields — matching the format produced by
+  ``SovereignEnvelope.seal()`` in ``sovereign-sensor``:
+  ``"1|{len(n_bytes)}:{n}|{len(t_bytes)}:{t}|{q}|{len(alg_bytes)}:{alg}|{canonical_d}"``
+  where ``canonical_d = json.dumps(d, separators=(",", ":"), sort_keys=True,
+  ensure_ascii=False)`` — and compares the resulting digest against ``frame.s`` via
+  ``hmac.compare_digest`` to prevent timing-oracle leakage.  A digest mismatch raises
+  :exc:`ValueError` with the message ``"Sensor frame signature verification failed for
+  node '{n}' sequence {q}: HMAC-SHA256 digest mismatch"`` before the payload reaches the
+  sieve or ledger.  Verification is skipped when ``sensor_secret`` is empty or when
+  ``frame.alg != "hmac-sha256"``, preserving backwards compatibility with unauthenticated
+  deployments.  The secret is stored as ``bytes`` on the instance; ``str`` inputs are
+  UTF-8-encoded at assignment time.
+
+- **`TestEdgePipelineProcess` — cryptographic rejection test** (`test_edge.py`): New test
+  ``test_process_rejects_forged_sensor_signature`` verifies that ``process()`` raises
+  :exc:`ValueError` matching ``"signature verification failed"`` when the ``s`` field of the
+  wire frame is replaced with an all-zero hex string of the same length.  The test confirms
+  the rejection occurs before any sieve or ledger interaction: the fixture pipeline is
+  provisioned with ``_SENSOR_SECRET = SoftwareFallbackDriver._MOCK_KEY`` so a genuine
+  frame passes but the forged frame is deterministically rejected.  ``TestEdgePipelineProcess``
+  grows from 16 to 17 cases.
+
+- **Test suite — private attribute access eliminated** (`test_edge.py`):
+  Three ``mem_ledger._conn.execute(...)`` direct-SQL queries are replaced with the
+  public ``SovereignLedger.verify_ledger_integrity(expected_tip_hash=result.payload_hash)``
+  call: ``test_process_commits_receipt_to_ledger`` (was ``COUNT(*) = 1``),
+  ``test_process_ledger_row_matches_result_payload_hash`` (was ``SELECT payload_hash WHERE
+  payload_hash = ?``), and ``test_sieve_fault_still_commits_to_ledger`` (was
+  ``COUNT(*) = 1``).  The ``if not ledger._closed: ledger.close()`` guard in the
+  ``mem_ledger`` fixture is simplified to an unconditional ``ledger.close()`` because
+  ``SovereignLedger.close()`` is idempotent.  All 13 ``EdgePipeline`` constructions across
+  the suite now pass ``sensor_secret=_SENSOR_SECRET`` so every test exercises inbound
+  verification on the happy path.
 
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing

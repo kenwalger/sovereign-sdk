@@ -469,7 +469,11 @@ from sovereign_edge import EdgePipeline
 from sovereign_ledger import SovereignLedger
 
 ledger = SovereignLedger(".keys/sovereign_audit.db")
-pipeline = EdgePipeline(ledger=ledger, signing_key=".keys/edge_identity.pem")
+pipeline = EdgePipeline(
+    ledger=ledger,
+    signing_key=".keys/edge_identity.pem",
+    sensor_secret=b"<shared-hmac-secret>",  # omit to disable inbound verification
+)
 
 # Intercept a sealed wire frame from sovereign-sensor
 result = pipeline.process(wire_bytes)
@@ -539,7 +543,17 @@ committed = pipeline.drain_buffer()
 * [x] `OffGridBuffer.close()` shutdown race eliminated: sentinel `queue.put(None)` moved
   inside `_drain_lock` so `push()` and `close()` are fully serialized; no payload can
   be enqueued behind the sentinel; `_worker_thread.join()` remains outside the lock.
-* [x] 63-case desktop validation test suite across eight classes (`TestSensorFrame`,
+* [x] `EdgePipeline.__init__()` — `sensor_secret: str | bytes = b""` parameter: when
+  non-empty, `process()` reconstructs the HMAC-SHA256 preimage from the deserialized
+  frame fields (matching `SovereignEnvelope.seal()` format exactly) and compares the
+  digest against `frame.s` via `hmac.compare_digest`; mismatch raises `ValueError` before
+  the sieve or ledger is reached; empty secret disables verification for backwards
+  compatibility with unauthenticated deployments.
+* [x] Test suite — private attribute access eliminated: three `_conn.execute()` calls
+  replaced with `SovereignLedger.verify_ledger_integrity(expected_tip_hash=...)`;
+  `_closed` guard in `mem_ledger` fixture simplified to unconditional `ledger.close()`
+  (idempotent); all 13 `EdgePipeline` constructions pass `sensor_secret=_SENSOR_SECRET`.
+* [x] 64-case desktop validation test suite across eight classes (`TestSensorFrame`,
   `TestOffGridBuffer`, `TestEdgePipelineProcess`, `TestEdgePipelineBuffering`,
   `TestEdgePipelineDrainBuffer`, `TestOffGridBufferAsync`, `TestEdgePipelineSieveFault`,
   `TestOffGridBufferWriteErrors`) covering all fortification scenarios: non-blocking
@@ -549,8 +563,10 @@ committed = pipeline.drain_buffer()
   metadata, disk write error tracking via `write_error_count`, `size` accuracy under
   disk failure, full `drain()` recovery of write-error entries, `close()` raising
   `RuntimeError` when un-journaled entries remain at shutdown, `EdgePipeline.close()`
-  propagating `RuntimeError` when un-journaled write errors survive the drain pass, and
-  20-thread concurrent `push()`-vs-`close()` stress test asserting zero orphan entries.
+  propagating `RuntimeError` when un-journaled write errors survive the drain pass,
+  20-thread concurrent `push()`-vs-`close()` stress test asserting zero orphan entries,
+  and HMAC-SHA256 inbound signature rejection of forged frames verified before the sieve
+  or ledger is reached.
 
 ---
 
