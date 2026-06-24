@@ -301,6 +301,11 @@ class OffGridBuffer:
         :return: List of ``(receipt_dict, sieved_content)`` tuples sorted by sequence,
             or an empty list if the buffer file could not be atomically cleared.
         :rtype: list[tuple[dict[str, Any], str]]
+        :raises OSError: If the buffer file exists but :meth:`pathlib.Path.read_text`
+            raises :exc:`OSError` (e.g., permissions change, device removal, filesystem
+            error after existence was confirmed).  :attr:`drain_read_failed` is set to
+            ``True`` under the count lock before re-raising so the caller can distinguish
+            a genuine empty drain from a read-blocked drain.
         """
         with self._drain_lock:
             self.flush()
@@ -326,7 +331,7 @@ class OffGridBuffer:
             except OSError:
                 with self._count_lock:
                     self._drain_read_failed = True
-                return []
+                raise
 
             entries: list[tuple[dict[str, Any], str]] = []
             disk_line_count: int = 0
@@ -509,12 +514,12 @@ class OffGridBuffer:
         Set to ``True`` under the count lock at the point where
         :meth:`pathlib.Path.read_text` raises :exc:`OSError` (e.g., a permissions
         change, device removal, or filesystem error that occurred after the buffer file
-        was confirmed to exist).  When set, :meth:`drain` returns an empty list without
-        clearing the on-disk file or ``_write_errors``, so no entry is discarded —
-        but the pipeline orchestrator cannot observe this failure through the return
-        value alone.  Polling this property allows callers to distinguish a genuine
-        empty drain from a read-blocked drain and take explicit recovery action
-        (alert, retry, or surface the filesystem error).
+        was confirmed to exist).  After setting the flag, :meth:`drain` re-raises the
+        :exc:`OSError` so the failure propagates to the caller; the on-disk file and
+        ``_write_errors`` are not modified, so no entry is discarded.  Polling this
+        property allows callers that catch the :exc:`OSError` to confirm that the flag
+        was set and take explicit recovery action (alert, retry, or surface the filesystem
+        error).
 
         :return: True if any :meth:`drain` call failed to read the JSONL file.
         :rtype: bool

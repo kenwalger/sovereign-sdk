@@ -633,7 +633,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Constructs a live ``SensorFrame`` and asserts that ``frame.d["injected_key"] =
   "malicious_value"`` raises ``TypeError``, verifying the ``MappingProxyType`` write-block
   is in effect.  ``TestSensorFrame`` grows from 14 to 15 cases.
-  **Suite: 77 edge tests, 366 workspace tests passed, 1 skipped.**
+
+- **`SovereignDoubleFaultError` — total persistence failure sentinel** (`pipeline.py`,
+  `__init__.py`): New ``RuntimeError`` subclass with a ``receipt: dict[str, Any]``
+  attribute that encapsulates the catastrophic case where the ledger raises
+  ``SovereignStorageError`` / ``sqlite3.Error`` and the subsequent off-grid buffer push
+  also raises.  Previously, a push failure inside the ledger-fallback ``except`` block
+  propagated as an uncaught ``RuntimeError`` with no reference to the signed receipt,
+  making the payload unrecoverable at the host level.  The fix wraps
+  ``self._buffer.push()`` in a nested ``try/except Exception as push_err:`` and raises
+  ``SovereignDoubleFaultError(..., receipt=receipt_dict) from push_err`` so the signed
+  receipt dict remains accessible through ``exception.receipt`` for out-of-band routing.
+  ``SovereignDoubleFaultError`` is exported from ``sovereign_edge.__init__`` via the
+  ``__all__`` list.  The ``process()`` docstring is updated with a
+  ``:raises SovereignDoubleFaultError:`` entry.
+
+- **`OffGridBuffer.drain()` — active OSError propagation** (`buffer.py`): The
+  ``except OSError: ... return []`` block that handled ``Path.read_text`` failures was
+  replaced with ``except OSError: ... raise``.  Returning ``[]`` in total silence meant
+  that a filesystem-level read failure (permissions change, device removal) was
+  completely indistinguishable from a successful empty drain at the caller level; the
+  pipeline would advance the drain lifecycle with no committed receipts and no operator
+  alert.  The flag ``self._drain_read_failed = True`` is still set under ``_count_lock``
+  before re-raising so callers that catch the ``OSError`` can confirm the flag is set.
+  On-disk entries and ``_write_errors`` are untouched; the atomic replace is never
+  reached, so no data is discarded.  The ``drain()`` and ``drain_read_failed`` docstrings
+  are updated to document the new raise-on-read-failure behaviour.
+
+- **`EdgePipeline.drain_buffer()` — OSError propagation from buffer read** (`pipeline.py`):
+  ``list(self._buffer.drain())`` is now wrapped in a ``try/except OSError as read_err:``
+  block.  On ``OSError``, a descriptive ``RuntimeError`` is raised chained from the
+  ``OSError`` via ``__cause__``, halting the replay pass immediately and surfacing a
+  human-readable message directing operators to verify storage-tier accessibility.  The
+  ``drain_buffer()`` docstring's ``:raises RuntimeError:`` entry is updated to cover
+  this new propagation path.
+
+- **`test_process_raises_sovereign_double_fault_error_on_double_failure`**
+  (`TestEdgePipelineBuffering`, `test_edge.py`): Closes the ledger to force the
+  ``SovereignStorageError`` path, then patches ``pipeline._buffer.push`` to raise
+  ``RuntimeError``.  Asserts that ``process()`` raises ``SovereignDoubleFaultError``,
+  that ``exception.receipt`` is a ``dict`` containing a 64-character ``payload_hash``,
+  and that ``exception.__cause__`` is the ``RuntimeError`` from ``push()``.
+  ``TestEdgePipelineBuffering`` grows from 7 to 8 cases.
+
+- **`test_drain_buffer_raises_runtime_error_on_buffer_read_failure`**
+  (`TestEdgePipelineDrainBuffer`, `test_edge.py`): Buffers one receipt via a closed
+  ledger, then opens a recovery pipeline and patches ``pathlib.Path.read_text`` to raise
+  ``OSError``.  Asserts that ``drain_buffer()`` raises ``RuntimeError`` with the
+  message ``"off-grid buffer file could not be read"`` and that ``exception.__cause__``
+  is an ``OSError``.  ``TestEdgePipelineDrainBuffer`` grows from 7 to 8 cases.
+
+- **`test_drain_read_failed_flag_set_on_oserror`** (`TestOffGridBufferWriteErrors`,
+  `test_edge.py`): Updated to assert ``pytest.raises(OSError)`` around ``buf.drain()``
+  rather than asserting ``result == []``, reflecting the new ``raise`` behaviour in
+  ``OffGridBuffer.drain()``.  The post-patch ``buf.drain()`` cleanup call still confirms
+  that a subsequent unpatch drain recovers the on-disk entry cleanly.
+  **Suite: 79 edge tests, 368 workspace tests passed, 1 skipped.**
 
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing

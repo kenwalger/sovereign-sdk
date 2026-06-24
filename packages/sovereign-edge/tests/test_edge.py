@@ -43,7 +43,7 @@ from sovereign_ledger import SovereignLedger, SovereignStorageError
 from sovereign_sensor import bootstrap_sensor_node
 from sovereign_sensor.drivers.software_fallback import SoftwareFallbackDriver
 
-from sovereign_edge import EdgePipeline, EdgeResult, OffGridBuffer, SensorFrame
+from sovereign_edge import EdgePipeline, EdgeResult, OffGridBuffer, SensorFrame, SovereignDoubleFaultError
 
 _NODE_ID: str = "edge-test-node-001"
 _TIMESTAMP: str = "2026-06-19T00:00:00Z"
@@ -686,6 +686,41 @@ class TestEdgePipelineBuffering:
         )
         ledger.close()
 
+    def test_process_raises_sovereign_double_fault_error_on_double_failure(
+        self, tmp_path: Path
+    ) -> None:
+        """process() must raise SovereignDoubleFaultError — with the signed receipt
+        attached via .receipt — when the ledger raises SovereignStorageError and the
+        subsequent buffer push also raises.  The signed receipt must be fully intact
+        and extractable from the exception so the host can route it via an alternative
+        channel rather than losing the payload entirely."""
+        ledger = SovereignLedger(":memory:")
+        pipeline = EdgePipeline(
+            ledger=ledger,
+            signing_key=str(tmp_path / ".keys" / "edge_identity.pem"),
+            buffer_path=str(tmp_path / ".edge_buffer.jsonl"),
+            sensor_secret=_SENSOR_SECRET,
+        )
+        frame_bytes: bytes = _seal_frame(tmp_path)
+        pipeline.process(frame_bytes)  # warm up key manager before any patching
+
+        ledger.close()
+        frame_bytes = _seal_frame(tmp_path)
+        with patch.object(
+            pipeline._buffer, "push", side_effect=RuntimeError("buffer closed")
+        ):
+            with pytest.raises(SovereignDoubleFaultError) as exc_info:
+                pipeline.process(frame_bytes)
+
+        dfe: SovereignDoubleFaultError = exc_info.value
+        assert isinstance(dfe.receipt, dict), "receipt attribute must be a dict"
+        assert "payload_hash" in dfe.receipt, "receipt must carry payload_hash key"
+        assert isinstance(dfe.receipt["payload_hash"], str)
+        assert len(dfe.receipt["payload_hash"]) == 64
+        assert isinstance(dfe.__cause__, RuntimeError)
+        pipeline._buffer.close()
+        ledger.close()
+
 
 # ---------------------------------------------------------------------------
 # TestEdgePipelineDrainBuffer
@@ -958,6 +993,52 @@ class TestEdgePipelineDrainBuffer:
         finally:
             pipeline._buffer.close()
             ledger.close()
+
+    def test_drain_buffer_raises_runtime_error_on_buffer_read_failure(
+        self, tmp_path: Path
+    ) -> None:
+        """drain_buffer() must raise RuntimeError chained from OSError when
+        OffGridBuffer.drain() raises OSError on the file read; the pipeline must halt
+        replay and surface the disk failure to the operator rather than silently
+        returning an empty committed list."""
+        import pathlib
+
+        buffer_path: str = str(tmp_path / ".edge_buffer.jsonl")
+        key_path: str = str(tmp_path / ".keys" / "edge_identity.pem")
+
+        closed_ledger: SovereignLedger = SovereignLedger(":memory:")
+        pipeline: EdgePipeline = EdgePipeline(
+            ledger=closed_ledger,
+            signing_key=key_path,
+            buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
+        )
+        closed_ledger.close()
+        try:
+            pipeline.process(_seal_frame(tmp_path))
+            pipeline._buffer.flush()
+            assert pipeline._buffer.size == 1
+        finally:
+            closed_ledger.close()
+
+        open_ledger: SovereignLedger = SovereignLedger(str(tmp_path / "recovery.db"))
+        pipeline_b: EdgePipeline = EdgePipeline(
+            ledger=open_ledger,
+            signing_key=key_path,
+            buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
+        )
+        try:
+            with patch.object(
+                pathlib.Path, "read_text", side_effect=OSError("simulated read error")
+            ):
+                with pytest.raises(RuntimeError, match="off-grid buffer file could not be read") as exc_info:
+                    pipeline_b.drain_buffer()
+            assert isinstance(exc_info.value.__cause__, OSError)
+        finally:
+            pipeline_b._buffer.drain()  # clear buffer so close() does not raise
+            pipeline_b._buffer.close()
+            open_ledger.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1344,17 +1425,17 @@ class TestOffGridBufferWriteErrors:
         buf.close()
 
     def test_drain_read_failed_flag_set_on_oserror(self, tmp_path: Path) -> None:
-        """drain_read_failed must become True and drain() must return [] when
-        Path.read_text raises OSError after the buffer file is confirmed to exist;
-        the pipeline orchestrator can distinguish a genuine empty drain from a
-        filesystem-blocked drain by inspecting this observable flag."""
+        """drain_read_failed must become True and drain() must re-raise the OSError when
+        Path.read_text raises after the buffer file is confirmed to exist; the pipeline
+        orchestrator must catch the OSError and the flag allows distinguishing a genuine
+        empty drain from a filesystem-blocked drain."""
         import pathlib
         buf = OffGridBuffer(str(tmp_path / "buf.jsonl"))
         buf.push(self._make_receipt("A"), "content A")
         buf.flush()
         with patch.object(pathlib.Path, "read_text", side_effect=OSError("Permission denied")):
-            result = buf.drain()
-        assert result == []
+            with pytest.raises(OSError, match="Permission denied"):
+                buf.drain()
         assert buf.drain_read_failed is True
         buf.drain()  # recover on-disk entry so close() does not raise
         buf.close()

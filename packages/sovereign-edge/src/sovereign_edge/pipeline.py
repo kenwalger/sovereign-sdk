@@ -16,6 +16,26 @@ from .buffer import OffGridBuffer
 from .models import EdgeResult, SensorFrame
 
 
+class SovereignDoubleFaultError(RuntimeError):
+    """Raised when a signed receipt cannot reach either the ledger or the off-grid buffer.
+
+    Encapsulates a total persistence failure: the ledger was unreachable (raising
+    :exc:`~sovereign_ledger.SovereignStorageError` or ``sqlite3.Error``) and the
+    off-grid buffer push also failed (raising any :exc:`Exception`).  The signed
+    :class:`~sovereign_core.crypto.ForensicReceipt` dict is attached via
+    :attr:`receipt` so the host application can retrieve it through an alternative
+    channel rather than losing the payload entirely.
+
+    :param args: Positional message arguments forwarded to :class:`RuntimeError`.
+    :param receipt: The fully signed ForensicReceipt dict that could not be persisted.
+    :type receipt: dict[str, Any]
+    """
+
+    def __init__(self, *args: object, receipt: dict[str, Any]) -> None:
+        super().__init__(*args)
+        self.receipt: dict[str, Any] = receipt
+
+
 class EdgePipeline:
     """Ingestion orchestrator that bridges sovereign-sensor raw payloads and sovereign-ledger storage.
 
@@ -108,6 +128,10 @@ class EdgePipeline:
             ``"hmac-sha256"`` (unsupported or unauthenticated algorithm), or if the
             frame's HMAC-SHA256 digest does not match the locally recomputed expected
             signature.
+        :raises SovereignDoubleFaultError: If the ledger raises
+            :exc:`~sovereign_ledger.SovereignStorageError` or ``sqlite3.Error`` *and*
+            the subsequent :meth:`~sovereign_edge.buffer.OffGridBuffer.push` also raises.
+            The signed receipt dict is attached to the exception via :attr:`~SovereignDoubleFaultError.receipt`.
         """
         frame: SensorFrame = SensorFrame.from_bytes(frame_bytes)
 
@@ -180,10 +204,17 @@ class EdgePipeline:
         buffered: bool = False
         try:
             payload_hash: str = self._ledger.append_receipt(receipt_dict, sieve_result.text)
-        except (SovereignStorageError, sqlite3.Error):
-            self._buffer.push(receipt_dict, sieve_result.text)
-            payload_hash = receipt_dict["payload_hash"]
-            buffered = True
+        except (SovereignStorageError, sqlite3.Error) as ledger_err:
+            try:
+                self._buffer.push(receipt_dict, sieve_result.text)
+                payload_hash = receipt_dict["payload_hash"]
+                buffered = True
+            except Exception as push_err:
+                raise SovereignDoubleFaultError(
+                    "Ledger unavailable and off-grid buffer rejected payload; "
+                    "the signed receipt is attached to this exception for host-level recovery",
+                    receipt=receipt_dict,
+                ) from push_err
 
         return EdgeResult(
             payload_hash=payload_hash,
@@ -226,8 +257,9 @@ class EdgePipeline:
             the ledger on this drain pass.  Entries that could not be committed are
             re-queued and excluded from the returned list.
         :rtype: list[str]
-        :raises RuntimeError: If one or more entries cannot be re-queued after a
-            ledger failure or after the replay loop was interrupted.  The exception
+        :raises RuntimeError: If the off-grid buffer file raises :exc:`OSError` on read
+            (chained from the :exc:`OSError`), or if one or more entries cannot be re-queued
+            after a ledger failure or after the replay loop was interrupted.  The exception
             is raised only after all requeue items have been attempted; when both the
             replay crash and a requeue failure occur simultaneously, the requeue
             :exc:`RuntimeError` is chained from the replay exception via ``__cause__``.
@@ -235,7 +267,13 @@ class EdgePipeline:
         committed: list[str] = []
         requeue: list[tuple[dict[str, Any], str]] = []
 
-        drained: list[tuple[dict[str, Any], str]] = list(self._buffer.drain())
+        try:
+            drained: list[tuple[dict[str, Any], str]] = list(self._buffer.drain())
+        except OSError as read_err:
+            raise RuntimeError(
+                "drain_buffer() cannot replay buffered receipts: the off-grid buffer file "
+                "could not be read from disk — verify that the storage tier is accessible"
+            ) from read_err
         crash_exc: Exception | None = None
         processed: int = 0
 

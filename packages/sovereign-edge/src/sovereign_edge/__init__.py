@@ -10,7 +10,7 @@ are strictly local-first.
 
 from .buffer import OffGridBuffer
 from .models import EdgeResult, SensorFrame
-from .pipeline import EdgePipeline
+from .pipeline import EdgePipeline, SovereignDoubleFaultError
 
 __version__ = "0.1.0"
 
@@ -19,4 +19,5 @@ __all__ = [
     "EdgeResult",
     "OffGridBuffer",
     "SensorFrame",
+    "SovereignDoubleFaultError",
 ]

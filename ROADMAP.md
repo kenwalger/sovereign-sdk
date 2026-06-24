@@ -639,9 +639,18 @@ committed = pipeline.drain_buffer()
 * [x] `SensorFrame` — `@dataclass(frozen=True)`: post-construction field assignment raises
   `dataclasses.FrozenInstanceError`; `d: dict[str, Any]` reference is immutable (contents not
   deep-frozen); no change required in pipeline code because no stage rebinds a frame field.
-* [x] 77-case desktop validation test suite across eight classes (`TestSensorFrame`: 15;
-  `TestOffGridBuffer`: 10; `TestEdgePipelineProcess`: 18; `TestEdgePipelineBuffering`: 7;
-  `TestEdgePipelineDrainBuffer`: 7; `TestOffGridBufferAsync`: 8;
+* [x] `SovereignDoubleFaultError(RuntimeError)` — total-persistence failure sentinel with
+  ``receipt: dict[str, Any]`` attribute; raised from `process()` when ledger commit fails
+  and the subsequent buffer push also fails; exported from `sovereign_edge.__all__`.
+* [x] `OffGridBuffer.drain()` — OSError re-raised (not silently swallowed with `return []`)
+  after setting `_drain_read_failed = True` under `_count_lock`; callers receive an explicit
+  exception rather than an empty list indistinguishable from a genuine empty drain.
+* [x] `EdgePipeline.drain_buffer()` — `list(self._buffer.drain())` wrapped in
+  `try/except OSError`; raises descriptive `RuntimeError` chained from the `OSError` so
+  operators see the storage-tier failure before any replay is attempted.
+* [x] 79-case desktop validation test suite across eight classes (`TestSensorFrame`: 15;
+  `TestOffGridBuffer`: 10; `TestEdgePipelineProcess`: 18; `TestEdgePipelineBuffering`: 8;
+  `TestEdgePipelineDrainBuffer`: 8; `TestOffGridBufferAsync`: 8;
   `TestEdgePipelineSieveFault`: 4; `TestOffGridBufferWriteErrors`: 8) covering all
   fortification scenarios: non-blocking `push()` with immediate `size` reporting,
   chronological `drain()` sort by sequence, non-integer sequence value tolerance,
@@ -653,9 +662,11 @@ committed = pipeline.drain_buffer()
   protocol version gate, dead-letter eviction cap, non-OSError worker failure, strict field
   type validation, lock-free evacuation deadlock regression, drain_buffer requeue-loop
   survivability, concurrent close counter-drift, dual-failure exception chaining, drain
-  read-failure flag observability, frozen dataclass mutation guard, exhaustive
-  replay-crash re-queue, and deep MappingProxyType immutability on ``SensorFrame.d``.
-  **77 passed, 1 skipped, 366 workspace tests passed.**
+  read-failure OSError propagation, frozen dataclass mutation guard, exhaustive replay-crash
+  re-queue, deep MappingProxyType immutability on ``SensorFrame.d``,
+  ``SovereignDoubleFaultError`` double-fault receipt recovery, and drain_buffer OSError
+  halt-and-alert.
+  **79 passed, 1 skipped, 368 workspace tests passed.**
 
 ---
 
