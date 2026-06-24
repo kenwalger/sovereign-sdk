@@ -608,25 +608,41 @@ committed = pipeline.drain_buffer()
   the background daemon writer thread before the next test begins.
 * [x] `README.md` — `sovereign-edge` example extended with `sensor_secret` parameter and
   `try/finally` teardown calling `pipeline.close()` and `ledger.close()`.
-* [x] 70-case desktop validation test suite across eight classes (`TestSensorFrame`: 13;
+* [x] `EdgePipeline.drain_buffer()` — requeue loop hardened: each `push()` call in the
+  requeue pass is wrapped in `except RuntimeError:` so all items are iterated before
+  raising; `push_failure_count` is accumulated and surfaced in a single
+  `RuntimeError("could not re-queue N receipts...")` after the loop; no item is orphaned
+  mid-iteration regardless of buffer state.
+* [x] `OffGridBuffer.close()` — concurrent-teardown sentinel race eliminated: `is_alive()`
+  check moved inside `_drain_lock → _count_lock` and gated on `not self._closed`;
+  first caller sets `_closed = True` and places one sentinel; every subsequent caller
+  observes `_closed = True` and skips; `_pending` is incremented exactly once regardless
+  of concurrent teardown fan-out; `sentinel_placed: bool` flag controls the `join()` call
+  so `join()` is only called by the thread that placed the sentinel.
+* [x] `test_drain_buffer_survives_push_failure_on_requeue` (`TestEdgePipelineDrainBuffer`):
+  patches `append_receipt` (SovereignStorageError) and `_buffer.push` (RuntimeError +
+  counter); asserts `push_call_count == 2` and `pytest.raises(RuntimeError, match="could
+  not re-queue")`; authoritative guard that both items are attempted, not just the first.
+  `TestEdgePipelineDrainBuffer` grows from 5 to 6 cases.
+* [x] `test_concurrent_close_no_counter_drift` (`TestOffGridBufferAsync`): 8 threads call
+  `buf.close()` simultaneously after push/flush/drain; asserts all threads join within
+  5 s (timeout = deadlock) and `buf.size() == 0` (no counter drift from duplicate
+  sentinels). `TestOffGridBufferAsync` grows from 7 to 8 cases.
+* [x] 72-case desktop validation test suite across eight classes (`TestSensorFrame`: 13;
   `TestOffGridBuffer`: 10; `TestEdgePipelineProcess`: 18; `TestEdgePipelineBuffering`: 6;
-  `TestEdgePipelineDrainBuffer`: 5; `TestOffGridBufferAsync`: 7;
+  `TestEdgePipelineDrainBuffer`: 6; `TestOffGridBufferAsync`: 8;
   `TestEdgePipelineSieveFault`: 4; `TestOffGridBufferWriteErrors`: 7) covering all
   fortification scenarios: non-blocking `push()` with immediate `size` reporting,
-  chronological `drain()` sort by sequence, non-integer sequence value tolerance in the
-  sort key guard, `_committed` counter accuracy after drain, sieve fault fallback with
-  raw text and `sieve_fault=True` metadata, disk write error tracking via
-  `write_error_count`, `size` accuracy under disk failure, full `drain()` recovery of
-  write-error entries, `close()` raising `RuntimeError` when un-journaled entries remain
-  at shutdown, `EdgePipeline.close()` propagating `RuntimeError` when un-journaled write
-  errors survive the drain pass, 20-thread concurrent `push()`-vs-`close()` stress test
-  asserting zero orphan entries, HMAC-SHA256 inbound signature rejection, algorithm-gate
-  rejection of non-`hmac-sha256` `alg`, idempotent `OffGridBuffer.close()`, HMAC hex
-  case normalisation, tightened sieve-fault exception boundary, idempotent `close()`
-  triple-call coverage, protocol version gate rejecting `v != 1`, dead-letter eviction
-  cap at 100 entries, non-OSError worker failure detection with `worker_failed` flag, and
-  strict runtime type validation on all seven wire frame fields.
-  **70 passed, 1 skipped, 359 workspace tests passed.**
+  chronological `drain()` sort by sequence, non-integer sequence value tolerance,
+  `_committed` counter accuracy after drain, sieve fault fallback with raw text and
+  `sieve_fault=True` metadata, disk write error tracking, full `drain()` recovery, `close()`
+  raising on un-journaled entries, `EdgePipeline.close()` propagating RuntimeError, 20-thread
+  push-vs-close stress test, HMAC-SHA256 inbound signature rejection, algorithm-gate, HMAC
+  hex normalisation, tightened sieve-fault exception boundary, idempotent close triple-call,
+  protocol version gate, dead-letter eviction cap, non-OSError worker failure, strict field
+  type validation, lock-free evacuation deadlock regression, drain_buffer requeue-loop
+  survivability, and concurrent close counter-drift.
+  **72 passed, 1 skipped, 361 workspace tests passed.**
 
 ---
 

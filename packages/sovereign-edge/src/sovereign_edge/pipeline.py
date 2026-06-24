@@ -204,10 +204,21 @@ class EdgePipeline:
         strings.  Any entry that fails again due to a persistent ledger error is
         re-queued to the buffer so that no receipt is silently discarded.
 
+        If :meth:`~sovereign_edge.buffer.OffGridBuffer.push` raises for one or more
+        entries during the re-queue pass — because the buffer is closed or its
+        background writer has terminated — the iteration continues to completion so
+        that every remaining item is attempted before the exception is surfaced.  No
+        item is silently abandoned mid-loop: the failure count is reported in the
+        :exc:`RuntimeError` message so the caller can take explicit recovery action.
+
         :return: ``payload_hash`` strings for every receipt successfully committed to
             the ledger on this drain pass.  Entries that could not be committed are
             re-queued and excluded from the returned list.
         :rtype: list[str]
+        :raises RuntimeError: If one or more entries cannot be re-queued after a
+            persistent ledger failure, indicating the buffer is unavailable for
+            recovery.  The exception is raised only after all requeue items have been
+            attempted so no item is orphaned mid-iteration.
         """
         committed: list[str] = []
         requeue: list[tuple[dict[str, Any], str]] = []
@@ -219,8 +230,20 @@ class EdgePipeline:
             except (SovereignStorageError, sqlite3.Error):
                 requeue.append((receipt_dict, sieved_content))
 
+        push_failure_count: int = 0
         for receipt_dict, sieved_content in requeue:
-            self._buffer.push(receipt_dict, sieved_content)
+            try:
+                self._buffer.push(receipt_dict, sieved_content)
+            except RuntimeError:
+                push_failure_count += 1
+
+        if push_failure_count:
+            raise RuntimeError(
+                f"drain_buffer() could not re-queue {push_failure_count} "
+                f"receipt{'s' if push_failure_count != 1 else ''} after ledger failure: "
+                "buffer is closed or its background writer has terminated; "
+                "call drain() on the buffer to recover pending entries"
+            )
 
         return committed
 

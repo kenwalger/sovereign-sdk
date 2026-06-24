@@ -68,10 +68,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     workspace member at version `0.1.0` with workspace-source dependencies on
     `sovereign-core`, `sovereign-ledger`, and `sovereign-sieve`.
 
-  - **`packages/sovereign-edge/tests/test_edge.py`** — 70 test cases across eight
+  - **`packages/sovereign-edge/tests/test_edge.py`** — 72 test cases across eight
     classes (`TestSensorFrame`: 13 cases; `TestOffGridBuffer`: 10 cases;
     `TestEdgePipelineProcess`: 18 cases; `TestEdgePipelineBuffering`: 6 cases;
-    `TestEdgePipelineDrainBuffer`: 5 cases; `TestOffGridBufferAsync`: 7 cases;
+    `TestEdgePipelineDrainBuffer`: 6 cases; `TestOffGridBufferAsync`: 8 cases;
     `TestEdgePipelineSieveFault`: 4 cases; `TestOffGridBufferWriteErrors`: 7 cases)
     verifying: wire frame deserialization, sort-keyed `text_content()` determinism,
     in-flight `size` accounting, `flush()` disk-commit guarantee, ascending-sequence sort
@@ -103,9 +103,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     evacuation path to eliminate circular-wait deadlock with concurrent ``drain()``),
     strict runtime type validation in `SensorFrame.from_bytes()` blocking wrong-type
     fields at the deserialization boundary, and three new tests covering non-OSError
-    worker failure, field type anomaly rejection, and the concurrent drain-vs-crash
-    deadlock regression.
-    **70 passed, 0 failed.**
+    worker failure, field type anomaly rejection, drain-vs-crash deadlock regression,
+    ``drain_buffer()`` requeue-loop push-failure survivability, and concurrent ``close()``
+    counter-drift elimination.
+    **72 passed, 0 failed.**
 
 ### Changed
 
@@ -515,7 +516,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``drain()`` in a daemon thread and asserts it joins within five seconds.  A regression that
   re-introduces ``_drain_lock`` in the evacuation path would cause the thread to hang
   indefinitely, making this test the authoritative guard against the cyclic-dependency deadlock.
-  ``TestOffGridBufferWriteErrors`` grows from 6 to 7 cases.  **Suite: 70 edge tests, 359 workspace
+  ``TestOffGridBufferWriteErrors`` grows from 6 to 7 cases.
+
+- **`EdgePipeline.drain_buffer()` — requeue loop hardened against cascading push failures**
+  (`pipeline.py`): The re-queue iteration loop previously called ``self._buffer.push()`` bare;
+  a single :exc:`RuntimeError` from a closed or worker-failed buffer caused the exception to
+  propagate immediately, abandoning every remaining item in the ``requeue`` local list without
+  attempting them.  Each ``push()`` call is now wrapped in ``except RuntimeError:``; all items
+  are iterated to completion and a ``push_failure_count`` is accumulated.  After the loop, if any
+  pushes failed, a single :exc:`RuntimeError` is raised naming the count and advising recovery via
+  ``drain()``.  No item is orphaned mid-iteration: every entry is either successfully re-queued or
+  explicitly counted in the failure total.
+
+- **`OffGridBuffer.close()` — concurrent-teardown race eliminated via atomic sentinel gate**
+  (`buffer.py`): The previous implementation checked ``self._worker_thread.is_alive()`` outside
+  ``_drain_lock``, then acquired ``_drain_lock`` to place the sentinel.  Two concurrent ``close()``
+  callers could both observe ``is_alive() == True`` before either acquired the lock, then both
+  increment ``_pending`` and place a ``None`` sentinel.  The worker processes the first sentinel
+  and exits; the second sentinel is never consumed, leaving ``_pending`` permanently inflated by
+  one.  The fix moves the ``is_alive()`` check inside ``_drain_lock → _count_lock`` and gates it
+  additionally on ``not self._closed``: the first thread to acquire both locks sets ``_closed =
+  True`` and places exactly one sentinel; every subsequent thread observes ``_closed = True`` and
+  skips the placement, ensuring ``_pending`` is incremented exactly once regardless of concurrent
+  teardown fan-out.
+
+- **`TestEdgePipelineDrainBuffer` — requeue push-failure survivability test** (`test_edge.py`):
+  New test ``test_drain_buffer_survives_push_failure_on_requeue`` patches ``append_receipt`` to
+  raise :exc:`SovereignStorageError` (forcing both items to requeue) and patches ``_buffer.push``
+  with a counting mock that always raises :exc:`RuntimeError`.  Asserts that ``push()`` is called
+  exactly twice (all items attempted) and that :exc:`RuntimeError` matching ``"could not re-queue"``
+  is raised.  With the broken code the second item was never attempted; the assertion
+  ``push_call_count[0] == 2`` is the authoritative regression guard.
+  ``TestEdgePipelineDrainBuffer`` grows from 5 to 6 cases.
+
+- **`TestOffGridBufferAsync` — concurrent close counter-drift test** (`test_edge.py`): New test
+  ``test_concurrent_close_no_counter_drift`` launches 8 threads that each call ``buf.close()``
+  simultaneously after a push/flush/drain cycle.  Asserts all 8 threads join within 5 seconds
+  (timeout = deadlock) and that ``buf.size() == 0`` after all threads complete.  A regression that
+  re-exposes the non-atomic sentinel gate would produce ``size() == 1`` (or cause a hang) because
+  multiple sentinels inflate ``_pending`` without matching decrements.
+  ``TestOffGridBufferAsync`` grows from 7 to 8 cases.  **Suite: 72 edge tests, 361 workspace
   tests passed, 1 skipped.**
 
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace

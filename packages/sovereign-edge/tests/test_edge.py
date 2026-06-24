@@ -799,6 +799,52 @@ class TestEdgePipelineDrainBuffer:
             pipeline_b.close()
             recovery_ledger.close()
 
+    def test_drain_buffer_survives_push_failure_on_requeue(
+        self, tmp_path: Path
+    ) -> None:
+        """drain_buffer() must iterate over the entire requeue list before raising when
+        push() fails; aborting at the first failure would silently orphan every remaining
+        item in the local requeue variable, making them unrecoverable."""
+        ledger = SovereignLedger(":memory:")
+        pipeline = EdgePipeline(
+            ledger=ledger,
+            signing_key=str(tmp_path / ".keys" / "edge_identity.pem"),
+            buffer_path=str(tmp_path / ".edge_buffer.jsonl"),
+            sensor_secret=_SENSOR_SECRET,
+        )
+        try:
+            # Phase 1: force two receipts into the buffer by making append_receipt fail.
+            with patch.object(
+                ledger, "append_receipt",
+                side_effect=SovereignStorageError("ledger temporarily unreachable"),
+            ):
+                pipeline.process(_seal_frame(tmp_path, {"seq": 1}))
+                pipeline.process(_seal_frame(tmp_path, {"seq": 2}))
+            pipeline._buffer.flush()
+
+            push_call_count: list[int] = [0]
+
+            def _failing_push(receipt: dict[str, Any], content: str) -> None:
+                push_call_count[0] += 1
+                raise RuntimeError("simulated buffer unavailable during requeue")
+
+            # Phase 2: drain_buffer with the ledger still down and push() always failing.
+            with patch.object(
+                ledger, "append_receipt",
+                side_effect=SovereignStorageError("ledger still unreachable"),
+            ):
+                with patch.object(pipeline._buffer, "push", side_effect=_failing_push):
+                    with pytest.raises(RuntimeError, match="could not re-queue"):
+                        pipeline.drain_buffer()
+
+            assert push_call_count[0] == 2, (
+                f"Expected push() called 2 times; got {push_call_count[0]} — "
+                "drain_buffer() aborted at first push failure and orphaned the rest"
+            )
+        finally:
+            pipeline._buffer.close()
+            ledger.close()
+
 
 # ---------------------------------------------------------------------------
 # TestOffGridBufferAsync
@@ -970,6 +1016,33 @@ class TestOffGridBufferAsync:
         assert on_disk_count + buf.write_error_count == len(accepted), (
             f"on_disk={on_disk_count}, write_errors={buf.write_error_count}, "
             f"accepted={len(accepted)}: entry count mismatch"
+        )
+
+    def test_concurrent_close_no_counter_drift(self, tmp_path: Path) -> None:
+        """Calling close() from multiple threads simultaneously must not inflate _pending:
+        the is_alive() check, _closed flag update, and sentinel placement must form a
+        single atomic operation so exactly one sentinel is ever placed regardless of
+        how many threads race into close() concurrently.  A drifted counter surfaces
+        as size() > 0 after all close threads complete."""
+        buf = OffGridBuffer(str(tmp_path / "buf.jsonl"))
+        buf.push(self._make_receipt("A", sequence=1), "content A")
+        buf.flush()
+        buf.drain()  # clear _committed so size reflects only _pending after close
+
+        close_threads: list[threading.Thread] = [
+            threading.Thread(target=buf.close, daemon=True) for _ in range(8)
+        ]
+        for t in close_threads:
+            t.start()
+        for t in close_threads:
+            t.join(timeout=5.0)
+
+        assert all(not t.is_alive() for t in close_threads), (
+            "One or more close() threads deadlocked under concurrent teardown"
+        )
+        assert buf.size == 0, (
+            f"size() drifted to {buf.size} after concurrent close() — "
+            "multiple sentinels placed, _pending incremented more than once"
         )
 
 

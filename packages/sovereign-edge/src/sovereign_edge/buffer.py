@@ -378,20 +378,22 @@ class OffGridBuffer:
     def close(self) -> None:
         """Flush all pending writes and terminate the background worker thread.
 
-        Acquires ``_drain_lock`` before modifying shared state or placing the sentinel,
-        then sets ``_closed = True`` and increments ``_pending`` atomically under the
-        count lock, and finally dispatches the ``None`` sentinel — all while holding
-        ``_drain_lock``.  Performing the sentinel placement inside ``_drain_lock``
-        eliminates the shutdown race: a concurrent :meth:`push` that has already acquired
-        ``_drain_lock`` and passed the ``_closed`` gate will finish its
-        :meth:`queue.Queue.put` before the sentinel is placed (both operations are
-        serialized by the lock); a :meth:`push` that has not yet acquired ``_drain_lock``
-        will observe ``_closed = True`` and raise without enqueuing.  This guarantees
-        that the sentinel is always the last item the worker ever processes.
+        The ``is_alive()`` check, ``_closed = True`` update, ``_pending`` increment, and
+        ``None`` sentinel dispatch form a single atomic operation under
+        ``_drain_lock → _count_lock``.  This eliminates the concurrent-teardown race:
+        if two callers invoke :meth:`close` simultaneously, the first to acquire both
+        locks observes ``_closed = False`` and places the sentinel; the second observes
+        ``_closed = True`` inside the same lock scope and skips the placement entirely.
+        Without this atomicity, both callers could observe ``is_alive() == True`` before
+        either had set ``_closed``, resulting in two ``_pending`` increments, two
+        sentinels in the queue, and a ``_pending`` counter that can never reach zero
+        because the second sentinel is never consumed.
 
         ``_worker_thread.join()`` is called **outside** the lock window so that the
         caller does not hold ``_drain_lock`` while waiting for the worker to drain the
         queue, which would prevent any concurrent :meth:`drain` call from completing.
+        Callers that did not place the sentinel (``sentinel_placed = False``) skip the
+        join; the caller that placed the sentinel guarantees the worker has exited.
 
         After the worker terminates, ``_write_errors`` is inspected under the count lock;
         if any receipt entries that failed to reach disk are still unresolved, a
@@ -401,12 +403,9 @@ class OffGridBuffer:
         possibility of prior disk write failures; :meth:`drain` surfaces and clears
         ``_write_errors`` so the subsequent :meth:`close` completes without error.
 
-        This method is idempotent: if the worker thread is no longer alive (because a
-        previous :meth:`close` call already joined it), the sentinel placement and join
-        are skipped entirely, and only the ``_write_errors`` invariant check is repeated.
-        This makes it safe to call :meth:`close` from multiple teardown paths (e.g., a
-        ``try/finally`` in the caller and a ``yield``-based pytest fixture teardown) without
-        deadlocking or corrupting counter state.
+        This method is idempotent across both sequential and concurrent teardown paths:
+        sequential second calls observe ``_closed = True`` and skip the sentinel; concurrent
+        calls are serialized by ``_drain_lock`` so only the first acquirer ever places one.
 
         :return: None
         :rtype: None
@@ -414,12 +413,16 @@ class OffGridBuffer:
             ``_write_errors`` at shutdown time, indicating that they failed to reach
             disk and have not been recovered via :meth:`drain`.
         """
-        if self._worker_thread.is_alive():
-            with self._drain_lock:
-                with self._count_lock:
+        sentinel_placed: bool = False
+        with self._drain_lock:
+            with self._count_lock:
+                if not self._closed and self._worker_thread.is_alive():
                     self._closed = True
                     self._pending += 1
+                    sentinel_placed = True
+            if sentinel_placed:
                 self._write_queue.put(None)
+        if sentinel_placed:
             self._worker_thread.join()
         with self._count_lock:
             error_count: int = len(self._write_errors)
