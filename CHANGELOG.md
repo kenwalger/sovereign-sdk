@@ -104,9 +104,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     strict runtime type validation in `SensorFrame.from_bytes()` blocking wrong-type
     fields at the deserialization boundary, and three new tests covering non-OSError
     worker failure, field type anomaly rejection, drain-vs-crash deadlock regression,
-    ``drain_buffer()`` requeue-loop push-failure survivability, and concurrent ``close()``
-    counter-drift elimination.
-    **72 passed, 0 failed.**
+    ``drain_buffer()`` requeue-loop push-failure survivability, concurrent ``close()``
+    counter-drift elimination, dual-failure exception chaining in pipeline teardown,
+    ``drain_read_failed`` flag observability for filesystem-blocked drain passes, and
+    ``SensorFrame`` frozen-dataclass mutation guard.
+    **75 passed, 0 failed.**
 
 ### Changed
 
@@ -555,8 +557,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (timeout = deadlock) and that ``buf.size() == 0`` after all threads complete.  A regression that
   re-exposes the non-atomic sentinel gate would produce ``size() == 1`` (or cause a hang) because
   multiple sentinels inflate ``_pending`` without matching decrements.
-  ``TestOffGridBufferAsync`` grows from 7 to 8 cases.  **Suite: 72 edge tests, 361 workspace
-  tests passed, 1 skipped.**
+  ``TestOffGridBufferAsync`` grows from 7 to 8 cases.
+
+- **`EdgePipeline.close()` — dual-failure exception chaining** (`pipeline.py`): Replaced the
+  ``try/finally`` pattern with a captured-exception model.  If ``drain_buffer()`` raises, the
+  exception is stored in ``drain_exc``; ``self._buffer.close()`` is always attempted regardless.
+  If ``buffer.close()`` subsequently also raises, the buffer :exc:`RuntimeError` is chained via
+  ``raise buf_exc from drain_exc`` so that the drain root cause is preserved in the traceback and
+  not silently discarded by the ``finally`` swallowing rule.  If only one of the two raises,
+  that exception propagates normally.  A new test
+  (``test_close_chains_buffer_exc_from_drain_exc``) patches ``drain_buffer`` to raise and wraps
+  the real ``_buffer.close()`` with a closure that calls the original then raises a second
+  ``RuntimeError``; the test asserts ``exc_info.value.__cause__ is drain_error``, verifying
+  the chaining invariant.  ``TestEdgePipelineBuffering`` grows from 6 to 7 cases.
+
+- **`OffGridBuffer.drain()` — `drain_read_failed` observable flag** (`buffer.py`): The silent
+  ``except OSError: return []`` block inside ``drain()`` that handles a ``Path.read_text``
+  failure now also sets ``self._drain_read_failed = True`` under ``_count_lock`` before returning.
+  Previously, a filesystem-level read failure (e.g. a permission change or device removal after
+  the file-existence check) was indistinguishable from a genuine empty drain at the caller level:
+  both returned ``[]``.  The new ``drain_read_failed: bool`` property allows the pipeline
+  orchestrator to poll the flag and take explicit recovery action (alert, retry, or surface the
+  error) rather than silently advancing the drain lifecycle on a stalled filesystem.  On-disk
+  entries are preserved; the atomic replace is never reached, so no data is discarded.  A new test
+  (``test_drain_read_failed_flag_set_on_oserror``) patches ``pathlib.Path.read_text`` to raise
+  ``OSError("Permission denied")`` after a push/flush, asserts ``drain()`` returns ``[]`` and
+  ``buf.drain_read_failed is True``, and then verifies that a subsequent unpatch drain recovers
+  the on-disk entry cleanly.  ``TestOffGridBufferWriteErrors`` grows from 7 to 8 cases.
+
+- **`SensorFrame` — frozen dataclass** (`models.py`): ``@dataclass`` upgraded to
+  ``@dataclass(frozen=True)``.  Post-construction field assignment on any ``SensorFrame`` instance
+  now raises ``dataclasses.FrozenInstanceError``.  The ``d: dict[str, Any]`` field retains a
+  mutable reference (inner dict contents are not deep-frozen), but the reference itself is immutable
+  so no pipeline stage can accidentally rebind ``frame.d`` to a different object after
+  deserialization.  A new test (``test_sensor_frame_is_immutable``) attempts ``frame.n =
+  "mutated-node-id"`` and asserts ``dataclasses.FrozenInstanceError``, guarding the frozen
+  invariant against future reversion to a mutable dataclass.  ``TestSensorFrame`` grows from 13
+  to 14 cases.  **Suite: 75 edge tests, 364 workspace tests passed, 1 skipped.**
 
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing

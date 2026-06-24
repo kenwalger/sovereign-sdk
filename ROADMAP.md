@@ -628,10 +628,21 @@ committed = pipeline.drain_buffer()
   `buf.close()` simultaneously after push/flush/drain; asserts all threads join within
   5 s (timeout = deadlock) and `buf.size() == 0` (no counter drift from duplicate
   sentinels). `TestOffGridBufferAsync` grows from 7 to 8 cases.
-* [x] 72-case desktop validation test suite across eight classes (`TestSensorFrame`: 13;
-  `TestOffGridBuffer`: 10; `TestEdgePipelineProcess`: 18; `TestEdgePipelineBuffering`: 6;
+* [x] `EdgePipeline.close()` — dual-failure exception chaining: captured-exception model
+  replaces `try/finally`; `drain_buffer()` exception stored in `drain_exc`; if `buffer.close()`
+  also raises, the buffer `RuntimeError` is chained via `raise buf_exc from drain_exc` so the
+  drain root cause is visible in the traceback; only one raises → normal propagation.
+* [x] `OffGridBuffer.drain()` — `drain_read_failed: bool` observable flag: `OSError` on
+  `Path.read_text()` sets the flag under `_count_lock` before returning `[]`; caller can
+  distinguish filesystem-blocked drain from genuine empty drain; `drain_read_failed` property
+  with Sphinx docstring; on-disk entries preserved.
+* [x] `SensorFrame` — `@dataclass(frozen=True)`: post-construction field assignment raises
+  `dataclasses.FrozenInstanceError`; `d: dict[str, Any]` reference is immutable (contents not
+  deep-frozen); no change required in pipeline code because no stage rebinds a frame field.
+* [x] 75-case desktop validation test suite across eight classes (`TestSensorFrame`: 14;
+  `TestOffGridBuffer`: 10; `TestEdgePipelineProcess`: 18; `TestEdgePipelineBuffering`: 7;
   `TestEdgePipelineDrainBuffer`: 6; `TestOffGridBufferAsync`: 8;
-  `TestEdgePipelineSieveFault`: 4; `TestOffGridBufferWriteErrors`: 7) covering all
+  `TestEdgePipelineSieveFault`: 4; `TestOffGridBufferWriteErrors`: 8) covering all
   fortification scenarios: non-blocking `push()` with immediate `size` reporting,
   chronological `drain()` sort by sequence, non-integer sequence value tolerance,
   `_committed` counter accuracy after drain, sieve fault fallback with raw text and
@@ -641,8 +652,9 @@ committed = pipeline.drain_buffer()
   hex normalisation, tightened sieve-fault exception boundary, idempotent close triple-call,
   protocol version gate, dead-letter eviction cap, non-OSError worker failure, strict field
   type validation, lock-free evacuation deadlock regression, drain_buffer requeue-loop
-  survivability, and concurrent close counter-drift.
-  **72 passed, 1 skipped, 361 workspace tests passed.**
+  survivability, concurrent close counter-drift, dual-failure exception chaining, drain
+  read-failure flag observability, and frozen dataclass mutation guard.
+  **75 passed, 1 skipped, 364 workspace tests passed.**
 
 ---
 

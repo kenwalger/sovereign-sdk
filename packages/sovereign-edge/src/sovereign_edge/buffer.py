@@ -88,6 +88,7 @@ class OffGridBuffer:
         self._dead_letter: list[str] = []
         self._closed: bool = False
         self._worker_failed: bool = False
+        self._drain_read_failed: bool = False
         self._count_lock: threading.Lock = threading.Lock()
         self._drain_lock: threading.Lock = threading.Lock()
         self._worker_thread: threading.Thread = threading.Thread(
@@ -323,6 +324,8 @@ class OffGridBuffer:
             try:
                 raw_lines: list[str] = self._path.read_text(encoding="utf-8").splitlines()
             except OSError:
+                with self._count_lock:
+                    self._drain_read_failed = True
                 return []
 
             entries: list[tuple[dict[str, Any], str]] = []
@@ -498,3 +501,23 @@ class OffGridBuffer:
         """
         with self._count_lock:
             return self._worker_failed
+
+    @property
+    def drain_read_failed(self) -> bool:
+        """True if :meth:`drain` encountered an :exc:`OSError` while reading the JSONL file.
+
+        Set to ``True`` under the count lock at the point where
+        :meth:`pathlib.Path.read_text` raises :exc:`OSError` (e.g., a permissions
+        change, device removal, or filesystem error that occurred after the buffer file
+        was confirmed to exist).  When set, :meth:`drain` returns an empty list without
+        clearing the on-disk file or ``_write_errors``, so no entry is discarded —
+        but the pipeline orchestrator cannot observe this failure through the return
+        value alone.  Polling this property allows callers to distinguish a genuine
+        empty drain from a read-blocked drain and take explicit recovery action
+        (alert, retry, or surface the filesystem error).
+
+        :return: True if any :meth:`drain` call failed to read the JSONL file.
+        :rtype: bool
+        """
+        with self._count_lock:
+            return self._drain_read_failed

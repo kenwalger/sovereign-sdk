@@ -250,13 +250,18 @@ class EdgePipeline:
     def close(self) -> None:
         """Flush outstanding buffered receipts and terminate the background buffer worker.
 
-        Executes a best-effort :meth:`drain_buffer` pass inside a ``try`` block before
-        shutdown so that any receipts queued while the ledger was unreachable are committed
-        to the ledger if it has since recovered.  :meth:`~sovereign_edge.buffer.OffGridBuffer.close`
-        is invoked inside the corresponding ``finally`` block, guaranteeing that the background
-        daemon writer thread is joined and resources are reclaimed even if the drain pass
-        raises an unhandled exception — for example, an unexpected error propagating from the
-        ledger layer that is not caught by :meth:`drain_buffer`'s internal error handling.
+        Executes a best-effort :meth:`drain_buffer` pass before invoking
+        :meth:`~sovereign_edge.buffer.OffGridBuffer.close` so that any receipts queued
+        while the ledger was unreachable are committed if the ledger has since recovered.
+
+        Exception handling preserves root-cause visibility across the dual-failure path:
+        if :meth:`drain_buffer` raises, the exception is captured and
+        :meth:`~sovereign_edge.buffer.OffGridBuffer.close` is still called to guarantee
+        background thread teardown.  If :meth:`~sovereign_edge.buffer.OffGridBuffer.close`
+        also raises (e.g., un-journaled write errors remain after the drain attempt), the
+        buffer exception is chained from the drain exception via ``raise buf_exc from
+        drain_exc`` so the original root cause is preserved in the traceback.  If only
+        one of the two raises, that exception propagates normally.
 
         The pipeline does not own the ledger lifecycle; the caller remains responsible
         for invoking :meth:`~sovereign_ledger.SovereignLedger.close` on the ledger
@@ -264,15 +269,25 @@ class EdgePipeline:
 
         :return: None
         :rtype: None
-        :raises RuntimeError: If :meth:`~sovereign_edge.buffer.OffGridBuffer.close`
-            detects one or more receipt entries still preserved in ``_write_errors``
-            after the drain attempt, indicating that they failed to reach either the
-            JSONL file or the ledger and remain un-journaled at shutdown.
+        :raises RuntimeError: If :meth:`drain_buffer` could not re-queue one or more
+            entries, or if :meth:`~sovereign_edge.buffer.OffGridBuffer.close` detects
+            un-journaled write errors after the drain attempt.  When both raise, the
+            buffer :exc:`RuntimeError` is chained from the drain :exc:`RuntimeError`
+            to preserve the root-cause traceback.
         """
+        drain_exc: Exception | None = None
         try:
             self.drain_buffer()
-        finally:
+        except Exception as exc:
+            drain_exc = exc
+        try:
             self._buffer.close()
+        except RuntimeError as buf_exc:
+            if drain_exc is not None:
+                raise buf_exc from drain_exc
+            raise
+        if drain_exc is not None:
+            raise drain_exc
 
     @property
     def buffer_depth(self) -> int:

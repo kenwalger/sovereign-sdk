@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 
-@dataclass
+@dataclass(frozen=True)
 class SensorFrame:
     """Deserialized representation of a sovereign-sensor wire envelope.
 

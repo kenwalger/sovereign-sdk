@@ -161,6 +161,15 @@ class TestSensorFrame:
         with pytest.raises(TypeError):
             SensorFrame.from_bytes(payload)
 
+    def test_sensor_frame_is_immutable(self, tmp_path: Path) -> None:
+        """@dataclass(frozen=True) must prevent post-construction field assignment;
+        SensorFrame instances are wire protocol values and must not be mutated
+        after deserialization."""
+        import dataclasses
+        frame = SensorFrame.from_bytes(_seal_frame(tmp_path))
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            frame.n = "mutated-node-id"  # type: ignore[misc]
+
 
 # ---------------------------------------------------------------------------
 # TestOffGridBuffer
@@ -636,6 +645,37 @@ class TestEdgePipelineBuffering:
         with patch("builtins.open", side_effect=OSError("ENOSPC: no space left on device")):
             with pytest.raises(RuntimeError, match="un-journaled"):
                 pipeline.close()
+
+    def test_close_chains_buffer_exc_from_drain_exc(self, tmp_path: Path) -> None:
+        """When drain_buffer() raises and buffer.close() also raises, the buffer
+        RuntimeError must be chained from the drain RuntimeError via __cause__ so
+        that the root cause is not suppressed in the teardown traceback."""
+        ledger = SovereignLedger(":memory:")
+        pipeline = EdgePipeline(
+            ledger=ledger,
+            signing_key=str(tmp_path / ".keys" / "edge_identity.pem"),
+            buffer_path=str(tmp_path / ".edge_buffer.jsonl"),
+            sensor_secret=_SENSOR_SECRET,
+        )
+        drain_error: RuntimeError = RuntimeError("drain failed — ledger unreachable")
+        buffer_error: RuntimeError = RuntimeError("buffer close failed — un-journaled receipts remain")
+
+        original_buffer_close = pipeline._buffer.close
+
+        def _raising_close() -> None:
+            original_buffer_close()
+            raise buffer_error
+
+        with patch.object(pipeline, "drain_buffer", side_effect=drain_error):
+            with patch.object(pipeline._buffer, "close", side_effect=_raising_close):
+                with pytest.raises(RuntimeError, match="buffer close failed") as exc_info:
+                    pipeline.close()
+
+        assert exc_info.value.__cause__ is drain_error, (
+            "buffer RuntimeError must be chained from drain RuntimeError via __cause__; "
+            "root-cause exception was suppressed"
+        )
+        ledger.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1227,4 +1267,20 @@ class TestOffGridBufferWriteErrors:
             "while drain() holds it"
         )
         assert buf.worker_failed is True
+        buf.close()
+
+    def test_drain_read_failed_flag_set_on_oserror(self, tmp_path: Path) -> None:
+        """drain_read_failed must become True and drain() must return [] when
+        Path.read_text raises OSError after the buffer file is confirmed to exist;
+        the pipeline orchestrator can distinguish a genuine empty drain from a
+        filesystem-blocked drain by inspecting this observable flag."""
+        import pathlib
+        buf = OffGridBuffer(str(tmp_path / "buf.jsonl"))
+        buf.push(self._make_receipt("A"), "content A")
+        buf.flush()
+        with patch.object(pathlib.Path, "read_text", side_effect=OSError("Permission denied")):
+            result = buf.drain()
+        assert result == []
+        assert buf.drain_read_failed is True
+        buf.drain()  # recover on-disk entry so close() does not raise
         buf.close()
