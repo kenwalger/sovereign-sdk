@@ -68,11 +68,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     workspace member at version `0.1.0` with workspace-source dependencies on
     `sovereign-core`, `sovereign-ledger`, and `sovereign-sieve`.
 
-  - **`packages/sovereign-edge/tests/test_edge.py`** — 69 test cases across eight
+  - **`packages/sovereign-edge/tests/test_edge.py`** — 70 test cases across eight
     classes (`TestSensorFrame`: 13 cases; `TestOffGridBuffer`: 10 cases;
     `TestEdgePipelineProcess`: 18 cases; `TestEdgePipelineBuffering`: 6 cases;
     `TestEdgePipelineDrainBuffer`: 5 cases; `TestOffGridBufferAsync`: 7 cases;
-    `TestEdgePipelineSieveFault`: 4 cases; `TestOffGridBufferWriteErrors`: 6 cases)
+    `TestEdgePipelineSieveFault`: 4 cases; `TestOffGridBufferWriteErrors`: 7 cases)
     verifying: wire frame deserialization, sort-keyed `text_content()` determinism,
     in-flight `size` accounting, `flush()` disk-commit guarantee, ascending-sequence sort
     in `drain()`, FIFO stable-sort preservation for equal sequence keys, non-integer
@@ -99,11 +99,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `SensorFrame.from_bytes()` protocol version gate rejecting ``v != 1``,
     `OffGridBuffer._dead_letter` capped at 100 entries with oldest-first eviction,
     `OffGridBuffer` background writer thread failure detection via ``worker_failed``
-    property with orphan-drain loop under ``_drain_lock``, strict runtime type
-    validation in `SensorFrame.from_bytes()` blocking wrong-type fields at the
-    deserialization boundary, and two new tests covering non-OSError worker failure
-    and field type anomaly rejection.
-    **69 passed, 0 failed.**
+    property with lock-free orphan evacuation loop (``_drain_lock`` removed from
+    evacuation path to eliminate circular-wait deadlock with concurrent ``drain()``),
+    strict runtime type validation in `SensorFrame.from_bytes()` blocking wrong-type
+    fields at the deserialization boundary, and three new tests covering non-OSError
+    worker failure, field type anomaly rejection, and the concurrent drain-vs-crash
+    deadlock regression.
+    **70 passed, 0 failed.**
 
 ### Changed
 
@@ -493,7 +495,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in the background writer.  The test asserts that ``flush()`` returns without hanging, that
   ``worker_failed is True``, that a subsequent ``push()`` raises :exc:`RuntimeError` matching
   ``"background writer"``, and that ``drain()`` followed by ``close()`` complete normally.
-  ``TestOffGridBufferWriteErrors`` grows from 5 to 6 cases.  **Suite: 69 edge tests, 358 workspace
+  ``TestOffGridBufferWriteErrors`` grows from 5 to 6 cases.
+
+- **`OffGridBuffer._disk_writer` — evacuation loop deadlock eliminated** (`buffer.py`): The
+  evacuation path triggered by a non-:exc:`OSError` worker failure previously wrapped its
+  ``get_nowait()`` loop in ``with self._drain_lock:``.  When :meth:`drain` holds ``_drain_lock``
+  and is blocked in :meth:`queue.Queue.join` waiting for ``task_done()`` signals, the evacuation
+  loop could never acquire the lock — a circular wait.  ``_drain_lock`` is removed from the
+  evacuation path entirely; orphan items are now consumed and ``task_done()``-signalled under
+  ``_count_lock`` per item only, which :meth:`drain` never holds during :meth:`queue.Queue.join`.
+  Additionally, ``self._worker_failed = True`` is moved to the **first** statement inside the
+  ``finally`` block's ``_count_lock`` section so that concurrent :meth:`push` callers observe
+  the flag and raise before the counter updates complete, preventing any new enqueue into a
+  terminating queue.
+
+- **`TestOffGridBufferWriteErrors` — concurrent drain-vs-crash deadlock regression test**
+  (`test_edge.py`): New test ``test_drain_concurrent_with_worker_crash_no_deadlock`` pushes two
+  items under a ``builtins.open`` mock that fails on every append-mode write, then starts
+  ``drain()`` in a daemon thread and asserts it joins within five seconds.  A regression that
+  re-introduces ``_drain_lock`` in the evacuation path would cause the thread to hang
+  indefinitely, making this test the authoritative guard against the cyclic-dependency deadlock.
+  ``TestOffGridBufferWriteErrors`` grows from 6 to 7 cases.  **Suite: 70 edge tests, 359 workspace
   tests passed, 1 skipped.**
 
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace

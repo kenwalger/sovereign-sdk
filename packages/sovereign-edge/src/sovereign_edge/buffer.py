@@ -108,12 +108,17 @@ class OffGridBuffer:
         ``_dead_letter`` under the count lock so that the corrupt payload is not silently
         discarded and remains available for out-of-band inspection.
 
-        If an unexpected non-:exc:`OSError` exception is raised during a write, the
-        thread sets ``_worker_failed`` under the count lock and immediately drains all
-        remaining queue items under ``_drain_lock`` — preserving each in ``_write_errors``
-        or ``_dead_letter`` — before returning.  This prevents :meth:`flush` from blocking
-        indefinitely and ensures no queued receipt is silently lost when the thread
-        terminates abnormally.
+        If an unexpected non-:exc:`OSError` exception is raised during a write, the thread
+        sets ``_worker_failed`` under the count lock **before** any other state update in
+        the ``finally`` block, then evacuates all remaining queue items via a
+        non-blocking :meth:`queue.Queue.get_nowait` loop — calling ``task_done()`` for each
+        — without acquiring ``_drain_lock``.  Acquiring ``_drain_lock`` in the evacuation
+        path would deadlock when :meth:`drain` holds it and is blocked in
+        :meth:`queue.Queue.join` waiting for those same ``task_done()`` calls.  Because
+        :meth:`push` checks ``_worker_failed`` under ``_count_lock`` before calling
+        :meth:`queue.Queue.put`, setting the flag first ensures that any concurrent
+        :meth:`push` either sees the flag and raises without enqueuing, or has already
+        completed its ``put`` call and the item will be collected by the evacuation loop.
 
         :return: None
         :rtype: None
@@ -149,6 +154,8 @@ class OffGridBuffer:
                         dead_letter_entry = entry
             finally:
                 with self._count_lock:
+                    if worker_failed:
+                        self._worker_failed = True
                     self._pending -= 1
                     if written:
                         self._committed += 1
@@ -158,37 +165,34 @@ class OffGridBuffer:
                         if len(self._dead_letter) >= _DEAD_LETTER_MAX:
                             del self._dead_letter[0]
                         self._dead_letter.append(dead_letter_entry)
-                    if worker_failed:
-                        self._worker_failed = True
                 self._write_queue.task_done()
             if stop or worker_failed:
                 if worker_failed:
-                    with self._drain_lock:
-                        while True:
-                            try:
-                                orphan: str | None = self._write_queue.get_nowait()
-                                if orphan is not None:
-                                    try:
-                                        _orphan_obj: dict[str, Any] = json.loads(orphan)
-                                        orphan_pair: tuple[dict[str, Any], str] = (
-                                            _orphan_obj["receipt"],
-                                            _orphan_obj["sieved_content"],
-                                        )
-                                        with self._count_lock:
-                                            self._pending -= 1
-                                            self._write_errors.append(orphan_pair)
-                                    except (json.JSONDecodeError, KeyError):
-                                        with self._count_lock:
-                                            self._pending -= 1
-                                            if len(self._dead_letter) >= _DEAD_LETTER_MAX:
-                                                del self._dead_letter[0]
-                                            self._dead_letter.append(orphan)
-                                else:
+                    while True:
+                        try:
+                            orphan: str | None = self._write_queue.get_nowait()
+                            if orphan is not None:
+                                try:
+                                    _orphan_obj: dict[str, Any] = json.loads(orphan)
+                                    orphan_pair: tuple[dict[str, Any], str] = (
+                                        _orphan_obj["receipt"],
+                                        _orphan_obj["sieved_content"],
+                                    )
                                     with self._count_lock:
                                         self._pending -= 1
-                                self._write_queue.task_done()
-                            except _queue.Empty:
-                                break
+                                        self._write_errors.append(orphan_pair)
+                                except (json.JSONDecodeError, KeyError):
+                                    with self._count_lock:
+                                        self._pending -= 1
+                                        if len(self._dead_letter) >= _DEAD_LETTER_MAX:
+                                            del self._dead_letter[0]
+                                        self._dead_letter.append(orphan)
+                            else:
+                                with self._count_lock:
+                                    self._pending -= 1
+                            self._write_queue.task_done()
+                        except _queue.Empty:
+                            break
                 return
 
     def push(self, receipt: dict[str, Any], sieved_content: str) -> None:

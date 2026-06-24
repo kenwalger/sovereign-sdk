@@ -1123,3 +1123,35 @@ class TestOffGridBufferWriteErrors:
             buf.push(self._make_receipt("B"), "content B")
         buf.drain()  # recover write-error entries so close() succeeds
         buf.close()  # must not hang
+
+    def test_drain_concurrent_with_worker_crash_no_deadlock(self, tmp_path: Path) -> None:
+        """When drain() holds _drain_lock and is blocked in queue.join(), a simultaneous
+        non-OSError worker failure must not deadlock: the evacuation loop must call
+        task_done() for all queued items without acquiring _drain_lock so that
+        queue.join() unblocks and drain() completes within the five-second timeout.
+        Regressions in the evacuation path (e.g. re-introducing _drain_lock acquisition)
+        would cause this test to hang indefinitely."""
+        import builtins as _builtins
+        _real_open = _builtins.open
+
+        def _fail_on_append(*args: Any, **kwargs: Any) -> Any:
+            mode: str = args[1] if len(args) > 1 else kwargs.get("mode", "r")
+            if "a" in mode:
+                raise RuntimeError("simulated catastrophic writer failure")
+            return _real_open(*args, **kwargs)
+
+        buf = OffGridBuffer(str(tmp_path / "buf.jsonl"))
+        receipt_a = self._make_receipt("A", sequence=1)
+        receipt_b = self._make_receipt("B", sequence=2)
+        drain_thread: threading.Thread = threading.Thread(target=buf.drain, daemon=True)
+        with patch("builtins.open", side_effect=_fail_on_append):
+            buf.push(receipt_a, "content A")
+            buf.push(receipt_b, "content B")
+            drain_thread.start()
+            drain_thread.join(timeout=5.0)
+        assert not drain_thread.is_alive(), (
+            "drain() deadlocked — evacuation loop must not acquire _drain_lock "
+            "while drain() holds it"
+        )
+        assert buf.worker_failed is True
+        buf.close()

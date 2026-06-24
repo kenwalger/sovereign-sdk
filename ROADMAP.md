@@ -561,10 +561,13 @@ committed = pipeline.drain_buffer()
 * [x] `OffGridBuffer._disk_writer` — non-OSError exception catch and `_worker_failed` flag:
   `except Exception:` added after `except OSError:` to prevent silent thread death;
   affected entry preserved in `_write_errors` / `_dead_letter`; `_worker_failed = True`
-  set under `_count_lock`; drain loop under `_drain_lock` exhausts remaining queue items
-  and calls `task_done()` for each before the thread returns; `worker_failed: bool`
-  read-only property exposes the flag; `push()` raises `RuntimeError` immediately when
-  the flag is set.
+  set as the first statement inside the `finally`-block's `_count_lock` section so
+  concurrent `push()` callers see the flag before counter updates complete;
+  lock-free evacuation loop (`get_nowait()` under `_count_lock` per item, no
+  `_drain_lock`) calls `task_done()` for each orphan, eliminating the circular-wait
+  deadlock where `drain()` held `_drain_lock` and waited on `queue.join()` while the
+  evacuation loop waited for `_drain_lock`; `worker_failed: bool` read-only property
+  exposes the flag; `push()` raises `RuntimeError` immediately when the flag is set.
 * [x] `SensorFrame.from_bytes()` — strict runtime type validation: `isinstance` checks
   for all seven fields immediately after JSON decode; boolean masquerading as int blocked
   via `and not isinstance(_val, bool)` guard on `v` and `q`; type mismatch raises
@@ -575,6 +578,12 @@ committed = pipeline.drain_buffer()
   patches `builtins.open` with `RuntimeError`; asserts `flush()` returns, `worker_failed`
   is `True`, `push()` raises, `drain()` recovers entries, `close()` completes cleanly.
   `TestOffGridBufferWriteErrors` grows from 5 to 6 cases.
+* [x] `test_drain_concurrent_with_worker_crash_no_deadlock` (`TestOffGridBufferWriteErrors`):
+  pushes two items under a `builtins.open` mock that fails on append-mode writes; starts
+  `drain()` in a daemon thread; asserts the thread joins within 5 seconds (timeout =
+  deadlock); asserts `worker_failed is True`; `close()` completes cleanly.  Guards the
+  lock-free evacuation path against future regressions that re-introduce `_drain_lock`.
+  `TestOffGridBufferWriteErrors` grows from 6 to 7 cases.
 * [x] `OffGridBuffer.close()` — idempotent guard: `if self._worker_thread.is_alive()`
   skips sentinel placement and join on repeated calls, preventing counter corruption
   and indefinite `Queue.join()` block from overlapping teardown paths.
@@ -599,10 +608,10 @@ committed = pipeline.drain_buffer()
   the background daemon writer thread before the next test begins.
 * [x] `README.md` — `sovereign-edge` example extended with `sensor_secret` parameter and
   `try/finally` teardown calling `pipeline.close()` and `ledger.close()`.
-* [x] 69-case desktop validation test suite across eight classes (`TestSensorFrame`: 13;
+* [x] 70-case desktop validation test suite across eight classes (`TestSensorFrame`: 13;
   `TestOffGridBuffer`: 10; `TestEdgePipelineProcess`: 18; `TestEdgePipelineBuffering`: 6;
   `TestEdgePipelineDrainBuffer`: 5; `TestOffGridBufferAsync`: 7;
-  `TestEdgePipelineSieveFault`: 4; `TestOffGridBufferWriteErrors`: 6) covering all
+  `TestEdgePipelineSieveFault`: 4; `TestOffGridBufferWriteErrors`: 7) covering all
   fortification scenarios: non-blocking `push()` with immediate `size` reporting,
   chronological `drain()` sort by sequence, non-integer sequence value tolerance in the
   sort key guard, `_committed` counter accuracy after drain, sieve fault fallback with
@@ -617,7 +626,7 @@ committed = pipeline.drain_buffer()
   triple-call coverage, protocol version gate rejecting `v != 1`, dead-letter eviction
   cap at 100 entries, non-OSError worker failure detection with `worker_failed` flag, and
   strict runtime type validation on all seven wire frame fields.
-  **69 passed, 1 skipped, 358 workspace tests passed.**
+  **70 passed, 1 skipped, 359 workspace tests passed.**
 
 ---
 
