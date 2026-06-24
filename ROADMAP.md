@@ -639,9 +639,9 @@ committed = pipeline.drain_buffer()
 * [x] `SensorFrame` — `@dataclass(frozen=True)`: post-construction field assignment raises
   `dataclasses.FrozenInstanceError`; `d: dict[str, Any]` reference is immutable (contents not
   deep-frozen); no change required in pipeline code because no stage rebinds a frame field.
-* [x] 75-case desktop validation test suite across eight classes (`TestSensorFrame`: 14;
+* [x] 77-case desktop validation test suite across eight classes (`TestSensorFrame`: 15;
   `TestOffGridBuffer`: 10; `TestEdgePipelineProcess`: 18; `TestEdgePipelineBuffering`: 7;
-  `TestEdgePipelineDrainBuffer`: 6; `TestOffGridBufferAsync`: 8;
+  `TestEdgePipelineDrainBuffer`: 7; `TestOffGridBufferAsync`: 8;
   `TestEdgePipelineSieveFault`: 4; `TestOffGridBufferWriteErrors`: 8) covering all
   fortification scenarios: non-blocking `push()` with immediate `size` reporting,
   chronological `drain()` sort by sequence, non-integer sequence value tolerance,
@@ -653,8 +653,9 @@ committed = pipeline.drain_buffer()
   protocol version gate, dead-letter eviction cap, non-OSError worker failure, strict field
   type validation, lock-free evacuation deadlock regression, drain_buffer requeue-loop
   survivability, concurrent close counter-drift, dual-failure exception chaining, drain
-  read-failure flag observability, and frozen dataclass mutation guard.
-  **75 passed, 1 skipped, 364 workspace tests passed.**
+  read-failure flag observability, frozen dataclass mutation guard, exhaustive
+  replay-crash re-queue, and deep MappingProxyType immutability on ``SensorFrame.d``.
+  **77 passed, 1 skipped, 366 workspace tests passed.**
 
 ---
 

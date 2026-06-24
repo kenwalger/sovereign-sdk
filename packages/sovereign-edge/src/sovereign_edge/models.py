@@ -2,6 +2,7 @@
 """Typed data models for the sovereign-edge ingestion pipeline."""
 import json
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 
@@ -24,8 +25,11 @@ class SensorFrame:
     :type q: int
     :param alg: Canonical signing algorithm identifier (e.g. ``"hmac-sha256"``).
     :type alg: str
-    :param d: Structured sensor observation payload dict.
-    :type d: dict[str, Any]
+    :param d: Structured sensor observation payload, exposed as a read-only
+        :class:`~types.MappingProxyType` so downstream components cannot mutate the
+        wire payload in-place; the reference itself is also immutable due to
+        ``frozen=True``.
+    :type d: MappingProxyType[str, Any]
     :param s: Hex-encoded signature string produced by the sensor's HAL driver.
     :type s: str
     """
@@ -35,7 +39,7 @@ class SensorFrame:
     t: str
     q: int
     alg: str
-    d: dict[str, Any]
+    d: MappingProxyType[str, Any]
     s: str
 
     @classmethod
@@ -86,21 +90,24 @@ class SensorFrame:
             t=frame["t"],
             q=frame["q"],
             alg=frame["alg"],
-            d=frame["d"],
+            d=MappingProxyType(frame["d"]),
             s=frame["s"],
         )
 
     def text_content(self) -> str:
         """Return the canonical text representation of the sensor payload for sieve processing.
 
-        Serializes the ``d`` observation dict to deterministic, sort-keyed,
+        Serializes the ``d`` observation mapping to deterministic, sort-keyed,
         non-ASCII-escaped JSON so that the sieve layer receives a consistent
         string regardless of insertion-order variance in the originating payload.
+        ``dict(self.d)`` converts the :class:`~types.MappingProxyType` back to a
+        plain dict before passing to :func:`json.dumps`, whose C encoder only
+        serializes native :class:`dict` instances.
 
         :return: Minified JSON string representation of the observation payload.
         :rtype: str
         """
-        return json.dumps(self.d, sort_keys=True, ensure_ascii=False)
+        return json.dumps(dict(self.d), sort_keys=True, ensure_ascii=False)
 
 
 @dataclass

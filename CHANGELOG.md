@@ -593,7 +593,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deserialization.  A new test (``test_sensor_frame_is_immutable``) attempts ``frame.n =
   "mutated-node-id"`` and asserts ``dataclasses.FrozenInstanceError``, guarding the frozen
   invariant against future reversion to a mutable dataclass.  ``TestSensorFrame`` grows from 13
-  to 14 cases.  **Suite: 75 edge tests, 364 workspace tests passed, 1 skipped.**
+  to 14 cases.
+
+- **`EdgePipeline.drain_buffer()` — exhaustive re-queue on unexpected replay crash**
+  (`pipeline.py`): The drain entries are now materialised into a ``drained`` list before
+  the replay loop, and a ``processed`` counter advances only after each entry is fully
+  resolved (committed or requeued).  An outer ``except Exception`` block captures any
+  exception not handled by the inner ``(SovereignStorageError, sqlite3.Error)`` guard,
+  appends ``drained[processed:]`` to the requeue list (all un-processed entries including
+  the failing one), and re-raises the captured exception after the requeue pass completes.
+  Without this fix, a ``ValueError`` or ``RuntimeError`` escaping ``append_receipt`` would
+  abort the ``for`` loop immediately, abandoning every subsequent entry in local function
+  scope with no path to recovery.  When both the replay crash and requeue-push failures
+  occur simultaneously, the requeue ``RuntimeError`` is raised chained from the crash
+  exception via ``__cause__`` so both failure causes are visible in the traceback.
+
+- **`SensorFrame.d` — deep immutability via `MappingProxyType`** (`models.py`):
+  ``from_bytes()`` now wraps ``frame["d"]`` in ``types.MappingProxyType`` before
+  constructing the frozen dataclass instance.  ``@dataclass(frozen=True)`` prevents
+  rebinding ``frame.d`` to a different object, but a raw ``dict`` reference would still
+  allow in-place key mutation (``frame.d["k"] = v``), bypassing the shallow freeze.
+  ``MappingProxyType`` closes this gap by raising ``TypeError`` on any attempted mutation
+  through the reference.  The ``d`` field annotation is updated from ``dict[str, Any]`` to
+  ``MappingProxyType[str, Any]``.  ``text_content()`` and the HMAC preimage computation in
+  ``pipeline.py`` are updated to pass ``dict(self.d)`` / ``dict(frame.d)`` to
+  ``json.dumps``, whose C encoder requires a native ``dict`` (``isinstance(o, dict)``
+  returns ``False`` for ``MappingProxyType``, which would raise ``TypeError`` in the default
+  encoder without conversion).
+
+- **`test_drain_buffer_requeues_all_items_on_unexpected_exception`** (`TestEdgePipelineDrainBuffer`,
+  `test_edge.py`): Buffers 3 receipts via a closed ledger; on the recovery pass, a mock
+  succeeds on the 1st ``append_receipt`` call and raises ``ValueError`` on the 2nd.  After
+  ``drain_buffer()`` raises, asserts ``pipeline._buffer.size == 2`` — verifying that both
+  the crashing entry (index 1) and the un-reached entry (index 2) were re-queued to the
+  buffer.  Without the fix, ``size == 1`` because the loop aborted at index 1 and the entry
+  at index 2 was permanently lost.  ``TestEdgePipelineDrainBuffer`` grows from 6 to 7 cases.
+
+- **`test_from_bytes_d_field_is_immutable_mapping`** (`TestSensorFrame`, `test_edge.py`):
+  Constructs a live ``SensorFrame`` and asserts that ``frame.d["injected_key"] =
+  "malicious_value"`` raises ``TypeError``, verifying the ``MappingProxyType`` write-block
+  is in effect.  ``TestSensorFrame`` grows from 14 to 15 cases.
+  **Suite: 77 edge tests, 366 workspace tests passed, 1 skipped.**
 
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing

@@ -170,6 +170,15 @@ class TestSensorFrame:
         with pytest.raises(dataclasses.FrozenInstanceError):
             frame.n = "mutated-node-id"  # type: ignore[misc]
 
+    def test_from_bytes_d_field_is_immutable_mapping(self, tmp_path: Path) -> None:
+        """SensorFrame.d must be a read-only MappingProxyType; in-place key
+        assignment must raise TypeError, closing the shallow-freeze bypass where
+        a mutable dict reference inside a frozen dataclass could be mutated
+        in-place without triggering FrozenInstanceError."""
+        frame = SensorFrame.from_bytes(_seal_frame(tmp_path))
+        with pytest.raises(TypeError):
+            frame.d["injected_key"] = "malicious_value"  # type: ignore[index]
+
 
 # ---------------------------------------------------------------------------
 # TestOffGridBuffer
@@ -838,6 +847,71 @@ class TestEdgePipelineDrainBuffer:
         finally:
             pipeline_b.close()
             recovery_ledger.close()
+
+    def test_drain_buffer_requeues_all_items_on_unexpected_exception(
+        self, tmp_path: Path
+    ) -> None:
+        """drain_buffer() must re-queue every un-committed entry when an unexpected
+        exception aborts the replay loop mid-iteration; without the fix, entries after
+        the crash point are abandoned in local function scope and permanently lost.
+
+        Setup: buffer 3 receipts via a closed ledger.  On the recovery drain pass, mock
+        append_receipt to succeed on the first call and raise ValueError on the second.
+        After the resulting ValueError propagates, the 2nd and 3rd receipts must be
+        visible in the buffer (size == 2); without the safety net, only the 2nd would be
+        attempted and the 3rd would vanish mid-iteration."""
+        buffer_path: str = str(tmp_path / ".edge_buffer.jsonl")
+        key_path: str = str(tmp_path / ".keys" / "edge_identity.pem")
+
+        # Phase 1: force 3 receipts into the buffer via a closed ledger.
+        closed_ledger: SovereignLedger = SovereignLedger(":memory:")
+        pipeline_a: EdgePipeline = EdgePipeline(
+            ledger=closed_ledger,
+            signing_key=key_path,
+            buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
+        )
+        closed_ledger.close()
+        try:
+            pipeline_a.process(_seal_frame(tmp_path, {"seq": 1}))
+            pipeline_a.process(_seal_frame(tmp_path, {"seq": 2}))
+            pipeline_a.process(_seal_frame(tmp_path, {"seq": 3}))
+            pipeline_a._buffer.flush()
+            assert pipeline_a._buffer.size == 3
+        finally:
+            pipeline_a._buffer.close()
+
+        # Phase 2: replay with an open ledger that crashes on the 2nd item.
+        open_ledger: SovereignLedger = SovereignLedger(str(tmp_path / "recovery.db"))
+        pipeline_b: EdgePipeline = EdgePipeline(
+            ledger=open_ledger,
+            signing_key=key_path,
+            buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
+        )
+        call_count: list[int] = [0]
+        real_append = open_ledger.append_receipt
+
+        def _crash_on_second(receipt: dict[str, Any], content: str) -> str:
+            call_count[0] += 1
+            if call_count[0] == 2:
+                raise ValueError("unexpected ledger error mid-iteration")
+            return real_append(receipt, content)
+
+        try:
+            with patch.object(open_ledger, "append_receipt", side_effect=_crash_on_second):
+                with pytest.raises(ValueError, match="unexpected ledger error"):
+                    pipeline_b.drain_buffer()
+
+            pipeline_b._buffer.flush()
+            assert pipeline_b._buffer.size == 2, (
+                f"Expected 2 items re-queued after crash; got {pipeline_b._buffer.size} — "
+                "entries after the crash point were abandoned in local function scope"
+            )
+        finally:
+            pipeline_b._buffer.drain()  # clear buffer so close() does not raise
+            pipeline_b._buffer.close()
+            open_ledger.close()
 
     def test_drain_buffer_survives_push_failure_on_requeue(
         self, tmp_path: Path

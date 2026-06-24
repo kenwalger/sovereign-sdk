@@ -121,7 +121,7 @@ class EdgePipeline:
             time_bytes: bytes = frame.t.encode("utf-8")
             algo_bytes: bytes = frame.alg.encode("utf-8")
             canonical: str = json.dumps(
-                frame.d, separators=(",", ":"), sort_keys=True, ensure_ascii=False
+                dict(frame.d), separators=(",", ":"), sort_keys=True, ensure_ascii=False
             )
             preimage: bytes = (
                 f"1|{len(node_bytes)}:{frame.n}|{len(time_bytes)}:{frame.t}"
@@ -198,37 +198,58 @@ class EdgePipeline:
     def drain_buffer(self) -> list[str]:
         """Attempt to flush all buffered receipts to the ledger.
 
-        Drains the off-grid buffer, replaying each ``(receipt, sieved_content)``
-        pair against :meth:`~sovereign_ledger.SovereignLedger.append_receipt`.
-        Successfully committed entries are collected and returned as ``payload_hash``
-        strings.  Any entry that fails again due to a persistent ledger error is
-        re-queued to the buffer so that no receipt is silently discarded.
+        Eagerly materialises the drained entry list before the replay loop so
+        that a ``processed`` index can track how far through the list the loop
+        advanced.  If an unexpected exception (any :exc:`Exception` not caught
+        by the inner :exc:`~sovereign_ledger.SovereignStorageError` /
+        ``sqlite3.Error`` guard) aborts the replay pass mid-iteration, the
+        ``except`` branch appends every un-processed entry
+        (``drained[processed:]``) to the requeue list before the exception is
+        re-raised.  This closes the data-loss window where local function scope
+        held the only surviving references to those entries: when the original
+        ``for`` loop was interrupted, all entries after the crash point were
+        silently abandoned.
 
-        If :meth:`~sovereign_edge.buffer.OffGridBuffer.push` raises for one or more
-        entries during the re-queue pass — because the buffer is closed or its
-        background writer has terminated — the iteration continues to completion so
-        that every remaining item is attempted before the exception is surfaced.  No
-        item is silently abandoned mid-loop: the failure count is reported in the
-        :exc:`RuntimeError` message so the caller can take explicit recovery action.
+        Successfully committed entries are returned as ``payload_hash`` strings.
+        Any entry that fails due to a persistent :exc:`~sovereign_ledger.SovereignStorageError`
+        or ``sqlite3.Error`` is re-queued to the buffer so that no receipt is
+        discarded on a transient ledger fault.
+
+        The re-queue pass always iterates to completion regardless of
+        :exc:`RuntimeError` from individual :meth:`~sovereign_edge.buffer.OffGridBuffer.push`
+        calls so that every remaining item is attempted.  If an unexpected exception
+        interrupted the replay pass AND some items cannot be re-queued, the requeue
+        :exc:`RuntimeError` is raised chained from the crash exception so both failure
+        sources are visible in the traceback.
 
         :return: ``payload_hash`` strings for every receipt successfully committed to
             the ledger on this drain pass.  Entries that could not be committed are
             re-queued and excluded from the returned list.
         :rtype: list[str]
         :raises RuntimeError: If one or more entries cannot be re-queued after a
-            persistent ledger failure, indicating the buffer is unavailable for
-            recovery.  The exception is raised only after all requeue items have been
-            attempted so no item is orphaned mid-iteration.
+            ledger failure or after the replay loop was interrupted.  The exception
+            is raised only after all requeue items have been attempted; when both the
+            replay crash and a requeue failure occur simultaneously, the requeue
+            :exc:`RuntimeError` is chained from the replay exception via ``__cause__``.
         """
         committed: list[str] = []
         requeue: list[tuple[dict[str, Any], str]] = []
 
-        for receipt_dict, sieved_content in self._buffer.drain():
-            try:
-                payload_hash: str = self._ledger.append_receipt(receipt_dict, sieved_content)
-                committed.append(payload_hash)
-            except (SovereignStorageError, sqlite3.Error):
-                requeue.append((receipt_dict, sieved_content))
+        drained: list[tuple[dict[str, Any], str]] = list(self._buffer.drain())
+        crash_exc: Exception | None = None
+        processed: int = 0
+
+        try:
+            for receipt_dict, sieved_content in drained:
+                try:
+                    payload_hash: str = self._ledger.append_receipt(receipt_dict, sieved_content)
+                    committed.append(payload_hash)
+                except (SovereignStorageError, sqlite3.Error):
+                    requeue.append((receipt_dict, sieved_content))
+                processed += 1
+        except Exception as exc:
+            crash_exc = exc
+            requeue.extend(drained[processed:])
 
         push_failure_count: int = 0
         for receipt_dict, sieved_content in requeue:
@@ -236,6 +257,17 @@ class EdgePipeline:
                 self._buffer.push(receipt_dict, sieved_content)
             except RuntimeError:
                 push_failure_count += 1
+
+        if crash_exc is not None:
+            if push_failure_count:
+                requeue_err: RuntimeError = RuntimeError(
+                    f"drain_buffer() could not re-queue {push_failure_count} "
+                    f"receipt{'s' if push_failure_count != 1 else ''} after an unexpected "
+                    "exception in the ledger replay pass; call drain() on the buffer to "
+                    "recover un-committed entries"
+                )
+                raise requeue_err from crash_exc
+            raise crash_exc
 
         if push_failure_count:
             raise RuntimeError(
