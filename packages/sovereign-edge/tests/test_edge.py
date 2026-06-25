@@ -1522,6 +1522,77 @@ class TestOffGridBufferWriteErrors:
         buf.drain()
         buf.close()
 
+    def test_close_skips_sentinel_during_worker_os_exit_gap(self, tmp_path: Path) -> None:
+        """close() must guard on _worker_running rather than is_alive() to prevent
+        sentinel injection into an abandoned queue during the OS-thread-exit gap.
+
+        After a non-OSError crash the worker clears ``_worker_running = False`` under
+        ``_count_lock`` before its final return.  A concurrent :meth:`close` that
+        evaluates ``_worker_running`` under the same lock reads ``False`` and skips
+        sentinel injection entirely.  Evaluating ``is_alive()`` instead produces a
+        timing gap: the Python thread function has returned but the OS has not yet
+        marked the thread dead, so ``is_alive()`` still returns ``True``.  In that
+        window, :meth:`close` injects ``queue.put(None)`` which increments
+        ``unfinished_tasks`` without a living consumer to call ``task_done()``, stalling
+        any subsequent :meth:`flush` → ``queue.join()`` call indefinitely.
+
+        ``is_alive()`` is patched to return ``True`` after the worker has fully exited
+        to simulate that gap deterministically without relying on scheduler timing.
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        import builtins as _builtins
+        _real_open = _builtins.open
+
+        def _crash_on_append(*args: Any, **kwargs: Any) -> Any:
+            mode: str = args[1] if len(args) > 1 else kwargs.get("mode", "r")
+            if "a" in mode:
+                raise RuntimeError("synthetic non-OSError crash")
+            return _real_open(*args, **kwargs)
+
+        buf: OffGridBuffer = OffGridBuffer(str(tmp_path / "buf.jsonl"))
+        with patch("builtins.open", side_effect=_crash_on_append):
+            buf.push(self._make_receipt("A"), "content A")
+            buf.flush()
+
+        buf._worker_thread.join(timeout=5.0)
+        assert not buf._worker_thread.is_alive(), "worker thread did not exit within 5 s"
+        assert not buf._worker_running, "_worker_running not cleared before thread return"
+        assert buf._pending == 0, f"_pending={buf._pending} after crash+evacuation"
+
+        buf.drain()  # clear _write_errors so close() does not raise
+
+        # Patch is_alive() to return True, reproducing the OS-exit gap where the thread
+        # function has returned but the OS has not yet unregistered the thread.
+        close_done: threading.Event = threading.Event()
+
+        def _call_close() -> None:
+            buf.close()
+            close_done.set()
+
+        with patch.object(buf._worker_thread, "is_alive", return_value=True):
+            threading.Thread(target=_call_close, daemon=True).start()
+            assert close_done.wait(timeout=3.0), (
+                "close() stalled — is_alive() returning True triggered sentinel "
+                "injection into an abandoned queue; guard must use _worker_running"
+            )
+
+        assert buf._pending == 0, (
+            f"_pending={buf._pending} — sentinel inflated the counter without "
+            "a consumer to call task_done()"
+        )
+
+        # Confirm queue.join() does not block (unfinished_tasks must be 0)
+        flush_done: threading.Event = threading.Event()
+        threading.Thread(
+            target=lambda: (buf.flush(), flush_done.set()), daemon=True
+        ).start()
+        assert flush_done.wait(timeout=2.0), (
+            "flush() stalled after close() — sentinel was injected and "
+            "unfinished_tasks is non-zero with no living consumer"
+        )
+
     def test_drain_read_failed_flag_set_on_oserror(self, tmp_path: Path) -> None:
         """drain_read_failed must become True and drain() must re-raise the OSError when
         Path.read_text raises after the buffer file is confirmed to exist; the pipeline

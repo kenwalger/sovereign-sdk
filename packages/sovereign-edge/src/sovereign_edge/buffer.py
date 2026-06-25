@@ -88,6 +88,7 @@ class OffGridBuffer:
         self._dead_letter: list[str] = []
         self._closed: bool = False
         self._worker_failed: bool = False
+        self._worker_running: bool = True
         self._drain_read_failed: bool = False
         self._count_lock: threading.Lock = threading.Lock()
         self._drain_lock: threading.Lock = threading.Lock()
@@ -123,6 +124,18 @@ class OffGridBuffer:
         ``_worker_failed = True`` and raises), or it completed its
         :meth:`queue.Queue.put` while it held ``_count_lock`` before the evacuation
         acquired it, ensuring every enqueued item is collected by the sweep.
+
+        Immediately before returning on either the normal-stop or crash-evacuation path,
+        the thread clears ``_worker_running`` to ``False`` under ``_count_lock``.
+        :meth:`close` evaluates ``_worker_running`` rather than
+        :meth:`threading.Thread.is_alive` when deciding whether to inject the shutdown
+        sentinel.  Because both the flag write (here) and the flag read (in
+        :meth:`close`) are serialized under the same lock, there is no gap: a
+        :meth:`close` call that races with the thread's final OS-level exit either
+        reads ``False`` and skips sentinel injection entirely, or acquires ``_count_lock``
+        first and places the sentinel before this flag-clear runs — in which case the
+        sentinel is consumed by the evacuation sweep or the normal loop iteration and
+        ``_pending`` is correctly decremented.
 
         :return: None
         :rtype: None
@@ -195,6 +208,10 @@ class OffGridBuffer:
                                 self._write_queue.task_done()
                             except _queue.Empty:
                                 break
+                        self._worker_running = False
+                else:
+                    with self._count_lock:
+                        self._worker_running = False
                 return
 
     def push(self, receipt: dict[str, Any], sieved_content: str) -> None:
@@ -389,16 +406,29 @@ class OffGridBuffer:
     def close(self) -> None:
         """Flush all pending writes and terminate the background worker thread.
 
-        The ``is_alive()`` check, ``_closed = True`` update, ``_pending`` increment, and
-        ``None`` sentinel dispatch form a single atomic operation under
-        ``_drain_lock → _count_lock``.  This eliminates the concurrent-teardown race:
-        if two callers invoke :meth:`close` simultaneously, the first to acquire both
-        locks observes ``_closed = False`` and places the sentinel; the second observes
-        ``_closed = True`` inside the same lock scope and skips the placement entirely.
-        Without this atomicity, both callers could observe ``is_alive() == True`` before
-        either had set ``_closed``, resulting in two ``_pending`` increments, two
-        sentinels in the queue, and a ``_pending`` counter that can never reach zero
-        because the second sentinel is never consumed.
+        The ``_worker_running`` flag check, ``_closed = True`` update, ``_pending``
+        increment, and ``None`` sentinel dispatch form a single atomic operation under
+        ``_drain_lock → _count_lock``.  This eliminates two distinct races:
+
+        *Concurrent teardown*: if two callers invoke :meth:`close` simultaneously, the
+        first to acquire both locks observes ``_closed = False`` and places the sentinel;
+        the second observes ``_closed = True`` inside the same lock scope and skips the
+        placement entirely.  Without this atomicity, both callers could observe
+        ``_worker_running == True`` before either had set ``_closed``, resulting in two
+        ``_pending`` increments, two sentinels, and a counter that can never reach zero.
+
+        *Post-evacuation OS-exit gap*: the background worker clears ``_worker_running``
+        to ``False`` under ``_count_lock`` immediately before its final ``return``.
+        Because :meth:`close` reads ``_worker_running`` under the same lock, there is
+        no window in which :meth:`close` can inject a sentinel into a dead queue.
+        The OS-level thread liveness check (:meth:`threading.Thread.is_alive`) has a
+        gap between the Python thread function returning and the OS marking the thread
+        dead; during that gap, ``is_alive()`` still returns ``True``.  Evaluating
+        ``_worker_running`` instead eliminates the gap: the flag is ``False`` before the
+        thread unwinds its call stack, so any concurrent :meth:`close` that acquires
+        ``_count_lock`` after the flag-clear reads ``False`` and skips sentinel injection,
+        preventing a :meth:`queue.Queue.put` that increments ``unfinished_tasks`` without
+        a consumer and stalls :meth:`flush` → :meth:`queue.Queue.join` indefinitely.
 
         ``_worker_thread.join()`` is called **outside** the lock window so that the
         caller does not hold ``_drain_lock`` while waiting for the worker to drain the
@@ -427,7 +457,7 @@ class OffGridBuffer:
         sentinel_placed: bool = False
         with self._drain_lock:
             with self._count_lock:
-                if not self._closed and self._worker_thread.is_alive():
+                if not self._closed and self._worker_running:
                     self._closed = True
                     self._pending += 1
                     sentinel_placed = True
