@@ -29,6 +29,7 @@ Invariants verified across every test:
 """
 import json
 import os
+import sqlite3
 import threading
 from pathlib import Path
 from typing import Any
@@ -718,6 +719,11 @@ class TestEdgePipelineBuffering:
         assert isinstance(dfe.receipt["payload_hash"], str)
         assert len(dfe.receipt["payload_hash"]) == 64
         assert isinstance(dfe.__cause__, RuntimeError)
+        assert isinstance(dfe.ledger_error, (SovereignStorageError, sqlite3.Error)), (
+            "ledger_error must preserve the root-cause ledger exception from the failed "
+            "ledger commit so the full two-tier failure is visible without relying on "
+            "implicit __context__ suppression from the raise-from chain"
+        )
         pipeline._buffer.close()
         ledger.close()
 
@@ -1194,10 +1200,12 @@ class TestOffGridBufferAsync:
             f"accepted={len(accepted)}, rejected={len(rejected)}, expected total={n_threads}"
         )
 
-        # No orphan entries: sentinel was last item; worker called task_done() for all items.
-        assert buf._write_queue.unfinished_tasks == 0, (
-            f"queue has {buf._write_queue.unfinished_tasks} unfinished tasks after close(); "
-            "an entry was enqueued behind the sentinel"
+        # No orphan entries: _pending reaches zero when the worker's finally block decrements
+        # it for every item including the sentinel; a non-zero value means an entry was
+        # enqueued behind the sentinel and the worker exited without resolving it.
+        assert buf._pending == 0, (
+            f"buffer has {buf._pending} in-flight entries after close(); "
+            "an entry was enqueued behind the sentinel or task_done() was not called"
         )
 
         # All accepted entries are on disk or preserved in write_errors — none vaporized.

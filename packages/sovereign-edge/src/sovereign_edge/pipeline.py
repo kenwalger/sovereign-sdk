@@ -29,11 +29,19 @@ class SovereignDoubleFaultError(RuntimeError):
     :param args: Positional message arguments forwarded to :class:`RuntimeError`.
     :param receipt: The fully signed ForensicReceipt dict that could not be persisted.
     :type receipt: dict[str, Any]
+    :param ledger_error: The original ledger exception (root cause of the fallback sequence)
+        that triggered the buffer push attempt.  Preserved as a named attribute so diagnostic
+        code can inspect the full two-tier failure without relying on implicit ``__context__``
+        suppression from the ``raise ... from push_err`` chain.
+    :type ledger_error: Exception
     """
 
-    def __init__(self, *args: object, receipt: dict[str, Any]) -> None:
+    def __init__(
+        self, *args: object, receipt: dict[str, Any], ledger_error: Exception
+    ) -> None:
         super().__init__(*args)
         self.receipt: dict[str, Any] = receipt
+        self.ledger_error: Exception = ledger_error
 
 
 class EdgePipeline:
@@ -214,6 +222,7 @@ class EdgePipeline:
                     "Ledger unavailable and off-grid buffer rejected payload; "
                     "the signed receipt is attached to this exception for host-level recovery",
                     receipt=receipt_dict,
+                    ledger_error=ledger_err,
                 ) from push_err
 
         return EdgeResult(

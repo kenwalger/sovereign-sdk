@@ -688,6 +688,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than asserting ``result == []``, reflecting the new ``raise`` behaviour in
   ``OffGridBuffer.drain()``.  The post-patch ``buf.drain()`` cleanup call still confirms
   that a subsequent unpatch drain recovers the on-disk entry cleanly.
+
+- **`SovereignDoubleFaultError` — full two-tier exception chain** (`pipeline.py`):
+  ``SovereignDoubleFaultError.__init__`` gains a required ``ledger_error: Exception``
+  keyword parameter.  The original ledger exception (root cause of the fallback sequence)
+  is now stored as ``self.ledger_error`` alongside ``self.receipt``.  Previously, raising
+  ``from push_err`` set ``__cause__ = push_err`` and ``__suppress_context__ = True``,
+  which hid ``ledger_err`` from the default traceback display.  Storing ``ledger_err``
+  explicitly as a named attribute makes the full two-tier failure (ledger error → push
+  error) inspectable without relying on implicit ``__context__`` chain traversal.  The
+  raise site in ``process()`` is updated to pass ``ledger_error=ledger_err``.
+
+- **``test_concurrent_push_vs_close_no_orphan_entries`` — remove ``queue.Queue`` internal
+  coupling** (`test_edge.py`): The assertion ``buf._write_queue.unfinished_tasks == 0``
+  was replaced with ``buf._pending == 0``.  ``unfinished_tasks`` is an undocumented
+  implementation attribute of the standard-library ``queue.Queue`` class; coupling to it
+  ties the test to a CPython internals contract.  ``_pending`` is our own
+  ``OffGridBuffer`` counter that is decremented in the worker's ``finally`` block for
+  every item (including the sentinel), so after ``close()`` calls ``Queue.join()`` and
+  returns, ``_pending == 0`` guarantees the same sentinel-last invariant using only the
+  buffer's own state.
+
+- **``test_process_raises_sovereign_double_fault_error_on_double_failure`` — assert
+  ``ledger_error`` attribute** (`test_edge.py`): An ``isinstance(dfe.ledger_error,
+  (SovereignStorageError, sqlite3.Error))`` assertion verifies that the root-cause ledger
+  exception is preserved on the ``SovereignDoubleFaultError`` instance, exercising the
+  full two-tier failure chain.  ``import sqlite3`` added to the test-file stdlib imports.
   **Suite: 79 edge tests, 368 workspace tests passed, 1 skipped.**
 
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
