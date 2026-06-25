@@ -1019,7 +1019,7 @@ class TestEdgePipelineDrainBuffer:
             pipeline._buffer.flush()
             assert pipeline._buffer.size == 1
         finally:
-            closed_ledger.close()
+            pipeline.close()
 
         open_ledger: SovereignLedger = SovereignLedger(str(tmp_path / "recovery.db"))
         pipeline_b: EdgePipeline = EdgePipeline(
