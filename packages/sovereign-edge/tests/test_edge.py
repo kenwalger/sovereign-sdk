@@ -1432,6 +1432,96 @@ class TestOffGridBufferWriteErrors:
         assert buf.worker_failed is True
         buf.close()
 
+    def test_push_toctou_worker_crash_no_dangling_items(self, tmp_path: Path) -> None:
+        """16 concurrent push() calls racing against a non-OSError worker crash must leave
+        _pending == 0 and every accepted push reflected in _write_errors after all threads
+        resolve.
+
+        The crashing open() call sets ``crash_imminent`` before raising, releasing the
+        racer threads into the liveness-gate window simultaneously via
+        ``threading.Barrier``.  Without the fix — where ``queue.put()`` lives outside
+        ``_count_lock`` — a racer can pass the ``_worker_failed`` check, release the lock,
+        wait while the worker's evacuation loop drains the queue to empty, and then call
+        ``put()``, leaving an orphaned item with no ``task_done()`` ever called.  With the
+        fix, the check and ``put()`` share a single ``_count_lock`` acquisition, so every
+        racer either enqueues atomically before the evacuation can start, or sees
+        ``_worker_failed = True`` after the evacuation holds the lock and raises.
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        import builtins as _builtins
+        _real_open = _builtins.open
+
+        n_concurrent: int = 16
+        crash_imminent: threading.Event = threading.Event()
+        all_racing: threading.Barrier = threading.Barrier(n_concurrent, timeout=10.0)
+
+        def _crash_on_append(*args: Any, **kwargs: Any) -> Any:
+            mode: str = args[1] if len(args) > 1 else kwargs.get("mode", "r")
+            if "a" in mode:
+                crash_imminent.set()
+                raise RuntimeError("synthetic non-OSError writer crash")
+            return _real_open(*args, **kwargs)
+
+        accepted: list[int] = []
+        rejected: list[int] = []
+        r_lock: threading.Lock = threading.Lock()
+
+        buf: OffGridBuffer = OffGridBuffer(str(tmp_path / "buf.jsonl"))
+
+        def _racer(index: int) -> None:
+            crash_imminent.wait()
+            all_racing.wait()
+            try:
+                buf.push(
+                    self._make_receipt(f"r{index}", sequence=index + 1),
+                    f"content {index}",
+                )
+                with r_lock:
+                    accepted.append(index)
+            except RuntimeError:
+                with r_lock:
+                    rejected.append(index)
+
+        threads: list[threading.Thread] = [
+            threading.Thread(target=_racer, args=(i,), daemon=True)
+            for i in range(n_concurrent)
+        ]
+        for t in threads:
+            t.start()
+
+        with patch("builtins.open", side_effect=_crash_on_append):
+            buf.push(self._make_receipt("seed", sequence=0), "seed content")
+            buf.flush()
+
+        for t in threads:
+            t.join(timeout=10.0)
+
+        assert all(not t.is_alive() for t in threads), "racer thread timed out"
+        assert len(accepted) + len(rejected) == n_concurrent, "not all racer threads resolved"
+
+        assert buf._pending == 0, (
+            f"_pending={buf._pending}: dangling item — push() passed the liveness gate "
+            "and deposited into the queue after the evacuation loop completed; "
+            "the _worker_failed check and queue.put() must share a single _count_lock section"
+        )
+
+        buf_path: Path = tmp_path / "buf.jsonl"
+        on_disk: int = 0
+        if buf_path.exists():
+            on_disk = sum(
+                1 for ln in buf_path.read_text(encoding="utf-8").splitlines() if ln.strip()
+            )
+        assert on_disk + buf.write_error_count + buf.dead_letter_count >= len(accepted), (
+            f"accepted={len(accepted)} but on_disk={on_disk} + "
+            f"write_errors={buf.write_error_count} + dead_letter={buf.dead_letter_count}; "
+            "an accepted push was not captured in write_errors, dead_letter, or on disk"
+        )
+
+        buf.drain()
+        buf.close()
+
     def test_drain_read_failed_flag_set_on_oserror(self, tmp_path: Path) -> None:
         """drain_read_failed must become True and drain() must re-raise the OSError when
         Path.read_text raises after the buffer file is confirmed to exist; the pipeline

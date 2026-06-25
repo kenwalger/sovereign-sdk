@@ -111,15 +111,18 @@ class OffGridBuffer:
 
         If an unexpected non-:exc:`OSError` exception is raised during a write, the thread
         sets ``_worker_failed`` under the count lock **before** any other state update in
-        the ``finally`` block, then evacuates all remaining queue items via a
-        non-blocking :meth:`queue.Queue.get_nowait` loop — calling ``task_done()`` for each
-        — without acquiring ``_drain_lock``.  Acquiring ``_drain_lock`` in the evacuation
+        the ``finally`` block, then evacuates all remaining queue items under a single
+        ``_count_lock`` acquisition that spans the entire :meth:`queue.Queue.get_nowait`
+        drain loop — calling ``task_done()`` for each item within the same lock scope —
+        without acquiring ``_drain_lock``.  Acquiring ``_drain_lock`` in the evacuation
         path would deadlock when :meth:`drain` holds it and is blocked in
-        :meth:`queue.Queue.join` waiting for those same ``task_done()`` calls.  Because
-        :meth:`push` checks ``_worker_failed`` under ``_count_lock`` before calling
-        :meth:`queue.Queue.put`, setting the flag first ensures that any concurrent
-        :meth:`push` either sees the flag and raises without enqueuing, or has already
-        completed its ``put`` call and the item will be collected by the evacuation loop.
+        :meth:`queue.Queue.join` waiting for those same ``task_done()`` calls.  Holding
+        ``_count_lock`` across the entire evacuation sweep closes the TOCTOU gap in
+        :meth:`push`: a concurrent :meth:`push` is either forced to block on
+        ``_count_lock`` until the sweep completes (after which it observes
+        ``_worker_failed = True`` and raises), or it completed its
+        :meth:`queue.Queue.put` while it held ``_count_lock`` before the evacuation
+        acquired it, ensuring every enqueued item is collected by the sweep.
 
         :return: None
         :rtype: None
@@ -169,31 +172,29 @@ class OffGridBuffer:
                 self._write_queue.task_done()
             if stop or worker_failed:
                 if worker_failed:
-                    while True:
-                        try:
-                            orphan: str | None = self._write_queue.get_nowait()
-                            if orphan is not None:
-                                try:
-                                    _orphan_obj: dict[str, Any] = json.loads(orphan)
-                                    orphan_pair: tuple[dict[str, Any], str] = (
-                                        _orphan_obj["receipt"],
-                                        _orphan_obj["sieved_content"],
-                                    )
-                                    with self._count_lock:
+                    with self._count_lock:
+                        while True:
+                            try:
+                                orphan: str | None = self._write_queue.get_nowait()
+                                if orphan is not None:
+                                    try:
+                                        _orphan_obj: dict[str, Any] = json.loads(orphan)
+                                        orphan_pair: tuple[dict[str, Any], str] = (
+                                            _orphan_obj["receipt"],
+                                            _orphan_obj["sieved_content"],
+                                        )
                                         self._pending -= 1
                                         self._write_errors.append(orphan_pair)
-                                except (json.JSONDecodeError, KeyError):
-                                    with self._count_lock:
+                                    except (json.JSONDecodeError, KeyError):
                                         self._pending -= 1
                                         if len(self._dead_letter) >= _DEAD_LETTER_MAX:
                                             del self._dead_letter[0]
                                         self._dead_letter.append(orphan)
-                            else:
-                                with self._count_lock:
+                                else:
                                     self._pending -= 1
-                            self._write_queue.task_done()
-                        except _queue.Empty:
-                            break
+                                self._write_queue.task_done()
+                            except _queue.Empty:
+                                break
                 return
 
     def push(self, receipt: dict[str, Any], sieved_content: str) -> None:
@@ -205,14 +206,16 @@ class OffGridBuffer:
         :attr:`~sovereign_edge.pipeline.EdgePipeline.buffer_depth` is accurate without
         requiring a :meth:`flush` call.
 
-        Acquires ``_drain_lock`` for the duration of the ``_pending`` increment and
-        :meth:`queue.Queue.put` to protect counter modifications and prevent a concurrent
-        :meth:`drain` from sweeping the file between the enqueue and the background write,
-        which would silently discard the entry.  Under active, heavy :meth:`drain`
-        playback operations — where :meth:`drain` holds ``_drain_lock`` across the full
-        flush → read → atomic-replace critical section — :meth:`push` callers will
-        experience brief lock contention and block until the active drain batch
-        transaction yields the lock.
+        Acquires ``_drain_lock`` to prevent a concurrent :meth:`drain` from sweeping the
+        file between the enqueue and the background write, which would silently discard
+        the entry.  Within that scope, ``_count_lock`` is held for the entire critical
+        section: the ``_closed`` / ``_worker_failed`` liveness gate checks, the
+        ``_pending`` increment, and the :meth:`queue.Queue.put` call are all executed
+        atomically under the same lock acquisition.  This closes the TOCTOU gap where a
+        thread could pass the liveness gate, release ``_count_lock``, and then call
+        ``put()`` after the background worker's crash-evacuation loop had already swept
+        the queue clean, leaving an orphaned entry with no consumer to call
+        ``task_done()``.
 
         Raises :exc:`RuntimeError` immediately if :meth:`close` has already been called
         or if the background worker thread has terminated due to an unexpected exception
@@ -251,7 +254,7 @@ class OffGridBuffer:
                         "receipts and close() to shut down"
                     )
                 self._pending += 1
-            self._write_queue.put(entry)
+                self._write_queue.put(entry)
 
     def flush(self) -> None:
         """Block until all enqueued entries have been committed to disk.
