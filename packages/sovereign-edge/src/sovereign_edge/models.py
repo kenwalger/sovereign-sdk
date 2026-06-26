@@ -6,6 +6,29 @@ from types import MappingProxyType
 from typing import Any
 
 
+def _canonicalize_payload(obj: Any) -> Any:
+    """Normalize integer-valued floats to :class:`int` for stable canonical JSON serialization.
+
+    Traverses arbitrarily nested dicts and lists, replacing every :class:`float`
+    whose :meth:`~float.is_integer` method returns ``True`` with its :func:`int`
+    equivalent.  Non-finite floats (``nan``, ``±inf``) are passed through unchanged
+    because :meth:`~float.is_integer` returns ``False`` for them.
+
+    :param obj: Arbitrarily nested JSON-compatible value (dict, list, scalar).
+    :type obj: Any
+    :return: A structurally equivalent copy of ``obj`` with integer-valued floats
+        replaced by their :class:`int` equivalents.
+    :rtype: Any
+    """
+    if isinstance(obj, float) and obj.is_integer():
+        return int(obj)
+    if isinstance(obj, dict):
+        return {k: _canonicalize_payload(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_canonicalize_payload(v) for v in obj]
+    return obj
+
+
 @dataclass(frozen=True)
 class SensorFrame:
     """Deserialized representation of a sovereign-sensor wire envelope.
@@ -100,14 +123,19 @@ class SensorFrame:
         Serializes the ``d`` observation mapping to deterministic, sort-keyed,
         non-ASCII-escaped JSON so that the sieve layer receives a consistent
         string regardless of insertion-order variance in the originating payload.
-        ``dict(self.d)`` converts the :class:`~types.MappingProxyType` back to a
-        plain dict before passing to :func:`json.dumps`, whose C encoder only
-        serializes native :class:`dict` instances.
+        :func:`_canonicalize_payload` normalizes integer-valued floats (``1.0`` →
+        ``1``) before serialization so that cross-runtime numeric type variance —
+        for example MicroPython emitting ``1.0`` where CPython would emit ``1`` —
+        does not produce divergent canonical strings and break sieve-layer
+        consistency.  ``dict(self.d)`` converts the
+        :class:`~types.MappingProxyType` back to a plain dict before passing to
+        :func:`json.dumps`, whose C encoder only serializes native :class:`dict`
+        instances.
 
         :return: Minified JSON string representation of the observation payload.
         :rtype: str
         """
-        return json.dumps(dict(self.d), sort_keys=True, ensure_ascii=False)
+        return json.dumps(_canonicalize_payload(dict(self.d)), sort_keys=True, ensure_ascii=False)
 
 
 @dataclass

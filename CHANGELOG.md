@@ -894,6 +894,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   message.  ``TestEdgePipelineDrainBuffer`` grows from 8 to 9 cases.
   **Suite: 87 edge tests, 376 workspace tests passed, 1 skipped (POSIX fchmod).**
 
+- **`SensorFrame.text_content()` — float canonicalization via `_canonicalize_payload`**
+  (`models.py`): A new module-level helper ``_canonicalize_payload(obj: Any) -> Any``
+  traverses any arbitrarily nested JSON-compatible structure and replaces every
+  :class:`float` whose :meth:`~float.is_integer` returns ``True`` with its :func:`int`
+  equivalent.  Non-finite floats (``nan``, ``±inf``) pass through unchanged because
+  :meth:`~float.is_integer` returns ``False`` for them, so no :func:`math.isfinite`
+  guard is required.  ``text_content()`` now calls
+  ``json.dumps(_canonicalize_payload(dict(self.d)), sort_keys=True, ensure_ascii=False)``
+  instead of ``json.dumps(dict(self.d), ...)``.  Without this normalization, a
+  MicroPython sensor serializing an integer payload field as ``1.0`` (a common JSON
+  emitter difference between bare-metal runtimes and CPython) produces a canonical string
+  containing ``"value": 1.0`` while the CPython edge node would produce ``"value": 1``,
+  causing divergent sieve-layer inputs and breaking sieve-output determinism across
+  runtime boundaries.  The HMAC-SHA256 preimage computation in ``pipeline.py`` is
+  intentionally not touched: the sensor constructs its own HMAC digest from its own JSON
+  serialization, so applying normalization only on the edge side would cause every
+  float-bearing frame to fail verification.  The ``text_content()`` docstring is updated
+  to document the float normalization contract and the cross-runtime motivation.
+
+- **`EdgePipeline.drain_buffer()` — duplicate eviction on `sqlite3.IntegrityError`**
+  (`pipeline.py`): An ``except sqlite3.IntegrityError: pass`` clause is inserted
+  immediately before the existing ``except (SovereignStorageError, sqlite3.Error):
+  requeue.append(...)`` handler in the inner replay loop.  When the ledger's
+  ``append_receipt()`` raises :exc:`sqlite3.IntegrityError` (``UNIQUE constraint
+  failed`` on the ``payload_hash`` column), the receipt has already been committed in a
+  prior drain pass; re-buffering it produces an infinite replay loop where the same
+  duplicate is drained, rejected, re-queued, and drained again on every subsequent
+  ``drain_buffer()`` call, growing ``buffer_depth`` without bound.  The new handler
+  silently evicts the duplicate (``pass``) so it is neither counted in ``committed``
+  nor re-queued; ``buffer_depth`` returns to zero after a drain that encounters only
+  duplicates.  :exc:`sqlite3.IntegrityError` is a subclass of :exc:`sqlite3.Error`, so
+  it must be caught before the broader ``(SovereignStorageError, sqlite3.Error)`` guard
+  to avoid being swallowed into the requeue path by the parent-class match.
+
+- **`OffGridBuffer._disk_writer` — close-phase evacuation guarded by `try/finally`**
+  (`buffer.py`): The ``if worker_failed:`` evacuation block that drains orphan queue
+  items on worker crash previously cleared ``self._worker_running = False`` as the last
+  statement inside ``with self._count_lock:`` at the end of the evacuation loop.  If the
+  loop body raised an unhandled exception before reaching that statement, ``_worker_running``
+  would remain ``True``; a subsequent ``close()`` call would then inject a ``None``
+  sentinel into the abandoned queue (the ``_worker_running`` liveness gate passes), but no
+  consumer processes it, causing any later ``queue.join()`` to block indefinitely.  The
+  evacuation ``with self._count_lock:`` block is now wrapped in ``try/finally``; the
+  ``finally`` clause acquires ``_count_lock`` separately, checks ``self._closed`` to drain
+  any sentinel placed in the race window between the evacuation completing and
+  ``_worker_running`` being cleared, and unconditionally sets ``self._worker_running =
+  False``.  This guarantees the flag is cleared even when the evacuation loop raises,
+  and drains any racing sentinel so ``queue.join()`` is never stalled.
+
+- **`TestSensorFrame` — `test_text_content_normalizes_integer_valued_floats`**
+  (`test_edge.py`): Constructs two ``SensorFrame`` instances from wire bytes that differ
+  only in whether the ``d["value"]`` field is serialized as ``1`` (int) or ``1.0``
+  (float).  Asserts that ``frame_int.text_content() == frame_float.text_content()``,
+  verifying that the canonicalization helper eliminates the runtime-serialization
+  discrepancy.  ``TestSensorFrame`` grows from 15 to 16 cases.
+
+- **`TestEdgePipelineDrainBuffer` — `test_drain_buffer_evicts_duplicate_receipt_on_integrity_error`**
+  (`test_edge.py`): Buffers one receipt via a closed ledger on ``pipeline_a``, then
+  opens a recovery pipeline ``pipeline_b`` and patches ``append_receipt`` to raise
+  :exc:`sqlite3.IntegrityError`.  After ``drain_buffer()`` returns ``[]``, asserts
+  ``pipeline_b.buffer_depth == 0`` — verifying the duplicate was evicted and not
+  re-queued.  Without the fix, ``buffer_depth == 1`` and the receipt re-enters the
+  buffer for the next drain pass.  ``TestEdgePipelineDrainBuffer`` grows from 9 to
+  10 cases.
+  **Suite: 89 edge tests, 378 workspace tests passed, 1 skipped (POSIX fchmod).**
+
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing
   sensor observations into versioned, tamper-evident, minified JSON transmission envelopes with

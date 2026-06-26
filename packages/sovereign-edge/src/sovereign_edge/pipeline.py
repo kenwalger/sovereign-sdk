@@ -346,6 +346,8 @@ class EdgePipeline:
                 try:
                     payload_hash: str = self._ledger.append_receipt(receipt_dict, sieved_content)
                     committed.append(payload_hash)
+                except sqlite3.IntegrityError:
+                    pass
                 except (SovereignStorageError, sqlite3.Error):
                     requeue.append((receipt_dict, sieved_content))
                 processed += 1

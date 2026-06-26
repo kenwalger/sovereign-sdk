@@ -711,9 +711,39 @@ committed = pipeline.drain_buffer()
   with ``__cause__ is OSError`` and message matching ``"operation failed"``; then asserts
   a second ``drain_buffer()`` commits exactly 1 receipt (entries survived the failed
   rotation).  ``TestEdgePipelineDrainBuffer`` grows from 8 to 9 cases.
-* [x] 87-case desktop validation test suite across nine classes (`TestSensorFrame`: 15;
+* [x] `SensorFrame.text_content()` — float canonicalization via `_canonicalize_payload`:
+  module-level helper replaces every ``float`` with ``float.is_integer() == True`` with its
+  ``int`` equivalent (non-finite floats pass through unchanged); normalizes cross-runtime
+  numeric type variance (MicroPython ``1.0`` vs CPython ``1``) so sieve-layer inputs are
+  byte-identical regardless of runtime JSON serializer; HMAC preimage computation in
+  ``pipeline.py`` is not modified — sensor constructs its own digest from its own
+  serialization, so edge-side normalization would break verification.
+  ``test_text_content_normalizes_integer_valued_floats`` (``TestSensorFrame``) asserts
+  identical ``text_content()`` output for ``d={"value": 1}`` vs ``d={"value": 1.0}``.
+  ``TestSensorFrame`` grows from 15 to 16 cases.
+* [x] `EdgePipeline.drain_buffer()` — duplicate eviction on `sqlite3.IntegrityError`:
+  ``except sqlite3.IntegrityError: pass`` inserted before the broader
+  ``except (SovereignStorageError, sqlite3.Error): requeue.append(...)`` guard; a receipt
+  already committed in a prior drain pass is evicted silently (neither counted in
+  ``committed`` nor re-queued), preventing the infinite replay loop where duplicates grow
+  ``buffer_depth`` without bound on every subsequent ``drain_buffer()`` call;
+  ``test_drain_buffer_evicts_duplicate_receipt_on_integrity_error``
+  (``TestEdgePipelineDrainBuffer``) asserts ``committed == []`` and
+  ``pipeline_b.buffer_depth == 0`` after a patched ``append_receipt`` raises
+  ``sqlite3.IntegrityError``.  ``TestEdgePipelineDrainBuffer`` grows from 9 to 10 cases.
+* [x] `OffGridBuffer._disk_writer` — close-phase evacuation wrapped in ``try/finally``:
+  the ``if worker_failed:`` evacuation loop's ``with self._count_lock:`` block is now the
+  body of a ``try`` clause; the outer ``finally`` acquires ``_count_lock`` independently,
+  drains any sentinel injected by a racing ``close()`` (checks ``self._closed`` and calls
+  ``get_nowait()`` / ``task_done()`` until ``_queue.Empty``), and unconditionally sets
+  ``self._worker_running = False``; previously the flag was cleared only as the last
+  statement inside the evacuation loop — an exception in that loop left
+  ``_worker_running = True``, causing a subsequent ``close()`` to inject a ``None``
+  sentinel into the abandoned queue with no consumer, stalling any future
+  ``queue.join()``.
+* [x] 89-case desktop validation test suite across nine classes (`TestSensorFrame`: 16;
   `TestOffGridBuffer`: 10; `TestEdgePipelineProcess`: 18; `TestEdgePipelineBuffering`: 8;
-  `TestEdgePipelineDrainBuffer`: 9; `TestOffGridBufferAsync`: 8;
+  `TestEdgePipelineDrainBuffer`: 10; `TestOffGridBufferAsync`: 8;
   `TestEdgePipelineSieveFault`: 4; `TestOffGridBufferWriteErrors`: 11;
   `TestEdgePipelineSecureInit`: 4) covering all
   fortification scenarios: non-blocking `push()` with immediate `size` reporting,
@@ -733,9 +763,11 @@ committed = pipeline.drain_buffer()
   zero ``_pending`` drift, OS-exit-gap ``_worker_running`` sentinel guard,
   secure-by-default init with ``SovereignConfigurationError``, stale
   ``drain_read_failed`` flag reset after filesystem recovery, atomic rotation
-  ``OSError`` propagation, and drain_buffer cascading double-fault with
-  ``uncommitted_receipts`` preservation.
-  **87 passed, 0 skipped (edge); 376 passed, 1 skipped (workspace).**
+  ``OSError`` propagation, drain_buffer cascading double-fault with
+  ``uncommitted_receipts`` preservation, cross-runtime float canonicalization in
+  ``text_content()``, duplicate ledger-entry eviction on ``sqlite3.IntegrityError``,
+  and close-phase evacuation ``try/finally`` sentinel guard.
+  **89 passed, 0 skipped (edge); 378 passed, 1 skipped (workspace).**
 
 ---
 

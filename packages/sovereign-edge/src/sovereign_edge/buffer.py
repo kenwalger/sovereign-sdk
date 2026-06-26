@@ -185,30 +185,40 @@ class OffGridBuffer:
                 self._write_queue.task_done()
             if stop or worker_failed:
                 if worker_failed:
-                    with self._count_lock:
-                        while True:
-                            try:
-                                orphan: str | None = self._write_queue.get_nowait()
-                                if orphan is not None:
-                                    try:
-                                        _orphan_obj: dict[str, Any] = json.loads(orphan)
-                                        orphan_pair: tuple[dict[str, Any], str] = (
-                                            _orphan_obj["receipt"],
-                                            _orphan_obj["sieved_content"],
-                                        )
+                    try:
+                        with self._count_lock:
+                            while True:
+                                try:
+                                    orphan: str | None = self._write_queue.get_nowait()
+                                    if orphan is not None:
+                                        try:
+                                            _orphan_obj: dict[str, Any] = json.loads(orphan)
+                                            orphan_pair: tuple[dict[str, Any], str] = (
+                                                _orphan_obj["receipt"],
+                                                _orphan_obj["sieved_content"],
+                                            )
+                                            self._pending -= 1
+                                            self._write_errors.append(orphan_pair)
+                                        except (json.JSONDecodeError, KeyError):
+                                            self._pending -= 1
+                                            if len(self._dead_letter) >= _DEAD_LETTER_MAX:
+                                                del self._dead_letter[0]
+                                            self._dead_letter.append(orphan)
+                                    else:
                                         self._pending -= 1
-                                        self._write_errors.append(orphan_pair)
-                                    except (json.JSONDecodeError, KeyError):
-                                        self._pending -= 1
-                                        if len(self._dead_letter) >= _DEAD_LETTER_MAX:
-                                            del self._dead_letter[0]
-                                        self._dead_letter.append(orphan)
-                                else:
-                                    self._pending -= 1
-                                self._write_queue.task_done()
-                            except _queue.Empty:
-                                break
-                        self._worker_running = False
+                                    self._write_queue.task_done()
+                                except _queue.Empty:
+                                    break
+                    finally:
+                        with self._count_lock:
+                            if self._closed:
+                                try:
+                                    while True:
+                                        self._write_queue.get_nowait()
+                                        self._write_queue.task_done()
+                                except _queue.Empty:
+                                    pass
+                            self._worker_running = False
                 else:
                     with self._count_lock:
                         self._worker_running = False

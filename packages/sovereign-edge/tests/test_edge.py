@@ -187,6 +187,27 @@ class TestSensorFrame:
         with pytest.raises(TypeError):
             frame.d["injected_key"] = "malicious_value"  # type: ignore[index]
 
+    def test_text_content_normalizes_integer_valued_floats(self) -> None:
+        """text_content() must produce identical canonical JSON for payload fields
+        carrying integer values as int vs float(1.0) — cross-runtime numeric
+        type variance (e.g. MicroPython vs CPython JSON serialization) must not
+        produce divergent preimage strings."""
+        raw_int: bytes = json.dumps({
+            "v": 1, "n": _NODE_ID, "t": _TIMESTAMP, "q": 1,
+            "alg": "hmac-sha256", "d": {"value": 1}, "s": "a" * 64,
+        }).encode()
+        raw_float: bytes = json.dumps({
+            "v": 1, "n": _NODE_ID, "t": _TIMESTAMP, "q": 1,
+            "alg": "hmac-sha256", "d": {"value": 1.0}, "s": "a" * 64,
+        }).encode()
+        frame_int = SensorFrame.from_bytes(raw_int)
+        frame_float = SensorFrame.from_bytes(raw_float)
+        assert frame_int.text_content() == frame_float.text_content(), (
+            "text_content() must normalize float(1.0) to int 1 so that "
+            "cross-platform numeric type variance does not produce divergent "
+            "canonical strings and break HMAC preimage stability"
+        )
+
 
 # ---------------------------------------------------------------------------
 # TestOffGridBuffer
@@ -1099,6 +1120,51 @@ class TestEdgePipelineDrainBuffer:
             assert len(committed) == 1, (
                 f"Expected 1 committed receipt after rotation recovery; got {len(committed)} — "
                 "the rotation crash may have silently discarded the buffered entry"
+            )
+        finally:
+            pipeline_b._buffer.close()
+            open_ledger.close()
+
+    def test_drain_buffer_evicts_duplicate_receipt_on_integrity_error(self, tmp_path: Path) -> None:
+        """drain_buffer() must evict a receipt that the ledger rejects with
+        sqlite3.IntegrityError (duplicate payload_hash) without re-buffering it,
+        preventing infinite replay loops where a duplicate is perpetually
+        re-queued on every drain_buffer() invocation."""
+        buffer_path: str = str(tmp_path / ".edge_buffer.jsonl")
+        key_path: str = str(tmp_path / ".keys" / "edge_identity.pem")
+
+        closed_ledger: SovereignLedger = SovereignLedger(":memory:")
+        pipeline_a: EdgePipeline = EdgePipeline(
+            ledger=closed_ledger,
+            signing_key=key_path,
+            buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
+        )
+        closed_ledger.close()
+        try:
+            pipeline_a.process(_seal_frame(tmp_path))
+            pipeline_a._buffer.flush()
+        finally:
+            pipeline_a._buffer.close()
+
+        open_ledger: SovereignLedger = SovereignLedger(str(tmp_path / "recovery.db"))
+        pipeline_b: EdgePipeline = EdgePipeline(
+            ledger=open_ledger,
+            signing_key=key_path,
+            buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
+        )
+        try:
+            with patch.object(
+                open_ledger,
+                "append_receipt",
+                side_effect=sqlite3.IntegrityError("UNIQUE constraint failed"),
+            ):
+                committed: list[str] = pipeline_b.drain_buffer()
+            assert committed == [], "IntegrityError duplicate must not appear in committed list"
+            assert pipeline_b.buffer_depth == 0, (
+                f"buffer_depth={pipeline_b.buffer_depth} — duplicate was re-queued "
+                "instead of being evicted; re-buffering causes infinite replay loops"
             )
         finally:
             pipeline_b._buffer.close()
