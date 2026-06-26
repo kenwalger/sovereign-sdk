@@ -2137,3 +2137,29 @@ class TestEdgePipelineSecureInit:
                 buffer_path=str(tmp_path / ".edge_buffer.jsonl"),
             )
         ledger.close()
+
+    def test_configuration_error_does_not_create_buffer_lock_file(self, tmp_path: Path) -> None:
+        """SovereignConfigurationError must fire before OffGridBuffer is constructed so
+        no .lock file is written when the exception propagates.  Without the constructor
+        ordering fix, the buffer is created before the secret is validated; the lock file
+        is left on disk and permanently blocks every subsequent construction attempt that
+        shares the same buffer_path for the lifetime of the process.
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        ledger: SovereignLedger = SovereignLedger(":memory:")
+        buffer_path: Path = tmp_path / ".edge_buffer.jsonl"
+        lock_path: Path = Path(str(buffer_path) + ".lock")
+        with pytest.raises(SovereignConfigurationError):
+            EdgePipeline(
+                ledger=ledger,
+                signing_key=str(tmp_path / ".keys" / "edge_identity.pem"),
+                buffer_path=str(buffer_path),
+            )
+        assert not lock_path.exists(), (
+            ".lock file must not exist after SovereignConfigurationError from __init__; "
+            "buffer construction must follow, not precede, secret validation so that a "
+            "misconfigured constructor does not orphan a lock on every failed attempt"
+        )
+        ledger.close()

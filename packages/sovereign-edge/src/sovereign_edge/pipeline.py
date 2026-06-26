@@ -3,7 +3,6 @@
 import binascii
 import hashlib
 import hmac as _hmac
-import json
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -114,7 +113,9 @@ class EdgePipeline:
         to enforce secure-by-default initialization.
     :type allow_unauthenticated: bool
     :raises SovereignConfigurationError: If ``sensor_secret`` is empty or ``None`` and
-        ``allow_unauthenticated`` is ``False``.
+        ``allow_unauthenticated`` is ``False``.  This validation fires before
+        :class:`OffGridBuffer` is constructed so no ``.lock`` file is written when the
+        exception propagates.
     """
 
     def __init__(
@@ -125,6 +126,15 @@ class EdgePipeline:
         sensor_secret: str | bytes = b"",
         allow_unauthenticated: bool = False,
     ) -> None:
+        _sensor_secret: bytes = (
+            sensor_secret.encode("utf-8") if isinstance(sensor_secret, str) else sensor_secret
+        )
+        if not _sensor_secret and not allow_unauthenticated:
+            raise SovereignConfigurationError(
+                "EdgePipeline requires a non-empty sensor_secret for HMAC-SHA256 inbound "
+                "frame verification.  To deliberately run without authentication pass "
+                "allow_unauthenticated=True."
+            )
         self._ledger: SovereignLedger = ledger
         self._buffer: OffGridBuffer = OffGridBuffer(buffer_path)
         key_path: Path = Path(signing_key).resolve()
@@ -133,15 +143,7 @@ class EdgePipeline:
         self._key_manager: SovereignKeyManager = SovereignKeyManager(key_dir=key_path.parent)
         self._key_manager.private_key_path = key_path
         self._key_manager.public_key_path = key_path.with_suffix(".pub")
-        self._sensor_secret: bytes = (
-            sensor_secret.encode("utf-8") if isinstance(sensor_secret, str) else sensor_secret
-        )
-        if not self._sensor_secret and not allow_unauthenticated:
-            raise SovereignConfigurationError(
-                "EdgePipeline requires a non-empty sensor_secret for HMAC-SHA256 inbound "
-                "frame verification.  To deliberately run without authentication pass "
-                "allow_unauthenticated=True."
-            )
+        self._sensor_secret: bytes = _sensor_secret
 
     def process(self, frame_bytes: bytes) -> EdgeResult:
         """Parse, sieve, sign, and commit a sealed sensor wire frame.
@@ -165,6 +167,13 @@ class EdgePipeline:
            :exc:`~sovereign_ledger.SovereignStorageError` or ``sqlite3.Error``, the
            receipt is written to the off-grid buffer and ``buffered=True`` is set in
            the returned :class:`EdgeResult`.
+
+        HMAC-SHA256 preimage canonicalization: the ``d``-payload segment of the
+        preimage is produced via :meth:`SensorFrame.text_content`, which applies
+        float-to-int normalization and sort-keyed JSON serialization, guaranteeing
+        that the edge-side digest string matches the sensor-side canonical form
+        regardless of runtime numeric type variance (MicroPython ``1.0`` vs CPython
+        ``1``).
 
         :param frame_bytes: Ultra-minified JSON bytes from
             :meth:`~sovereign_sensor.SovereignEnvelope.seal`.
@@ -202,9 +211,7 @@ class EdgePipeline:
             node_bytes: bytes = frame.n.encode("utf-8")
             time_bytes: bytes = frame.t.encode("utf-8")
             algo_bytes: bytes = frame.alg.encode("utf-8")
-            canonical: str = json.dumps(
-                dict(frame.d), separators=(",", ":"), sort_keys=True, ensure_ascii=False
-            )
+            canonical: str = frame.text_content()
             preimage: bytes = (
                 f"1|{len(node_bytes)}:{frame.n}|{len(time_bytes)}:{frame.t}"
                 f"|{frame.q}|{len(algo_bytes)}:{frame.alg}|{canonical}"
@@ -337,8 +344,14 @@ class EdgePipeline:
         Two-phase commit: :meth:`~sovereign_edge.buffer.OffGridBuffer.drain` atomically
         renames the active buffer to a staging file and returns all entries.  The staging
         file is preserved on disk until this method confirms that every entry is either
-        committed to the ledger or re-queued.  Only when neither the replay loop nor the
-        re-queue pass raises does this method invoke
+        committed to the ledger or re-queued.  After the re-queue pass completes,
+        :meth:`~sovereign_edge.buffer.OffGridBuffer.flush` is called to block until every
+        re-queued entry has been fsync'd to the active buffer file by the background
+        writer thread.  This guarantees that no re-queued receipt exists only in the
+        in-memory queue at the point when :meth:`~sovereign_edge.buffer.OffGridBuffer.commit_drain`
+        deletes the staging file — the staging file is never removed while its counterpart
+        re-queued entries are still pending a durable write.  Only when neither the replay
+        loop nor the re-queue pass raises does this method invoke
         :meth:`~sovereign_edge.buffer.OffGridBuffer.commit_drain` to delete the staging
         file.  If any exception is raised (crash, push failure, OSError) the staging file
         survives, providing a byte-exact recovery artefact for the next
@@ -418,6 +431,7 @@ class EdgePipeline:
                 "call drain() on the buffer to recover pending entries"
             )
 
+        self._buffer.flush()
         self._buffer.commit_drain()
         return committed
 

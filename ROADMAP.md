@@ -814,11 +814,29 @@ committed = pipeline.drain_buffer()
   threads; asserts all threads join within 5 s (deadlock sentinel) and
   ``buf._pending == 0`` after completion, directly validating the sentinel-decrement fix.
   ``TestOffGridBufferWriteErrors`` grows from 11 to 12 cases.
-* [x] 95-case desktop validation test suite across nine classes (`TestSensorFrame`: 16;
+* [x] `EdgePipeline.__init__()` — secret validation before buffer construction:
+  ``_sensor_secret`` computed and ``SovereignConfigurationError`` guard fired at the very
+  top of ``__init__`` before ``OffGridBuffer(buffer_path)`` is invoked; previously the
+  buffer was constructed first, leaving an orphaned ``.lock`` file on validation failure.
+  ``test_configuration_error_does_not_create_buffer_lock_file``
+  (``TestEdgePipelineSecureInit``): asserts lock absent after ``SovereignConfigurationError``.
+  ``TestEdgePipelineSecureInit`` grows from 4 to 5 cases.
+* [x] `EdgePipeline.drain_buffer()` — ``flush()`` before ``commit_drain()``:
+  after the re-queue pass, ``self._buffer.flush()`` blocks until all re-queued entries
+  are fsync'd to the active JSONL file before ``commit_drain()`` deletes the staging
+  backup; closes the window where a process exit between successful ``push()`` calls
+  and ``commit_drain()`` left re-queued entries only in the in-memory queue.
+* [x] `SensorFrame.text_content()` — compact separator; HMAC canonical unified:
+  ``text_content()`` now uses ``separators=(",", ":")`` (compact, no spaces), matching
+  ``SovereignEnvelope.seal()``'s preimage canonical form; ``pipeline.process()`` replaces
+  the inline ``json.dumps(dict(frame.d), ...)`` with ``frame.text_content()`` so the HMAC
+  preimage and sieve input share a single normalized, compact canonical; unused
+  ``import json`` removed from ``pipeline.py``.
+* [x] 96-case desktop validation test suite across nine classes (`TestSensorFrame`: 16;
   `TestOffGridBuffer`: 12; `TestEdgePipelineProcess`: 19; `TestEdgePipelineBuffering`: 8;
   `TestEdgePipelineDrainBuffer`: 12; `TestOffGridBufferAsync`: 8;
   `TestEdgePipelineSieveFault`: 4; `TestOffGridBufferWriteErrors`: 12;
-  `TestEdgePipelineSecureInit`: 4) covering all
+  `TestEdgePipelineSecureInit`: 5) covering all
   fortification scenarios: non-blocking `push()` with immediate `size` reporting,
   chronological `drain()` sort by sequence, non-integer sequence value tolerance,
   `_committed` counter accuracy after drain, sieve fault fallback with raw text and
@@ -844,10 +862,12 @@ committed = pipeline.drain_buffer()
   corrupt-staging quarantine with ``SovereignStorageError`` boot-time alert,
   crash-restart ``IntegrityError`` deduplication end-to-end integration,
   lock-file cleanup on staging recovery failure enabling immediate retry,
-  evacuation-finally ``_pending`` decrement for racing-close sentinel eliminating
-  flush stall, and direct duplicate eviction in ``process()`` matching drain-buffer
-  eviction contract.
-  **95 passed, 0 skipped (edge); 384 passed, 1 skipped (workspace).**
+  evacuation-finally ``_pending`` decrement for racing-close sentinel,
+  direct duplicate eviction in ``process()`` matching drain-buffer eviction contract,
+  no lock-file orphan on ``SovereignConfigurationError`` constructor failure,
+  re-queue durability flush before staging commit, and unified compact HMAC
+  canonical via ``text_content()`` with separator alignment.
+  **96 passed, 0 skipped (edge); 385 passed, 1 skipped (workspace).**
 
 ---
 

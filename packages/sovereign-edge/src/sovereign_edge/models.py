@@ -118,24 +118,35 @@ class SensorFrame:
         )
 
     def text_content(self) -> str:
-        """Return the canonical text representation of the sensor payload for sieve processing.
+        """Return the canonical text representation of the sensor payload.
 
-        Serializes the ``d`` observation mapping to deterministic, sort-keyed,
-        non-ASCII-escaped JSON so that the sieve layer receives a consistent
-        string regardless of insertion-order variance in the originating payload.
+        Serializes the ``d`` observation mapping to deterministic, compact
+        (``separators=(",", ":")``, no inter-token whitespace), sort-keyed,
+        non-ASCII-escaped JSON.  This canonical form is used for two purposes:
+        (1) as the sieve-layer input to :func:`~sovereign_sieve.sieve_with_metrics`,
+        and (2) as the ``d``-segment of the HMAC-SHA256 preimage during inbound
+        signature verification in :meth:`EdgePipeline.process`.  Using the same
+        compact separators for both guarantees 100 % string-canonicalization
+        alignment with the sensor-side :func:`json.dumps` call that produced the
+        original HMAC digest.
+
         :func:`_canonicalize_payload` normalizes integer-valued floats (``1.0`` →
         ``1``) before serialization so that cross-runtime numeric type variance —
         for example MicroPython emitting ``1.0`` where CPython would emit ``1`` —
-        does not produce divergent canonical strings and break sieve-layer
-        consistency.  ``dict(self.d)`` converts the
-        :class:`~types.MappingProxyType` back to a plain dict before passing to
-        :func:`json.dumps`, whose C encoder only serializes native :class:`dict`
-        instances.
+        does not produce divergent canonical strings.  ``dict(self.d)`` converts
+        the :class:`~types.MappingProxyType` back to a plain dict before passing
+        to :func:`json.dumps`, whose C encoder only serializes native
+        :class:`dict` instances.
 
-        :return: Minified JSON string representation of the observation payload.
+        :return: Compact minified JSON string representation of the observation payload.
         :rtype: str
         """
-        return json.dumps(_canonicalize_payload(dict(self.d)), sort_keys=True, ensure_ascii=False)
+        return json.dumps(
+            _canonicalize_payload(dict(self.d)),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
 
 
 @dataclass

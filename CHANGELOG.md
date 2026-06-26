@@ -1136,6 +1136,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``TestOffGridBufferWriteErrors`` grows from 11 to 12 cases.
   **Suite: 95 edge tests, 384 workspace tests passed, 1 skipped (POSIX fchmod).**
 
+- **`EdgePipeline.__init__()` — secret validation moved before `OffGridBuffer` construction**
+  (`pipeline.py`): ``self._sensor_secret`` is now computed and the
+  ``SovereignConfigurationError`` guard fires as the very first action in ``__init__``,
+  before ``OffGridBuffer(buffer_path)`` is called.  Previously, the buffer was constructed
+  first; any subsequent ``SovereignConfigurationError`` propagated with the buffer's
+  ``.lock`` file already written to disk, permanently blocking every subsequent
+  construction attempt on the same path for the process lifetime.  The temporary
+  ``_sensor_secret`` local is computed, validated, and then assigned to
+  ``self._sensor_secret`` after the buffer and key manager are safely constructed.
+  ``:raises SovereignConfigurationError:`` docstring updated to state that the validation
+  fires before buffer construction.
+  ``test_configuration_error_does_not_create_buffer_lock_file``
+  (``TestEdgePipelineSecureInit``): asserts that no ``.lock`` file exists after
+  ``SovereignConfigurationError`` propagates from ``__init__``, then confirms a second
+  construction attempt on the same path succeeds.
+  ``TestEdgePipelineSecureInit`` grows from 4 to 5 cases.
+
+- **`EdgePipeline.drain_buffer()` — `flush()` before `commit_drain()` for re-queue
+  durability** (`pipeline.py`): After the re-queue pass pushes entries back into the
+  off-grid buffer, ``self._buffer.flush()`` is now called before
+  ``self._buffer.commit_drain()``.  This blocks until the background writer thread has
+  fsync'd every re-queued entry to the active JSONL file.  Without the flush, there is a
+  window between the successful ``push()`` calls (which only enqueue entries) and the
+  ``commit_drain()`` that deletes the staging file; a process exit in that window leaves
+  re-queued entries only in the in-memory queue with no on-disk copy and no staging file
+  to recover from.  The ``drain_buffer()`` two-phase-commit docstring paragraph is updated
+  to document the flush guarantee.
+
+- **`SensorFrame.text_content()` — compact separator added; `EdgePipeline.process()` uses
+  `frame.text_content()` for HMAC preimage canonical** (`models.py`, `pipeline.py`):
+  ``text_content()`` previously called ``json.dumps(...)`` without ``separators=(",",
+  ":")``, producing spaced output (``{"sensor": "temperature", ...}``).  The sensor's
+  ``SovereignEnvelope.seal()`` uses ``separators=(",", ":")`` for the HMAC preimage
+  canonical, producing compact output (``{"sensor":"temperature",...}``).  This divergence
+  meant that using ``frame.text_content()`` as the edge-side HMAC canonical would always
+  produce a digest mismatch.  ``separators=(",", ":")`` is now added to ``text_content()``
+  to align its output with the sensor's canonical form.  ``pipeline.process()`` then
+  replaces the inline ``json.dumps(dict(frame.d), ...)`` with ``frame.text_content()``
+  so the same normalized, compact canonical function is used for both the HMAC preimage
+  and the sieve-layer input, eliminating the dual-path divergence.  The now-unused
+  ``import json`` is removed from ``pipeline.py``.  ``text_content()`` docstring updated to
+  document compact separators and dual-purpose use.
+  **Suite: 96 edge tests, 385 workspace tests passed, 1 skipped (POSIX fchmod).**
+
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing
   sensor observations into versioned, tamper-evident, minified JSON transmission envelopes with
