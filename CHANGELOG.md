@@ -960,6 +960,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   10 cases.
   **Suite: 89 edge tests, 378 workspace tests passed, 1 skipped (POSIX fchmod).**
 
+- **`OffGridBuffer` — two-phase drain with non-destructive staging rotation**
+  (`buffer.py`): ``drain()`` previously atomically replaced the active buffer file
+  with an empty temp file (``tempfile`` + ``os.replace``), clearing all entries from
+  disk before returning them to the caller.  If the calling ``drain_buffer()`` crashed
+  mid-replay (SIGKILL, power loss, unhandled exception), any entries that had been
+  returned from ``drain()`` but not yet committed to the ledger were permanently lost
+  — the only surviving copy was in local Python variables that were destroyed with the
+  process.  The fix replaces the destructive clear with a non-destructive rename:
+  ``os.replace(self._path, self._staging_path)`` atomically promotes the active buffer
+  to ``{path}.staging``.  A new :meth:`commit_drain` method deletes the staging file
+  once the caller confirms all entries are committed or re-queued.  If ``commit_drain``
+  is never called, the staging file survives process exit and is automatically recovered
+  by :meth:`_recover_staging` on the next :meth:`__init__` call (rename to active if
+  only staging exists; temp-file merge if both exist).  The ``tempfile`` import is no
+  longer used in ``drain()`` (only in ``_recover_staging`` for the merge branch).
+
+- **`OffGridBuffer` — exclusive instance lock prevents concurrent path collisions**
+  (`buffer.py`): A new :meth:`_acquire_buffer_lock` method, called at the end of
+  ``__init__`` before the background writer starts, creates a ``.lock`` file adjacent
+  to the buffer path containing the current process PID via ``open(lock_path, 'x')``
+  (exclusive create).  If the lock file already exists, the owning PID is read and
+  tested for liveness via ``os.kill(pid, 0)``: a stale lock (dead process) is
+  overwritten; a live lock raises :exc:`RuntimeError` immediately so the caller
+  discovers the path collision at construction time rather than silently interleaving
+  writes and corrupting the journal.  The lock file is deleted in :meth:`close` on a
+  clean shutdown (no un-journaled ``_write_errors``).  Existing write-error tests that
+  removed the buffer directory via ``buf_dir.rmdir()`` are updated to
+  ``(buf_dir / "buffer.jsonl.lock").unlink()`` first, since ``__init__`` now writes the
+  lock file into the directory.
+
+- **`EdgePipeline.drain_buffer()` — two-phase commit via `commit_drain()`**
+  (`pipeline.py`): :meth:`commit_drain` is called on ``self._buffer`` only when the
+  replay loop and re-queue pass both complete without raising.  Any exception
+  propagating out of ``drain_buffer()`` — including a mid-replay crash, push failure,
+  or ``OSError`` from ``drain()`` — leaves the staging file intact.  A subsequent
+  ``drain_buffer()`` call (or the next process boot via ``_recover_staging``) can
+  therefore recover all entries that were not yet confirmed without data loss.
+
+- **`TestEdgePipelineDrainBuffer` — `test_drain_buffer_preserves_staging_file_on_mid_replay_crash`**
+  (`test_edge.py`): Buffers two receipts via a closed ledger on ``pipeline_a``, then
+  opens a recovery pipeline ``pipeline_b`` and patches ``append_receipt`` to succeed on
+  the first entry and raise ``RuntimeError`` on the second.  After ``drain_buffer()``
+  raises, asserts that the ``.staging`` file exists and contains both original JSONL
+  lines — verifying that ``commit_drain()`` was not called on the error path.  A third
+  phase calls ``drain_buffer()`` again (no patch) and asserts exactly one committed
+  receipt is returned and the staging file is subsequently deleted.
+  ``TestEdgePipelineDrainBuffer`` grows from 10 to 11 cases.
+  **Suite: 90 edge tests, 379 workspace tests passed, 1 skipped (POSIX fchmod).**
+
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing
   sensor observations into versioned, tamper-evident, minified JSON transmission envelopes with

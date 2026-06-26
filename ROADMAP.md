@@ -741,9 +741,26 @@ committed = pipeline.drain_buffer()
   ``_worker_running = True``, causing a subsequent ``close()`` to inject a ``None``
   sentinel into the abandoned queue with no consumer, stalling any future
   ``queue.join()``.
-* [x] 89-case desktop validation test suite across nine classes (`TestSensorFrame`: 16;
+* [x] `OffGridBuffer` — two-phase drain with non-destructive staging rotation:
+  ``drain()`` renames the active buffer to ``{path}.staging`` via ``os.replace`` instead
+  of atomically clearing it with an empty temp file; new ``commit_drain()`` method deletes
+  staging only after the caller confirms all entries are committed or re-queued;
+  ``_recover_staging()`` in ``__init__`` restores a leftover staging file (rename-back if
+  only staging exists; temp-file merge if both exist) before the worker thread starts;
+  ``drain_buffer()`` calls ``commit_drain()`` only on the success path, so any exception
+  leaves staging intact for recovery.  ``test_drain_buffer_preserves_staging_file_on_mid_replay_crash``
+  (``TestEdgePipelineDrainBuffer``) buffers 2 receipts, crashes the replay loop on entry 2,
+  asserts ``.staging`` exists with both JSONL lines, then asserts a second ``drain_buffer()``
+  commits entry 2 and deletes staging.  ``TestEdgePipelineDrainBuffer`` grows from 10 to 11 cases.
+* [x] `OffGridBuffer` — exclusive instance lock prevents concurrent path collisions:
+  ``_acquire_buffer_lock()`` in ``__init__`` creates ``{path}.lock`` containing the
+  current PID via exclusive ``open(..., 'x')``; stale locks (dead PID via ``os.kill``)
+  are stolen; live locks raise ``RuntimeError`` at construction time; lock is released by
+  ``close()`` on clean shutdown; write-error tests updated to unlink the lock file before
+  ``buf_dir.rmdir()``.
+* [x] 90-case desktop validation test suite across nine classes (`TestSensorFrame`: 16;
   `TestOffGridBuffer`: 10; `TestEdgePipelineProcess`: 18; `TestEdgePipelineBuffering`: 8;
-  `TestEdgePipelineDrainBuffer`: 10; `TestOffGridBufferAsync`: 8;
+  `TestEdgePipelineDrainBuffer`: 11; `TestOffGridBufferAsync`: 8;
   `TestEdgePipelineSieveFault`: 4; `TestOffGridBufferWriteErrors`: 11;
   `TestEdgePipelineSecureInit`: 4) covering all
   fortification scenarios: non-blocking `push()` with immediate `size` reporting,
@@ -766,8 +783,9 @@ committed = pipeline.drain_buffer()
   ``OSError`` propagation, drain_buffer cascading double-fault with
   ``uncommitted_receipts`` preservation, cross-runtime float canonicalization in
   ``text_content()``, duplicate ledger-entry eviction on ``sqlite3.IntegrityError``,
-  and close-phase evacuation ``try/finally`` sentinel guard.
-  **89 passed, 0 skipped (edge); 378 passed, 1 skipped (workspace).**
+  close-phase evacuation ``try/finally`` sentinel guard, two-phase non-destructive
+  drain with ``.staging`` crash recovery, and exclusive instance-lock collision guard.
+  **90 passed, 0 skipped (edge); 379 passed, 1 skipped (workspace).**
 
 ---
 

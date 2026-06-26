@@ -313,6 +313,17 @@ class EdgePipeline:
         unrecoverable receipt dicts attached via :attr:`~SovereignDoubleFaultError.uncommitted_receipts`
         and the crash exception preserved as :attr:`~SovereignDoubleFaultError.ledger_error`.
 
+        Two-phase commit: :meth:`~sovereign_edge.buffer.OffGridBuffer.drain` atomically
+        renames the active buffer to a staging file and returns all entries.  The staging
+        file is preserved on disk until this method confirms that every entry is either
+        committed to the ledger or re-queued.  Only when neither the replay loop nor the
+        re-queue pass raises does this method invoke
+        :meth:`~sovereign_edge.buffer.OffGridBuffer.commit_drain` to delete the staging
+        file.  If any exception is raised (crash, push failure, OSError) the staging file
+        survives, providing a byte-exact recovery artefact for the next
+        :meth:`drain_buffer` pass or the next process boot via
+        :meth:`~sovereign_edge.buffer.OffGridBuffer._recover_staging`.
+
         :return: ``payload_hash`` strings for every receipt successfully committed to
             the ledger on this drain pass.  Entries that could not be committed are
             re-queued and excluded from the returned list.
@@ -386,6 +397,7 @@ class EdgePipeline:
                 "call drain() on the buffer to recover pending entries"
             )
 
+        self._buffer.commit_drain()
         return committed
 
     def close(self) -> None:

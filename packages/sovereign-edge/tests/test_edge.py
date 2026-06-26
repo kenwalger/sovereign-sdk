@@ -1170,6 +1170,84 @@ class TestEdgePipelineDrainBuffer:
             pipeline_b._buffer.close()
             open_ledger.close()
 
+    def test_drain_buffer_preserves_staging_file_on_mid_replay_crash(self, tmp_path: Path) -> None:
+        """drain_buffer() must preserve the .staging file when an exception aborts the
+        ledger replay loop mid-stream.  commit_drain() must not be called on any error
+        path so that un-replayed entries survive a hard crash and can be recovered on
+        the subsequent drain_buffer() invocation."""
+        buffer_path: str = str(tmp_path / ".edge_buffer.jsonl")
+        staging_path: Path = Path(buffer_path + ".staging")
+        key_path: str = str(tmp_path / ".keys" / "edge_identity.pem")
+
+        # Phase 1: buffer two receipts via a closed ledger so both land on disk.
+        closed_ledger: SovereignLedger = SovereignLedger(":memory:")
+        pipeline_a: EdgePipeline = EdgePipeline(
+            ledger=closed_ledger,
+            signing_key=key_path,
+            buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
+        )
+        closed_ledger.close()
+        try:
+            pipeline_a.process(_seal_frame(tmp_path))
+            pipeline_a.process(_seal_frame(tmp_path))
+            pipeline_a._buffer.flush()
+        finally:
+            pipeline_a._buffer.close()
+
+        # Phase 2: crash the replay loop after the first entry is committed.
+        # The staging file must survive because commit_drain() must not be called.
+        open_ledger: SovereignLedger = SovereignLedger(str(tmp_path / "recovery.db"))
+        pipeline_b: EdgePipeline = EdgePipeline(
+            ledger=open_ledger,
+            signing_key=key_path,
+            buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
+        )
+        try:
+            call_count: list[int] = [0]
+            original_append = open_ledger.append_receipt
+
+            def _crash_on_second(
+                receipt_dict: dict[str, Any], sieved_content: str
+            ) -> str:
+                call_count[0] += 1
+                if call_count[0] >= 2:
+                    raise RuntimeError("simulated mid-replay crash")
+                return original_append(receipt_dict, sieved_content)
+
+            with patch.object(open_ledger, "append_receipt", side_effect=_crash_on_second):
+                with pytest.raises(RuntimeError, match="simulated mid-replay crash"):
+                    pipeline_b.drain_buffer()
+
+            assert staging_path.exists(), (
+                "staging file must survive a mid-replay crash; commit_drain() must only "
+                "be called when all entries are confirmed committed or re-queued"
+            )
+            staging_lines: list[str] = [
+                ln for ln in staging_path.read_text(encoding="utf-8").splitlines()
+                if ln.strip()
+            ]
+            assert len(staging_lines) == 2, (
+                f"staging file must contain both original entries (got {len(staging_lines)}); "
+                "un-replayed rows must not be vaporized on a mid-stream crash"
+            )
+
+            # Phase 3: verify that the second drain_buffer() recovers and commits
+            # the re-queued entry (entry 1) that was re-buffered during the crash path.
+            pipeline_b._buffer.flush()
+            recovered: list[str] = pipeline_b.drain_buffer()
+            assert len(recovered) == 1, (
+                f"second drain_buffer() must commit the surviving re-queued entry; "
+                f"got {len(recovered)} committed entries"
+            )
+            assert not staging_path.exists(), (
+                "staging file must be deleted by commit_drain() after successful replay"
+            )
+        finally:
+            pipeline_b._buffer.close()
+            open_ledger.close()
+
 
 # ---------------------------------------------------------------------------
 # TestOffGridBufferAsync
@@ -1450,7 +1528,8 @@ class TestOffGridBufferWriteErrors:
         afterwards forces FileNotFoundError (an OSError subclass) on every write attempt."""
         buf_dir: Path = tmp_path / "buf_dir"
         buf = OffGridBuffer(str(buf_dir / "buffer.jsonl"))
-        buf_dir.rmdir()  # remove the directory __init__ just created to trigger write failure
+        (buf_dir / "buffer.jsonl.lock").unlink()  # remove lock so rmdir() can proceed
+        buf_dir.rmdir()  # remove the directory to trigger FileNotFoundError on every write
         buf.push(self._make_receipt("A"), "content A")
         buf.flush()
         assert buf.write_error_count == 1
@@ -1462,6 +1541,7 @@ class TestOffGridBufferWriteErrors:
         disk failure; the entry that could not be fsync'd must not vanish from the tally."""
         buf_dir: Path = tmp_path / "buf_dir"
         buf = OffGridBuffer(str(buf_dir / "buffer.jsonl"))
+        (buf_dir / "buffer.jsonl.lock").unlink()
         buf_dir.rmdir()
         buf.push(self._make_receipt("A"), "content A")
         buf.flush()
@@ -1476,6 +1556,7 @@ class TestOffGridBufferWriteErrors:
         buf_dir: Path = tmp_path / "buf_dir"
         receipt = self._make_receipt("A")
         buf = OffGridBuffer(str(buf_dir / "buffer.jsonl"))
+        (buf_dir / "buffer.jsonl.lock").unlink()
         buf_dir.rmdir()
         buf.push(receipt, "content A")
         buf.flush()

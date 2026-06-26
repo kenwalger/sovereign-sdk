@@ -81,6 +81,8 @@ class OffGridBuffer:
     def __init__(self, path: str) -> None:
         self._path: Path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._staging_path: Path = Path(str(path) + ".staging")
+        self._lock_path: Path = Path(str(path) + ".lock")
         self._write_queue: _queue.Queue[str | None] = _queue.Queue()
         self._pending: int = 0
         self._committed: int = 0
@@ -92,12 +94,111 @@ class OffGridBuffer:
         self._drain_read_failed: bool = False
         self._count_lock: threading.Lock = threading.Lock()
         self._drain_lock: threading.Lock = threading.Lock()
+        self._acquire_buffer_lock()
+        self._recover_staging()
         self._worker_thread: threading.Thread = threading.Thread(
             target=self._disk_writer,
             daemon=True,
             name="sovereign-edge-buffer-writer",
         )
         self._worker_thread.start()
+
+    def _acquire_buffer_lock(self) -> None:
+        """Acquire an exclusive instance lock for the buffer file path.
+
+        Creates a ``.lock`` file adjacent to the buffer containing the current
+        process identifier.  If the lock file already exists the owning PID is read
+        and tested for liveness via :func:`os.kill` with signal ``0``.  A stale lock
+        whose owner process no longer exists is overwritten with the current PID.
+        If the owner is still running, :exc:`RuntimeError` is raised immediately to
+        prevent two :class:`OffGridBuffer` instances from writing concurrently to the
+        same JSONL file, which would produce interleaved lines and corrupt the journal.
+        The lock is released by :meth:`close`.
+
+        :return: None
+        :rtype: None
+        :raises RuntimeError: If the buffer path is already held by a live process.
+        """
+        try:
+            with open(self._lock_path, "x", encoding="utf-8") as lf:
+                lf.write(str(os.getpid()))
+            return
+        except FileExistsError:
+            pass
+        try:
+            held_pid: int = int(self._lock_path.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            self._lock_path.write_text(str(os.getpid()), encoding="utf-8")
+            return
+        try:
+            os.kill(held_pid, 0)
+        except ProcessLookupError:
+            self._lock_path.write_text(str(os.getpid()), encoding="utf-8")
+            return
+        except OSError:
+            self._lock_path.write_text(str(os.getpid()), encoding="utf-8")
+            return
+        raise RuntimeError(
+            f"OffGridBuffer path '{self._path}' is already held by process {held_pid}; "
+            "each instance must use a distinct buffer_path"
+        )
+
+    def _recover_staging(self) -> None:
+        """Recover a staging file left by a prior drain cycle that did not complete.
+
+        A ``.staging`` file is created by :meth:`drain` when the active buffer is
+        atomically rotated out for replay.  Under normal operation, the calling
+        pipeline deletes it via :meth:`commit_drain` after confirming all entries are
+        committed.  If the process exits before :meth:`commit_drain` is called (power
+        loss, SIGKILL, unhandled exception), the staging file survives on disk.
+
+        This method restores the staged entries into the active buffer path before the
+        background writer thread starts:
+
+        * **Only staging exists** (active absent): ``os.replace`` promotes it atomically
+          to the active path.
+        * **Both exist**: staging content (older entries) is prepended to the active
+          content (newer entries) via a temp-file atomic merge; the staging file is then
+          unlinked.  If the merge fails, both files are left intact for manual recovery.
+
+        :return: None
+        :rtype: None
+        """
+        if not self._staging_path.exists():
+            return
+        if not self._path.exists():
+            try:
+                os.replace(self._staging_path, self._path)
+            except OSError:
+                pass
+            return
+        tmp_path: str = ""
+        try:
+            staging_text: str = self._staging_path.read_text(encoding="utf-8")
+            active_text: str = self._path.read_text(encoding="utf-8")
+            if staging_text and not staging_text.endswith("\n"):
+                staging_text += "\n"
+            with tempfile.NamedTemporaryFile(
+                dir=self._path.parent,
+                delete=False,
+                suffix=".tmp",
+                mode="w",
+                encoding="utf-8",
+            ) as tmp_fh:
+                tmp_path = tmp_fh.name
+                tmp_fh.write(staging_text + active_text)
+            os.replace(tmp_path, self._path)
+            tmp_path = ""
+            try:
+                self._staging_path.unlink()
+            except OSError:
+                pass
+        except OSError:
+            if tmp_path:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
     def _disk_writer(self) -> None:
         """Background daemon worker that serializes JSONL writes to disk.
@@ -311,18 +412,18 @@ class OffGridBuffer:
         catches :exc:`TypeError` and :exc:`ValueError` so a non-numeric sequence value
         in a corrupted entry falls back to ``0`` rather than aborting the entire drain
         pass.
-        The buffer file is then replaced with an empty staging file via
-        ``tempfile`` → ``os.replace`` to close the double-replay window.  If the atomic
-        promotion succeeds, ``_committed`` is decremented by the total count of non-blank
-        disk lines (valid entries plus dead-letter lines) so that every byte footprint
-        removed from disk is reflected in the counter — including lines whose payload was
-        successfully fsync'd (incrementing ``_committed``) but subsequently corrupted on
-        disk; basing the decrement on valid-only parse count would leave ``_committed``
-        above zero for an empty file.  ``_write_errors`` is also cleared on success;
-        write-error entries never accumulated in ``_committed`` so they need no counter
-        adjustment.  If the atomic promotion fails, the :exc:`OSError` is re-raised after
-        cleaning up the staging temp file; ``_write_errors`` and ``_committed`` are left
-        intact for the next drain pass so that no entry is permanently discarded.
+        The active buffer file is then atomically renamed to the staging path
+        (``{path}.staging``) via :func:`os.replace`, preserving all entries in the
+        staging file until the caller invokes :meth:`commit_drain` to confirm ledger
+        acceptance.  This two-phase protocol ensures that a process exit between
+        :meth:`drain` and :meth:`commit_drain` — whether from a SIGKILL, power loss,
+        or an unhandled exception — leaves the staged entries intact for recovery on the
+        next :meth:`__init__` call via :meth:`_recover_staging`.  ``_committed`` is
+        decremented by the total count of non-blank disk lines (valid entries plus
+        dead-letter lines) so that every byte footprint removed from the active file is
+        reflected in the counter; ``_write_errors`` is cleared on success.  If
+        :func:`os.replace` raises :exc:`OSError`, the active file is unchanged, the
+        exception re-raises, and neither counter is modified.
         Disk lines that cannot be parsed as valid JSON or that are missing the
         ``receipt`` / ``sieved_content`` keys are quarantined in ``_dead_letter`` under
         the count lock rather than silently dropped; :attr:`dead_letter_count` reflects
@@ -334,10 +435,10 @@ class OffGridBuffer:
         :raises OSError: If the buffer file exists but :meth:`pathlib.Path.read_text`
             raises :exc:`OSError` (e.g., permissions change, device removal, filesystem
             error after existence was confirmed) — :attr:`drain_read_failed` is set to
-            ``True`` under the count lock before re-raising; or if the atomic
-            ``os.replace`` call during the file rotation phase raises :exc:`OSError`
-            (e.g., cross-device rename, full disk, or filesystem unmount mid-drain) —
-            on-disk entries and ``_write_errors`` are preserved so the caller can retry.
+            ``True`` under the count lock before re-raising; or if :func:`os.replace`
+            raises :exc:`OSError` during the active-to-staging rename (e.g., cross-device
+            link, full disk, filesystem unmount mid-drain) — the active file is unchanged
+            and ``_write_errors`` / ``_committed`` are preserved so the caller can retry.
         """
         with self._drain_lock:
             self.flush()
@@ -389,31 +490,40 @@ class OffGridBuffer:
 
             file_entry_count: int = disk_line_count
 
-            tmp_path: str = ""
-            try:
-                with tempfile.NamedTemporaryFile(
-                    dir=self._path.parent,
-                    delete=False,
-                    suffix=".tmp",
-                    mode="w",
-                    encoding="utf-8",
-                ) as tmp_fh:
-                    tmp_path = tmp_fh.name
-                os.replace(tmp_path, self._path)
-                tmp_path = ""
-            except OSError:
-                if tmp_path:
-                    try:
-                        os.remove(tmp_path)
-                    except OSError:
-                        pass
-                raise
+            os.replace(self._path, self._staging_path)
 
             with self._count_lock:
                 self._committed = max(0, self._committed - file_entry_count)
                 self._write_errors.clear()
 
             return entries
+
+    def commit_drain(self) -> None:
+        """Delete the staging file produced by a preceding :meth:`drain` call.
+
+        Completes the two-phase drain protocol:
+
+        1. :meth:`drain` atomically renames the active buffer to ``{path}.staging``
+           and returns all entries.  The staging file preserves a byte-exact copy of
+           the drained entries so that a process exit before ledger acceptance is
+           confirmed leaves those entries intact for recovery on the next
+           :meth:`__init__` call.
+
+        2. Once the caller has confirmed every drained entry is either committed to
+           the ledger or re-queued to the buffer, it calls this method to delete the
+           staging file and complete the transaction.
+
+        If the staging file does not exist — either because the active buffer was
+        empty when :meth:`drain` was called (no rotation occurred) or because a prior
+        call already deleted it — this method returns silently.
+
+        :return: None
+        :rtype: None
+        """
+        try:
+            self._staging_path.unlink()
+        except FileNotFoundError:
+            pass
 
     def close(self) -> None:
         """Flush all pending writes and terminate the background worker thread.
@@ -485,6 +595,10 @@ class OffGridBuffer:
                 f"receipt{'s' if error_count != 1 else ''} in _write_errors; "
                 "call drain() before close() to recover pending entries"
             )
+        try:
+            self._lock_path.unlink()
+        except OSError:
+            pass
 
     @property
     def size(self) -> int:
