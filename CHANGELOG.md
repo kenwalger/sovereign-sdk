@@ -93,8 +93,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     teardown on all 16 previously unclosed `OffGridBuffer` instances in `TestOffGridBuffer`
     and `TestOffGridBufferAsync`, idempotent `OffGridBuffer.close()` guarded by
     `_worker_thread.is_alive()`, HMAC hex case normalisation via `frame.s.lower()`,
-    tightened sieve-fault exception boundary `except (ValueError, KeyError, RuntimeError,
-    AttributeError, TypeError):`, and `test_close_is_idempotent` confirming three
+    broadened sieve-fault fallback to `except Exception:` (naturally excludes
+    ``BaseException`` subclasses), and `test_close_is_idempotent` confirming three
     consecutive `pipeline.close()` calls complete without deadlock,
     `SensorFrame.from_bytes()` protocol version gate rejecting ``v != 1``,
     `OffGridBuffer._dead_letter` capped at 100 entries with oldest-first eviction,
@@ -413,15 +413,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hex characters in ``frame.s`` is accepted without a spurious mismatch.  ``compare_digest``
   retains its constant-time guarantee because the normalised strings have the same length.
 
-- **`EdgePipeline.process()` — sieve-fault exception boundary tightened** (`pipeline.py`):
-  The broad ``except Exception:`` guard around ``sieve_with_metrics(raw_text)`` was replaced
-  with ``except (ValueError, KeyError, RuntimeError, AttributeError, TypeError):``.  The
-  previous catch-all silently swallowed host-level exhaustion signals — ``MemoryError``,
-  ``SystemExit``, and ``KeyboardInterrupt`` — stamping ``sieve_fault=True`` on the receipt
-  and continuing into the sign/commit path even as the Python runtime was entering an
-  unrecoverable state.  The explicit tuple catches the realistic failure surface of
-  ``sieve_with_metrics`` (parse, key, and runtime faults) while allowing fatal signals to
-  propagate unobstructed.
+- **`EdgePipeline.process()` — sieve-fault fallback guard broadened to `except Exception:`** (`pipeline.py`):
+  The narrow ``except (ValueError, KeyError, RuntimeError, AttributeError, TypeError):``
+  tuple around ``sieve_with_metrics(raw_text)`` is replaced with ``except Exception:``.
+  ``SystemExit`` and ``KeyboardInterrupt`` both inherit from ``BaseException`` — not
+  ``Exception`` — so the broader guard naturally excludes all host-level abort signals
+  without an explicit re-raise.  The previous tuple also propagated ``ArithmeticError``,
+  ``LookupError``, ``IndexError``, and any other ``Exception`` subclass raised by an
+  anomalous third-party sieve plugin, causing the calling frame to be dropped rather
+  than engaging the ``sieve_fault=True`` fallback sign/commit path.  ``except Exception:``
+  closes this gap: every ``Exception`` subclass triggers the safe fallback; every
+  ``BaseException`` that is not also an ``Exception`` propagates unobstructed.
 
 - **`EdgePipeline.process()` — algorithm-gate hard-block when `sensor_secret` is provisioned**
   (`pipeline.py`): The previous condition ``if self._sensor_secret and frame.alg ==
@@ -714,7 +716,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (SovereignStorageError, sqlite3.Error))`` assertion verifies that the root-cause ledger
   exception is preserved on the ``SovereignDoubleFaultError`` instance, exercising the
   full two-tier failure chain.  ``import sqlite3`` added to the test-file stdlib imports.
-  **Suite: 79 edge tests, 368 workspace tests passed, 1 skipped.**
+  **Suite: 81 edge tests, 370 workspace tests passed, 1 skipped (POSIX fchmod).**
+
+- **`OffGridBuffer.close()` — OS-exit-gap sentinel guard: `_worker_running` flag replaces
+  `is_alive()` in the liveness check** (`buffer.py`): After a non-``OSError`` worker crash
+  the Python thread function returns but the OS may not immediately unregister the thread;
+  ``is_alive()`` can still return ``True`` in this gap.  A concurrent ``close()`` observing
+  the stale ``True`` injects a ``None`` sentinel into the abandoned queue: ``_pending`` is
+  incremented but no consumer ever calls ``task_done()``, stalling any subsequent
+  ``flush()`` → ``queue.join()`` indefinitely.  The fix introduces a ``_worker_running:
+  bool`` flag, set to ``True`` in ``__init__`` and cleared to ``False`` as the first
+  statement inside the worker's ``finally`` block under ``_count_lock`` (on both the
+  normal stop path and the crash-evacuation path), before the OS-thread teardown begins.
+  ``close()`` reads ``self._worker_running`` under the same lock, so it observes ``False``
+  before the OS marks the thread dead and skips sentinel injection entirely.  A new test
+  (``test_close_skips_sentinel_during_worker_os_exit_gap``) forces a non-``OSError`` crash,
+  joins the worker thread to guarantee ``_worker_running`` is ``False``, patches
+  ``is_alive()`` to return ``True`` (reproducing the OS-exit gap deterministically), calls
+  ``close()`` in a background thread, and asserts both ``close()`` and a subsequent
+  ``flush()`` complete within timeout — confirming no sentinel was injected and
+  ``_pending == 0``.  ``TestOffGridBufferWriteErrors`` grows from 8 to 9 cases.
+
+- **`OffGridBuffer.push()` — TOCTOU liveness gate: `_worker_failed` check and `queue.put()`
+  share a single `_count_lock` acquisition** (`buffer.py`): The previous implementation
+  checked ``_worker_failed`` inside ``_count_lock``, released the lock, then called
+  ``queue.put()`` outside.  A ``push()`` racer that passed the check before the worker
+  crashed could then race the evacuation loop: after releasing ``_count_lock``, if the
+  evacuation loop drained the queue to empty before the racer's ``queue.put()`` fired,
+  the new item had no ``task_done()`` caller, leaving ``_pending`` permanently non-zero
+  and stalling any subsequent ``queue.join()``.  The fix moves ``queue.put()`` inside the
+  same ``_count_lock`` section as the ``_worker_failed`` check: either the racer enqueues
+  atomically before the evacuation starts, or it observes ``_worker_failed = True`` after
+  the evacuation holds the lock and raises immediately.  A 16-thread stress test
+  (``test_push_toctou_worker_crash_no_dangling_items``) releases all racers into the
+  liveness-gate window via ``threading.Barrier`` and asserts ``buf._pending == 0`` after
+  all threads resolve; without the fix, an orphaned item leaves ``_pending > 0`` and
+  causes any subsequent ``flush()`` to block indefinitely.
+  ``TestOffGridBufferWriteErrors`` grows from 9 to 10 cases.
+
+- **`EdgePipeline.process()` — sieve-fault fallback guard broadened to `except Exception:`**
+  (`pipeline.py`): See the earlier Changed entry for full rationale.  Removes the narrow
+  exception tuple and restores ``except Exception:`` so ``ArithmeticError``, ``LookupError``,
+  and all other ``Exception`` subclasses from anomalous sieve plugins engage the safe
+  fallback path rather than propagating to the caller.
+
+- **`SensorFrame.d` docstring — shallow-freeze precision** (`models.py`): The Sphinx
+  ``:param d:`` entry is updated to state that ``MappingProxyType`` "enforces shallow
+  read-only protection on the top-level envelope dictionary keys; nested mutable values
+  are not frozen."  The previous wording ("exposed as a read-only MappingProxyType")
+  implied deep immutability that ``MappingProxyType`` does not provide.
+
+- **`test_close_is_idempotent` docstring — correct implementation reference** (`test_edge.py`):
+  The inline docstring previously stated that ``OffGridBuffer.close()`` "detects the
+  already-terminated worker thread via ``is_alive()``."  Updated to reference the internal
+  ``_worker_running`` state flag, matching the OS-exit-gap fix introduced in the preceding
+  round where the ``is_alive()`` check was replaced by the flag precisely to close the
+  race window this test exercises.
 
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing

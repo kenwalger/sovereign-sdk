@@ -25,10 +25,10 @@ class SensorFrame:
     :type q: int
     :param alg: Canonical signing algorithm identifier (e.g. ``"hmac-sha256"``).
     :type alg: str
-    :param d: Structured sensor observation payload, exposed as a read-only
-        :class:`~types.MappingProxyType` so downstream components cannot mutate the
-        wire payload in-place; the reference itself is also immutable due to
-        ``frozen=True``.
+    :param d: Structured sensor observation payload, wrapped in a
+        :class:`~types.MappingProxyType` that enforces shallow read-only protection on
+        the top-level envelope dictionary keys; nested mutable values are not frozen.
+        The reference itself is also immutable due to ``frozen=True``.
     :type d: MappingProxyType[str, Any]
     :param s: Hex-encoded signature string produced by the sensor's HAL driver.
     :type s: str

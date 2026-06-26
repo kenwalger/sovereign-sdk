@@ -172,7 +172,7 @@ class EdgePipeline:
         sieve_fault: bool = False
         try:
             sieve_result: SieveOutput = sieve_with_metrics(raw_text)
-        except (ValueError, KeyError, RuntimeError, AttributeError, TypeError):
+        except Exception:
             sieve_fault = True
             token_estimate: int = max(0, len(raw_text.encode("utf-8")) // 4)
             sieve_result = SieveOutput(

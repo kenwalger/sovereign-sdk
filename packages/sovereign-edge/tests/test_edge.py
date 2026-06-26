@@ -613,8 +613,9 @@ class TestEdgePipelineBuffering:
 
         The fixture teardown also invokes close() after the test body, exercising a
         third consecutive call and confirming that OffGridBuffer.close() correctly
-        detects the already-terminated worker thread via is_alive() and skips the
-        sentinel placement on all subsequent calls.
+        detects the already-terminated worker thread via the internal
+        ``_worker_running`` state flag instead of ``is_alive()``, and skips sentinel
+        placement on all subsequent calls.
 
         :param edge_pipeline: Pipeline whose buffer worker thread is under test.
         :type edge_pipeline: EdgePipeline

@@ -590,9 +590,9 @@ committed = pipeline.drain_buffer()
 * [x] `EdgePipeline.process()` — HMAC hex case normalisation: `frame.s.lower()` passed
   to `hmac.compare_digest` so uppercase hex from bare-metal hardware drivers is accepted
   without a spurious signature mismatch.
-* [x] `EdgePipeline.process()` — sieve-fault exception boundary tightened to
-  `except (ValueError, KeyError, RuntimeError, AttributeError, TypeError):`; fatal host
-  signals (`MemoryError`, `SystemExit`) now propagate rather than being absorbed.
+* [x] `EdgePipeline.process()` — sieve-fault fallback guard: ``except Exception:`` catches
+  all anomalous sieve plugin faults; ``SystemExit`` and ``KeyboardInterrupt`` inherit from
+  ``BaseException`` not ``Exception`` and propagate naturally without an explicit re-raise.
 * [x] `test_close_is_idempotent` (`TestEdgePipelineBuffering`): two explicit calls plus
   the fixture teardown third call all complete without deadlock or state corruption.
 * [x] `EdgePipeline.process()` — algorithm-gate hard-block: when `sensor_secret` is
@@ -648,25 +648,50 @@ committed = pipeline.drain_buffer()
 * [x] `EdgePipeline.drain_buffer()` — `list(self._buffer.drain())` wrapped in
   `try/except OSError`; raises descriptive `RuntimeError` chained from the `OSError` so
   operators see the storage-tier failure before any replay is attempted.
-* [x] 79-case desktop validation test suite across eight classes (`TestSensorFrame`: 15;
+* [x] `OffGridBuffer.close()` — OS-exit-gap sentinel guard: ``_worker_running`` flag (set
+  ``False`` under ``_count_lock`` before the thread's final return) replaces the
+  ``is_alive()`` check in the liveness gate, closing the window where the Python thread
+  function has returned but the OS has not yet unregistered the thread; ``close()`` now
+  reads ``False`` before the OS marks the thread dead and skips sentinel injection.
+  ``test_close_skips_sentinel_during_worker_os_exit_gap`` validates the fix by patching
+  ``is_alive()`` to return ``True`` after worker exit.
+  ``TestOffGridBufferWriteErrors`` grows from 8 to 9 cases.
+* [x] `OffGridBuffer.push()` — TOCTOU liveness-gate fix: ``_worker_failed`` check and
+  ``queue.put()`` share a single ``_count_lock`` acquisition so a racer that passes the
+  check before a crash cannot enqueue into an abandoned queue after the evacuation loop
+  completes; ``test_push_toctou_worker_crash_no_dangling_items`` (16-thread
+  ``threading.Barrier`` stress test) asserts ``_pending == 0`` after all threads resolve.
+  ``TestOffGridBufferWriteErrors`` grows from 9 to 10 cases.
+* [x] `EdgePipeline.process()` — sieve-fault fallback guard broadened to
+  ``except Exception:``; ``SystemExit`` and ``KeyboardInterrupt`` inherit from
+  ``BaseException`` not ``Exception``, so the broader guard naturally excludes host-level
+  abort signals while trapping all anomalous sieve plugin faults (``ArithmeticError``,
+  ``LookupError``, etc.) that the prior narrow tuple propagated unhandled.
+* [x] `SensorFrame.d` docstring corrected: ``MappingProxyType`` "enforces shallow
+  read-only protection on the top-level envelope dictionary keys; nested mutable values
+  are not frozen" — removes the implication of deep immutability.
+* [x] `test_close_is_idempotent` docstring corrected: references ``_worker_running``
+  state flag instead of ``is_alive()``, matching the OS-exit-gap implementation.
+* [x] 81-case desktop validation test suite across eight classes (`TestSensorFrame`: 15;
   `TestOffGridBuffer`: 10; `TestEdgePipelineProcess`: 18; `TestEdgePipelineBuffering`: 8;
   `TestEdgePipelineDrainBuffer`: 8; `TestOffGridBufferAsync`: 8;
-  `TestEdgePipelineSieveFault`: 4; `TestOffGridBufferWriteErrors`: 8) covering all
+  `TestEdgePipelineSieveFault`: 4; `TestOffGridBufferWriteErrors`: 10) covering all
   fortification scenarios: non-blocking `push()` with immediate `size` reporting,
   chronological `drain()` sort by sequence, non-integer sequence value tolerance,
   `_committed` counter accuracy after drain, sieve fault fallback with raw text and
   `sieve_fault=True` metadata, disk write error tracking, full `drain()` recovery, `close()`
   raising on un-journaled entries, `EdgePipeline.close()` propagating RuntimeError, 20-thread
   push-vs-close stress test, HMAC-SHA256 inbound signature rejection, algorithm-gate, HMAC
-  hex normalisation, tightened sieve-fault exception boundary, idempotent close triple-call,
-  protocol version gate, dead-letter eviction cap, non-OSError worker failure, strict field
-  type validation, lock-free evacuation deadlock regression, drain_buffer requeue-loop
-  survivability, concurrent close counter-drift, dual-failure exception chaining, drain
-  read-failure OSError propagation, frozen dataclass mutation guard, exhaustive replay-crash
-  re-queue, deep MappingProxyType immutability on ``SensorFrame.d``,
-  ``SovereignDoubleFaultError`` double-fault receipt recovery, and drain_buffer OSError
-  halt-and-alert.
-  **79 passed, 1 skipped, 368 workspace tests passed.**
+  hex normalisation, broadened sieve-fault exception scope to `except Exception:`, idempotent
+  close triple-call, protocol version gate, dead-letter eviction cap, non-OSError worker
+  failure, strict field type validation, lock-free evacuation deadlock regression,
+  drain_buffer requeue-loop survivability, concurrent close counter-drift, dual-failure
+  exception chaining, drain read-failure OSError propagation, frozen dataclass mutation
+  guard, exhaustive replay-crash re-queue, deep MappingProxyType immutability on
+  ``SensorFrame.d``, ``SovereignDoubleFaultError`` double-fault receipt recovery,
+  drain_buffer OSError halt-and-alert, 16-thread TOCTOU push-vs-crash stress test with
+  zero ``_pending`` drift, and OS-exit-gap ``_worker_running`` sentinel guard.
+  **81 passed, 0 skipped (edge); 370 passed, 1 skipped (workspace).**
 
 ---
 
