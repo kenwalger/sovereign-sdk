@@ -1093,6 +1093,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``TestOffGridBuffer`` grows from 11 to 12 cases.
   **Suite: 93 edge tests, 382 workspace tests passed, 1 skipped (POSIX fchmod).**
 
+- **`OffGridBuffer._disk_writer` — evacuation `finally` block: `_pending` decremented for
+  racing-close sentinel** (`buffer.py`): In the crash-evacuation path, the ``finally`` block
+  acquires ``_count_lock`` and checks ``self._closed`` to drain any ``None`` sentinel injected
+  by a concurrent ``close()`` call — consuming it via ``get_nowait()`` / ``task_done()``.  The
+  drain loop was missing ``self._pending -= 1`` before each ``task_done()``, leaving the counter
+  inflated by one for every sentinel consumed in that path.  With the missing decrement, a
+  ``close()`` call racing with the crash-evacuation sweep placed a sentinel that was physically
+  drained from the queue but not reflected in ``_pending``; the counter remained ``> 0`` after
+  the thread exited, causing any subsequent ``queue.join()`` (via ``flush()``) to block
+  indefinitely.  The fix adds ``self._pending -= 1`` inside the ``with self._count_lock: if
+  self._closed:`` drain loop so each sentinel consumed in the ``finally`` block is fully
+  accounted for, matching the decrement semantics of the main evacuation loop above it.
+
+- **`EdgePipeline.process()` — `sqlite3.IntegrityError` evicted as duplicate, not buffered**
+  (`pipeline.py`): ``sqlite3.IntegrityError`` is a subclass of ``sqlite3.Error``, so a duplicate
+  submission — where ``append_receipt()`` raises ``IntegrityError`` because the ``payload_hash``
+  already occupies a ``UNIQUE`` ledger slot — was silently caught by the broader
+  ``except (SovereignStorageError, sqlite3.Error):`` guard and routed to the off-grid buffer with
+  ``buffered=True``.  This diverged from the ``drain_buffer()`` contract, where ``IntegrityError``
+  triggers silent eviction (``except sqlite3.IntegrityError: pass``) rather than re-queuing.  A
+  new ``except sqlite3.IntegrityError:`` clause inserted before the broader guard extracts
+  ``payload_hash`` from the receipt dict and leaves ``buffered = False``, matching the
+  drain-buffer silent-eviction semantics.  ``process()`` docstring updated with an explicit
+  paragraph describing the eviction contract.
+
+- **`TestEdgePipelineProcess` — `test_process_evicts_duplicate_submission_without_buffering`**
+  (`test_edge.py`): Patches ``mem_ledger.append_receipt`` with ``sqlite3.IntegrityError``; asserts
+  ``result.buffered is False`` and ``edge_pipeline.buffer_depth == 0``.  Verifies that a duplicate
+  direct submission returns the same non-buffered disposition as the ``drain_buffer()`` replay
+  eviction path, closing the contract gap.
+  ``TestEdgePipelineProcess`` grows from 18 to 19 cases.
+
+- **`TestOffGridBufferWriteErrors` — `test_crash_evacuation_racing_close_leaves_pending_at_zero`**
+  (`test_edge.py`): Triggers a non-OSError worker crash via a patched ``builtins.open`` that raises
+  ``RuntimeError`` on append-mode opens; waits for ``worker_failed`` to become ``True``; then
+  launches 8 concurrent ``close()`` threads to race with the evacuation ``finally`` block; asserts
+  all threads join within 5 seconds (timeout = deadlock sentinel) and ``buf._pending == 0`` after
+  completion.  Directly validates that the missing ``self._pending -= 1`` fix prevents counter drift
+  from an unaccounted sentinel, confirming ``flush()`` → ``queue.join()`` can complete without
+  stalling.
+  ``TestOffGridBufferWriteErrors`` grows from 11 to 12 cases.
+  **Suite: 95 edge tests, 384 workspace tests passed, 1 skipped (POSIX fchmod).**
+
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing
   sensor observations into versioned, tamper-evident, minified JSON transmission envelopes with

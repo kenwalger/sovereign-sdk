@@ -374,6 +374,7 @@ class OffGridBuffer:
                                 try:
                                     while True:
                                         self._write_queue.get_nowait()
+                                        self._pending -= 1
                                         self._write_queue.task_done()
                                 except _queue.Empty:
                                     pass

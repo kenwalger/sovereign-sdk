@@ -635,6 +635,39 @@ class TestEdgePipelineProcess:
         with pytest.raises(ValueError, match="Unsupported or unauthenticated algorithm"):
             edge_pipeline.process(spoofed_bytes)
 
+    def test_process_evicts_duplicate_submission_without_buffering(
+        self,
+        edge_pipeline: EdgePipeline,
+        mem_ledger: SovereignLedger,
+        tmp_path: Path,
+    ) -> None:
+        """process() must return buffered=False when append_receipt raises
+        sqlite3.IntegrityError (duplicate payload_hash), matching the silent-eviction
+        contract used during drain_buffer() replay loops; a duplicate must not be
+        routed to the off-grid buffer.
+
+        :param edge_pipeline: Pipeline under test wired to an in-memory ledger.
+        :type edge_pipeline: EdgePipeline
+        :param mem_ledger: In-memory ledger whose append_receipt is patched to raise.
+        :type mem_ledger: SovereignLedger
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        with patch.object(
+            mem_ledger,
+            "append_receipt",
+            side_effect=sqlite3.IntegrityError("UNIQUE constraint failed"),
+        ):
+            result: EdgeResult = edge_pipeline.process(_seal_frame(tmp_path))
+        assert result.buffered is False, (
+            "duplicate submission must return buffered=False; IntegrityError means "
+            "the receipt is already in the ledger and must not be re-queued"
+        )
+        assert edge_pipeline.buffer_depth == 0, (
+            "buffer_depth must remain 0 after a duplicate submission — the entry must "
+            "be evicted, not buffered"
+        )
+
 
 # ---------------------------------------------------------------------------
 # TestEdgePipelineBuffering
@@ -1993,6 +2026,62 @@ class TestOffGridBufferWriteErrors:
             "— stale True flag persists transient fault as a false-positive"
         )
         buf.close()
+
+    def test_crash_evacuation_racing_close_leaves_pending_at_zero(
+        self, tmp_path: Path
+    ) -> None:
+        """close() called concurrently with a non-OSError worker crash must leave
+        _pending at exactly zero.  When close() places a sentinel while _worker_running
+        is True (race window between evacuation loop releasing _count_lock and the
+        finally block), the evacuation's finally block must drain and decrement _pending
+        for that sentinel so the counter does not drift and stall flush().
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        import builtins as _builtins
+        _real_open = _builtins.open
+
+        def _crash_on_append(*args: Any, **kwargs: Any) -> Any:
+            mode: str = args[1] if len(args) > 1 else kwargs.get("mode", "r")
+            if "a" in mode:
+                raise RuntimeError("synthetic non-OSError worker crash")
+            return _real_open(*args, **kwargs)
+
+        buf: OffGridBuffer = OffGridBuffer(str(tmp_path / "buf.jsonl"))
+        with patch("builtins.open", side_effect=_crash_on_append):
+            buf.push(self._make_receipt("A"), "content A")
+            buf.flush()
+
+        assert buf.worker_failed is True
+
+        close_errors: list[Exception] = []
+        error_lock: threading.Lock = threading.Lock()
+
+        def _try_close() -> None:
+            try:
+                buf.close()
+            except RuntimeError as exc:
+                with error_lock:
+                    close_errors.append(exc)
+
+        threads: list[threading.Thread] = [
+            threading.Thread(target=_try_close, daemon=True) for _ in range(8)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5.0)
+
+        assert all(not t.is_alive() for t in threads), (
+            "close() thread deadlocked — flush() in join() stalled with "
+            "_pending > 0 indicating an unaccounted sentinel"
+        )
+        assert buf._pending == 0, (
+            f"_pending={buf._pending} after crash + concurrent close(); "
+            "sentinel placed by a racing close() was not decremented in the "
+            "evacuation finally block"
+        )
 
 
 class TestEdgePipelineSecureInit:

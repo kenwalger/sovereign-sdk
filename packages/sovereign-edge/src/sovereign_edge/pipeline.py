@@ -184,6 +184,12 @@ class EdgePipeline:
             :exc:`~sovereign_ledger.SovereignStorageError` or ``sqlite3.Error`` *and*
             the subsequent :meth:`~sovereign_edge.buffer.OffGridBuffer.push` also raises.
             The signed receipt dict is attached to the exception via :attr:`~SovereignDoubleFaultError.receipt`.
+
+        When the ledger raises ``sqlite3.IntegrityError`` (duplicate ``payload_hash``),
+        the receipt is silently evicted — ``buffered`` is set to ``False`` and the receipt
+        is not routed to the off-grid buffer.  This matches the silent-eviction contract
+        used during :meth:`drain_buffer` replay loops, where an already-committed receipt
+        triggers ``IntegrityError`` and must not be re-queued to prevent infinite replay.
         """
         frame: SensorFrame = SensorFrame.from_bytes(frame_bytes)
 
@@ -256,6 +262,8 @@ class EdgePipeline:
         buffered: bool = False
         try:
             payload_hash: str = self._ledger.append_receipt(receipt_dict, sieve_result.text)
+        except sqlite3.IntegrityError:
+            payload_hash = receipt_dict["payload_hash"]
         except (SovereignStorageError, sqlite3.Error) as ledger_err:
             try:
                 self._buffer.push(receipt_dict, sieve_result.text)

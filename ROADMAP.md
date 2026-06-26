@@ -792,10 +792,32 @@ committed = pipeline.drain_buffer()
   (``TestOffGridBuffer``) triggers the failure, asserts the lock is gone, then confirms a
   second construction on the same path succeeds and returns ``size == 0``.
   ``TestOffGridBuffer`` grows from 11 to 12 cases.
-* [x] 93-case desktop validation test suite across nine classes (`TestSensorFrame`: 16;
-  `TestOffGridBuffer`: 12; `TestEdgePipelineProcess`: 18; `TestEdgePipelineBuffering`: 8;
+* [x] `OffGridBuffer._disk_writer` — evacuation ``finally`` block ``_pending`` decrement for
+  racing-close sentinel: the ``with self._count_lock: if self._closed:`` drain loop consumed
+  sentinels placed by a concurrent ``close()`` via ``get_nowait()`` / ``task_done()`` but
+  omitted ``self._pending -= 1``, leaving the counter inflated after the thread exited and
+  stalling any subsequent ``flush()`` → ``queue.join()`` call indefinitely.  ``_pending -= 1``
+  added before ``task_done()`` in the sentinel drain loop, matching the decrement semantics
+  of the main evacuation loop.
+* [x] `EdgePipeline.process()` — ``sqlite3.IntegrityError`` duplicate eviction: a new
+  ``except sqlite3.IntegrityError:`` clause before ``except (SovereignStorageError,
+  sqlite3.Error):`` extracts ``payload_hash`` from the receipt dict and leaves
+  ``buffered = False``; previously ``IntegrityError`` fell through to the broader guard and
+  routed the duplicate to the off-grid buffer with ``buffered=True``, diverging from the
+  ``drain_buffer()`` silent-eviction contract.  ``process()`` docstring updated.
+* [x] ``test_process_evicts_duplicate_submission_without_buffering``
+  (``TestEdgePipelineProcess``): patches ``mem_ledger.append_receipt`` with
+  ``sqlite3.IntegrityError``; asserts ``result.buffered is False`` and
+  ``buffer_depth == 0``.  ``TestEdgePipelineProcess`` grows from 18 to 19 cases.
+* [x] ``test_crash_evacuation_racing_close_leaves_pending_at_zero``
+  (``TestOffGridBufferWriteErrors``): non-OSError worker crash + 8 concurrent ``close()``
+  threads; asserts all threads join within 5 s (deadlock sentinel) and
+  ``buf._pending == 0`` after completion, directly validating the sentinel-decrement fix.
+  ``TestOffGridBufferWriteErrors`` grows from 11 to 12 cases.
+* [x] 95-case desktop validation test suite across nine classes (`TestSensorFrame`: 16;
+  `TestOffGridBuffer`: 12; `TestEdgePipelineProcess`: 19; `TestEdgePipelineBuffering`: 8;
   `TestEdgePipelineDrainBuffer`: 12; `TestOffGridBufferAsync`: 8;
-  `TestEdgePipelineSieveFault`: 4; `TestOffGridBufferWriteErrors`: 11;
+  `TestEdgePipelineSieveFault`: 4; `TestOffGridBufferWriteErrors`: 12;
   `TestEdgePipelineSecureInit`: 4) covering all
   fortification scenarios: non-blocking `push()` with immediate `size` reporting,
   chronological `drain()` sort by sequence, non-integer sequence value tolerance,
@@ -820,9 +842,12 @@ committed = pipeline.drain_buffer()
   close-phase evacuation ``try/finally`` sentinel guard, two-phase non-destructive
   drain with ``.staging`` crash recovery, exclusive instance-lock collision guard,
   corrupt-staging quarantine with ``SovereignStorageError`` boot-time alert,
-  crash-restart ``IntegrityError`` deduplication end-to-end integration, and
-  lock-file cleanup on staging recovery failure enabling immediate retry.
-  **93 passed, 0 skipped (edge); 382 passed, 1 skipped (workspace).**
+  crash-restart ``IntegrityError`` deduplication end-to-end integration,
+  lock-file cleanup on staging recovery failure enabling immediate retry,
+  evacuation-finally ``_pending`` decrement for racing-close sentinel eliminating
+  flush stall, and direct duplicate eviction in ``process()`` matching drain-buffer
+  eviction contract.
+  **95 passed, 0 skipped (edge); 384 passed, 1 skipped (workspace).**
 
 ---
 
