@@ -783,8 +783,17 @@ committed = pipeline.drain_buffer()
   Phase 3 constructs a new pipeline triggering ``_recover_staging()`` merge → 3 active lines;
   ``drain_buffer()`` deduplicates via ``IntegrityError`` → exactly 1 new commit.
   ``TestEdgePipelineDrainBuffer`` grows from 11 to 12 cases.
-* [x] 92-case desktop validation test suite across nine classes (`TestSensorFrame`: 16;
-  `TestOffGridBuffer`: 11; `TestEdgePipelineProcess`: 18; `TestEdgePipelineBuffering`: 8;
+* [x] `OffGridBuffer.__init__()` — lock file cleanup on staging recovery failure:
+  ``_recover_staging()`` is now called inside ``try/except BaseException:`` whose handler
+  unlinks the ``.lock`` file before re-raising; previously a ``SovereignStorageError`` from
+  the staging quarantine path left the lock on disk, causing every subsequent construction
+  attempt on the same path to raise ``RuntimeError("already held by process …")`` for the
+  lifetime of the process.  ``test_init_cleans_up_lock_on_staging_recovery_failure``
+  (``TestOffGridBuffer``) triggers the failure, asserts the lock is gone, then confirms a
+  second construction on the same path succeeds and returns ``size == 0``.
+  ``TestOffGridBuffer`` grows from 11 to 12 cases.
+* [x] 93-case desktop validation test suite across nine classes (`TestSensorFrame`: 16;
+  `TestOffGridBuffer`: 12; `TestEdgePipelineProcess`: 18; `TestEdgePipelineBuffering`: 8;
   `TestEdgePipelineDrainBuffer`: 12; `TestOffGridBufferAsync`: 8;
   `TestEdgePipelineSieveFault`: 4; `TestOffGridBufferWriteErrors`: 11;
   `TestEdgePipelineSecureInit`: 4) covering all
@@ -810,9 +819,10 @@ committed = pipeline.drain_buffer()
   ``text_content()``, duplicate ledger-entry eviction on ``sqlite3.IntegrityError``,
   close-phase evacuation ``try/finally`` sentinel guard, two-phase non-destructive
   drain with ``.staging`` crash recovery, exclusive instance-lock collision guard,
-  corrupt-staging quarantine with ``SovereignStorageError`` boot-time alert, and
-  crash-restart ``IntegrityError`` deduplication end-to-end integration.
-  **92 passed, 0 skipped (edge); 381 passed, 1 skipped (workspace).**
+  corrupt-staging quarantine with ``SovereignStorageError`` boot-time alert,
+  crash-restart ``IntegrityError`` deduplication end-to-end integration, and
+  lock-file cleanup on staging recovery failure enabling immediate retry.
+  **93 passed, 0 skipped (edge); 382 passed, 1 skipped (workspace).**
 
 ---
 

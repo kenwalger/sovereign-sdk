@@ -373,6 +373,43 @@ class TestOffGridBuffer:
             "the original path where it could be re-encountered on the next boot attempt"
         )
 
+    def test_init_cleans_up_lock_on_staging_recovery_failure(self, tmp_path: Path) -> None:
+        """OffGridBuffer.__init__ must delete the .lock file when _recover_staging()
+        raises SovereignStorageError so that a subsequent construction attempt on the
+        same path can acquire the lock and succeed.  Without this cleanup the .lock file
+        is left on disk holding the current PID; every future construction attempt reads
+        a live PID, determines the process is still running, and raises RuntimeError
+        rather than recovering — permanently locking the buffer path for the lifetime of
+        the process that failed at init.
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        buf_path: Path = tmp_path / "buf.jsonl"
+        staging_path: Path = Path(str(buf_path) + ".staging")
+        lock_path: Path = Path(str(buf_path) + ".lock")
+        corrupt_path: Path = Path(str(staging_path) + ".corrupt")
+
+        staging_path.write_bytes(b"\xff\xfe invalid utf-8 \x80\x81")
+
+        with pytest.raises(SovereignStorageError):
+            OffGridBuffer(str(buf_path))
+
+        assert not lock_path.exists(), (
+            ".lock file must be deleted when __init__ raises; an orphaned lock prevents "
+            "every subsequent construction attempt from acquiring the lock"
+        )
+        assert corrupt_path.exists(), "staging file must be quarantined as .staging.corrupt"
+
+        # With the lock gone and .staging absent (quarantined to .staging.corrupt), a
+        # second construction on the same path must succeed cleanly.
+        corrupt_path.unlink()
+        buf: OffGridBuffer = OffGridBuffer(str(buf_path))
+        try:
+            assert buf.size == 0
+        finally:
+            buf.close()
+
 
 # ---------------------------------------------------------------------------
 # Fixtures

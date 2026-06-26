@@ -97,7 +97,14 @@ class OffGridBuffer:
         self._count_lock: threading.Lock = threading.Lock()
         self._drain_lock: threading.Lock = threading.Lock()
         self._acquire_buffer_lock()
-        self._recover_staging()
+        try:
+            self._recover_staging()
+        except BaseException:
+            try:
+                self._lock_path.unlink()
+            except OSError:
+                pass
+            raise
         self._worker_thread: threading.Thread = threading.Thread(
             target=self._disk_writer,
             daemon=True,
@@ -183,9 +190,10 @@ class OffGridBuffer:
             :exc:`OSError` or :exc:`UnicodeDecodeError`, or if the active-file
             promotion or merge operation raises :exc:`OSError`.  The staging file is
             quarantined as ``{staging_path}.corrupt`` before raising in all cases.
-            The process-exclusive lock file is not cleaned up on a staging recovery
-            failure; the caller must not retry construction on the same path without
-            resolving the quarantined file.
+            :meth:`__init__` catches any exception propagating from this method and
+            unconditionally unlinks the ``.lock`` file before re-raising, so a
+            subsequent construction attempt on the same path can acquire the lock and
+            succeed once the quarantined staging file is resolved.
         """
         if not self._staging_path.exists():
             return

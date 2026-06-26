@@ -1068,6 +1068,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same receipt more than once.  ``TestEdgePipelineDrainBuffer`` grows from 11 to 12 cases.
   **Suite: 92 edge tests, 381 workspace tests passed, 1 skipped (POSIX fchmod).**
 
+- **`OffGridBuffer.__init__()` — lock file cleanup on staging recovery failure** (`buffer.py`):
+  After `_acquire_buffer_lock()` writes the ``.lock`` file, ``_recover_staging()`` is now
+  called inside a ``try/except BaseException:`` block whose handler unlinks the ``.lock``
+  file before re-raising the original exception.  Previously, any exception raised by
+  ``_recover_staging()`` — most critically the new ``SovereignStorageError`` quarantine path —
+  left the ``.lock`` file on disk holding the current process PID.  A subsequent construction
+  attempt on the same path would call ``_acquire_buffer_lock()``, discover a live PID (the
+  same process is still running), and raise ``RuntimeError``, permanently locking the buffer
+  path for the lifetime of the process.  The ``try/except BaseException:`` scope correctly
+  captures ``KeyboardInterrupt`` and other ``BaseException`` subclasses that can occur during
+  object construction in addition to ``SovereignStorageError``.  The ``_recover_staging()``
+  ``:raises SovereignStorageError:`` docstring is updated to note that ``__init__`` now
+  performs unconditional lock cleanup before re-raising.
+
+- **`TestOffGridBuffer` — `test_init_cleans_up_lock_on_staging_recovery_failure`**
+  (`test_edge.py`): Writes invalid UTF-8 bytes to the ``.staging`` path (triggering
+  ``SovereignStorageError`` from ``_recover_staging()``), asserts that ``OffGridBuffer.__init__``
+  raises, and asserts that the ``.lock`` file does not exist after the failed construction.
+  Then removes the quarantined ``.staging.corrupt`` file and confirms a second
+  ``OffGridBuffer`` construction on the same path succeeds and reports ``size == 0``,
+  verifying that the cleaned-up lock actually unblocks future retry attempts.  Without the
+  fix, the second construction raises ``RuntimeError("already held by process …")``.
+  ``TestOffGridBuffer`` grows from 11 to 12 cases.
+  **Suite: 93 edge tests, 382 workspace tests passed, 1 skipped (POSIX fchmod).**
+
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing
   sensor observations into versioned, tamper-evident, minified JSON transmission envelopes with
