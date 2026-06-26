@@ -1046,11 +1046,61 @@ class TestEdgePipelineDrainBuffer:
             with patch.object(
                 pathlib.Path, "read_text", side_effect=OSError("simulated read error")
             ):
-                with pytest.raises(RuntimeError, match="off-grid buffer file could not be read") as exc_info:
+                with pytest.raises(RuntimeError, match="off-grid buffer file operation failed") as exc_info:
                     pipeline_b.drain_buffer()
             assert isinstance(exc_info.value.__cause__, OSError)
         finally:
             pipeline_b._buffer.drain()  # clear buffer so close() does not raise
+            pipeline_b._buffer.close()
+            open_ledger.close()
+
+    def test_drain_buffer_raises_on_rotation_failure(self, tmp_path: Path) -> None:
+        """drain_buffer() must raise RuntimeError (not return an empty committed list)
+        when os.replace fails during the atomic buffer-file rotation inside
+        OffGridBuffer.drain().  Buffered entries must be preserved on disk so that a
+        subsequent drain_buffer() call can recover them once the filesystem is repaired."""
+        buffer_path: str = str(tmp_path / ".edge_buffer.jsonl")
+        key_path: str = str(tmp_path / ".keys" / "edge_identity.pem")
+
+        # Phase 1: buffer one receipt via a closed ledger.
+        closed_ledger: SovereignLedger = SovereignLedger(":memory:")
+        pipeline_a: EdgePipeline = EdgePipeline(
+            ledger=closed_ledger,
+            signing_key=key_path,
+            buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
+        )
+        closed_ledger.close()
+        try:
+            pipeline_a.process(_seal_frame(tmp_path))
+            pipeline_a._buffer.flush()
+        finally:
+            pipeline_a._buffer.close()
+
+        # Phase 2: attempt recovery but simulate an os.replace crash mid-rotation.
+        open_ledger: SovereignLedger = SovereignLedger(str(tmp_path / "recovery.db"))
+        pipeline_b: EdgePipeline = EdgePipeline(
+            ledger=open_ledger,
+            signing_key=key_path,
+            buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
+        )
+        try:
+            with patch("sovereign_edge.buffer.os.replace", side_effect=OSError("Simulated rotation crash")):
+                with pytest.raises(RuntimeError, match="off-grid buffer file operation failed") as exc_info:
+                    pipeline_b.drain_buffer()
+            assert isinstance(exc_info.value.__cause__, OSError), (
+                "RuntimeError must be chained from the OSError raised by os.replace "
+                "so operators can inspect the underlying filesystem error"
+            )
+            # Phase 3: verify entries survived on disk — recovery must succeed after
+            # the simulated crash clears, confirming no silent discard occurred.
+            committed: list[str] = pipeline_b.drain_buffer()
+            assert len(committed) == 1, (
+                f"Expected 1 committed receipt after rotation recovery; got {len(committed)} — "
+                "the rotation crash may have silently discarded the buffered entry"
+            )
+        finally:
             pipeline_b._buffer.close()
             open_ledger.close()
 

@@ -823,7 +823,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``drain_read_failed is False`` after the successful drain, verifying the reset path and
   guarding against future regression where stale ``True`` persists after storage recovery.
   ``TestOffGridBufferWriteErrors`` grows from 10 to 11 cases.
-  **Suite: 86 edge tests, 375 workspace tests passed, 1 skipped (POSIX fchmod).**
+
+- **`OffGridBuffer.drain()` — atomic rotation failure now raises `OSError` (not `[]`)**
+  (`buffer.py`): The ``except OSError:`` block surrounding the ``tempfile`` + ``os.replace``
+  rotation previously caught the exception, cleaned up the staging file, and fell through
+  to ``return entries if replaced else []``.  A rotation failure (full disk, cross-device
+  rename, filesystem unmount mid-drain) returned ``[]`` silently: callers could not
+  distinguish a genuinely empty buffer from a filesystem-blocked rotation.
+  ``drain_buffer()`` in the pipeline layer would see ``[]``, commit nothing, and return
+  without error — treating a storage fault as a healthy no-op and losing the operator's
+  only signal that entries were not cleared.  The fix adds a bare ``raise`` at the end of
+  the ``except OSError:`` block so the exception propagates to the caller after the
+  temp-file cleanup completes.  ``_committed`` and ``_write_errors`` are left intact so a
+  subsequent ``drain()`` call recovers all entries once the filesystem is repaired.  The
+  ``drain()`` ``:return:`` docstring is updated to remove the ``or an empty list`` clause
+  and a ``:raises OSError:`` entry is added covering both the read-failure and
+  rotation-failure paths.
+
+- **`SovereignDoubleFaultError` — `uncommitted_receipts` attribute for batch drain faults**
+  (`pipeline.py`): The constructor gains a new optional keyword parameter
+  ``uncommitted_receipts: list[dict[str, Any]] | None = None``.  The existing ``receipt``
+  parameter is made optional (default ``None``) to reflect that the two fault contexts
+  are mutually exclusive: a single-receipt fault from :meth:`process` sets ``receipt`` and
+  leaves ``uncommitted_receipts = None``; a batch-drain double fault from
+  :meth:`drain_buffer` sets ``uncommitted_receipts`` and leaves ``receipt = None``.
+  The class docstring is updated with a second usage context (batch-receipt drain fault)
+  and updated ``:param:`` / ``:type:`` entries for both attributes.
+
+- **`EdgePipeline.drain_buffer()` — `try/finally` guarantees full capture; cascading
+  double fault raises `SovereignDoubleFaultError`** (`pipeline.py`):
+
+  *`try/finally` for unprocessed entry capture*: The
+  ``except Exception as exc: crash_exc = exc; requeue.extend(drained[processed:])`` block
+  is restructured to ``except Exception as exc: crash_exc = exc`` followed by
+  ``finally: requeue.extend(drained[processed:])``.  The ``finally`` clause runs
+  unconditionally regardless of whether an exception was raised or the loop completed
+  normally; on normal completion ``drained[processed:] == []`` so no item is added.
+  This closes the theoretical data-loss gap where a future refactor moves or wraps the
+  ``except`` clause without preserving the unprocessed-entry extension.
+
+  *Tracked failed-requeue entries*: The requeue loop now accumulates
+  ``failed_requeue_entries: list[tuple[dict[str, Any], str]]`` alongside
+  ``push_failure_count: int`` so the exact set of unrecoverable receipts is available
+  after the loop, not just a count.
+
+  *`SovereignDoubleFaultError` on double fault*: When the replay loop crashes
+  (``crash_exc is not None``) AND one or more entries cannot be re-queued
+  (``push_failure_count > 0``), the previous code raised ``RuntimeError(...)`` chained
+  from ``crash_exc``, surfacing only a count and discarding the receipt content
+  irreversibly.  The fix raises ``SovereignDoubleFaultError`` with
+  ``uncommitted_receipts=[r for r, _ in failed_requeue_entries]`` and
+  ``ledger_error=crash_exc``, attaching the exact receipt dicts so the host application
+  can route them via an alternative channel rather than permanently losing them.
+
+  *OSError message generalised*: The ``except OSError`` handler around
+  ``list(self._buffer.drain())`` now raises ``RuntimeError("... the off-grid buffer file
+  operation failed …")`` to cover both read-path and rotation-path ``OSError`` propagation
+  from the updated ``drain()``.  The previous message ("could not be read from disk")
+  was inaccurate for rotation failures.
+
+- **`TestEdgePipelineDrainBuffer` — `test_drain_buffer_raises_on_rotation_failure`**
+  (`test_edge.py`): Buffers one receipt via a closed ledger; then, under a
+  ``patch("sovereign_edge.buffer.os.replace", side_effect=OSError("Simulated rotation
+  crash"))`` context, calls ``drain_buffer()`` and asserts :exc:`RuntimeError` matching
+  ``"off-grid buffer file operation failed"`` whose ``__cause__`` is an :exc:`OSError`.
+  After the patch exits, asserts that a second ``drain_buffer()`` call commits exactly
+  one receipt — verifying that the rotation crash did not silently discard the buffered
+  entry.  The existing test ``test_drain_buffer_raises_runtime_error_on_buffer_read_failure``
+  is updated to match ``"off-grid buffer file operation failed"`` to align with the new
+  message.  ``TestEdgePipelineDrainBuffer`` grows from 8 to 9 cases.
+  **Suite: 87 edge tests, 376 workspace tests passed, 1 skipped (POSIX fchmod).**
 
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing

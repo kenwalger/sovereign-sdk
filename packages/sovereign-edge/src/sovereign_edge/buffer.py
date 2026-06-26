@@ -310,22 +310,24 @@ class OffGridBuffer:
         disk; basing the decrement on valid-only parse count would leave ``_committed``
         above zero for an empty file.  ``_write_errors`` is also cleared on success;
         write-error entries never accumulated in ``_committed`` so they need no counter
-        adjustment.  If the promotion fails, an empty list is returned and ``_write_errors``
-        is left intact for the next drain pass so that no entry is permanently discarded.
+        adjustment.  If the atomic promotion fails, the :exc:`OSError` is re-raised after
+        cleaning up the staging temp file; ``_write_errors`` and ``_committed`` are left
+        intact for the next drain pass so that no entry is permanently discarded.
         Disk lines that cannot be parsed as valid JSON or that are missing the
         ``receipt`` / ``sieved_content`` keys are quarantined in ``_dead_letter`` under
         the count lock rather than silently dropped; :attr:`dead_letter_count` reflects
         the accumulated quarantine count.  Returns an empty list when the buffer file does
         not exist and no write-error entries are pending.
 
-        :return: List of ``(receipt_dict, sieved_content)`` tuples sorted by sequence,
-            or an empty list if the buffer file could not be atomically cleared.
+        :return: List of ``(receipt_dict, sieved_content)`` tuples sorted by sequence.
         :rtype: list[tuple[dict[str, Any], str]]
         :raises OSError: If the buffer file exists but :meth:`pathlib.Path.read_text`
             raises :exc:`OSError` (e.g., permissions change, device removal, filesystem
-            error after existence was confirmed).  :attr:`drain_read_failed` is set to
-            ``True`` under the count lock before re-raising so the caller can distinguish
-            a genuine empty drain from a read-blocked drain.
+            error after existence was confirmed) — :attr:`drain_read_failed` is set to
+            ``True`` under the count lock before re-raising; or if the atomic
+            ``os.replace`` call during the file rotation phase raises :exc:`OSError`
+            (e.g., cross-device rename, full disk, or filesystem unmount mid-drain) —
+            on-disk entries and ``_write_errors`` are preserved so the caller can retry.
         """
         with self._drain_lock:
             self.flush()
@@ -378,7 +380,6 @@ class OffGridBuffer:
             file_entry_count: int = disk_line_count
 
             tmp_path: str = ""
-            replaced: bool = False
             try:
                 with tempfile.NamedTemporaryFile(
                     dir=self._path.parent,
@@ -390,20 +391,19 @@ class OffGridBuffer:
                     tmp_path = tmp_fh.name
                 os.replace(tmp_path, self._path)
                 tmp_path = ""
-                replaced = True
             except OSError:
                 if tmp_path:
                     try:
                         os.remove(tmp_path)
                     except OSError:
                         pass
+                raise
 
-            if replaced:
-                with self._count_lock:
-                    self._committed = max(0, self._committed - file_entry_count)
-                    self._write_errors.clear()
+            with self._count_lock:
+                self._committed = max(0, self._committed - file_entry_count)
+                self._write_errors.clear()
 
-            return entries if replaced else []
+            return entries
 
     def close(self) -> None:
         """Flush all pending writes and terminate the background worker thread.

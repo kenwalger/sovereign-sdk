@@ -17,30 +17,47 @@ from .models import EdgeResult, SensorFrame
 
 
 class SovereignDoubleFaultError(RuntimeError):
-    """Raised when a signed receipt cannot reach either the ledger or the off-grid buffer.
+    """Raised when signed receipts cannot reach either the ledger or the off-grid buffer.
 
-    Encapsulates a total persistence failure: the ledger was unreachable (raising
-    :exc:`~sovereign_ledger.SovereignStorageError` or ``sqlite3.Error``) and the
-    off-grid buffer push also failed (raising any :exc:`Exception`).  The signed
-    :class:`~sovereign_core.crypto.ForensicReceipt` dict is attached via
-    :attr:`receipt` so the host application can retrieve it through an alternative
-    channel rather than losing the payload entirely.
+    Encapsulates a total persistence failure across two usage contexts:
+
+    * **Single-receipt fault** (raised from :meth:`EdgePipeline.process`): the ledger
+      was unreachable (raising :exc:`~sovereign_ledger.SovereignStorageError` or
+      ``sqlite3.Error``) and the off-grid buffer push also failed.  The fully signed
+      :class:`~sovereign_core.crypto.ForensicReceipt` dict is attached via :attr:`receipt`
+      so the host application can route it through an alternative channel.
+
+    * **Batch-receipt fault** (raised from :meth:`EdgePipeline.drain_buffer`): the
+      ledger replay loop crashed via an unhandled exception AND one or more entries
+      could not be re-queued to the buffer (e.g. the buffer worker has terminated).
+      Every unrecoverable receipt dict is collected in :attr:`uncommitted_receipts`
+      so the host can perform out-of-band recovery rather than silently losing them.
 
     :param args: Positional message arguments forwarded to :class:`RuntimeError`.
-    :param receipt: The fully signed ForensicReceipt dict that could not be persisted.
-    :type receipt: dict[str, Any]
-    :param ledger_error: The original ledger exception (root cause of the fallback sequence)
-        that triggered the buffer push attempt.  Preserved as a named attribute so diagnostic
-        code can inspect the full two-tier failure without relying on implicit ``__context__``
-        suppression from the ``raise ... from push_err`` chain.
+    :param receipt: The fully signed ForensicReceipt dict involved in a single-receipt
+        fault.  ``None`` when the exception originates from a batch-drain double fault.
+    :type receipt: dict[str, Any] | None
+    :param uncommitted_receipts: List of ForensicReceipt dicts that could not be
+        persisted or re-queued during a :meth:`~EdgePipeline.drain_buffer` replay pass.
+        ``None`` when the exception originates from a single-receipt :meth:`process` fault.
+    :type uncommitted_receipts: list[dict[str, Any]] | None
+    :param ledger_error: The original exception (root cause of the fallback sequence)
+        that triggered the buffer push attempt or crashed the replay loop.  Preserved as
+        a named attribute so diagnostic code can inspect the full two-tier failure without
+        relying on implicit ``__context__`` suppression.
     :type ledger_error: Exception
     """
 
     def __init__(
-        self, *args: object, receipt: dict[str, Any], ledger_error: Exception
+        self,
+        *args: object,
+        receipt: dict[str, Any] | None = None,
+        uncommitted_receipts: list[dict[str, Any]] | None = None,
+        ledger_error: Exception,
     ) -> None:
         super().__init__(*args)
-        self.receipt: dict[str, Any] = receipt
+        self.receipt: dict[str, Any] | None = receipt
+        self.uncommitted_receipts: list[dict[str, Any]] | None = uncommitted_receipts
         self.ledger_error: Exception = ledger_error
 
 
@@ -282,34 +299,45 @@ class EdgePipeline:
         or ``sqlite3.Error`` is re-queued to the buffer so that no receipt is
         discarded on a transient ledger fault.
 
+        A ``try/finally`` block guarantees that ``drained[processed:]`` — the exact
+        slice of entries that had not yet been resolved when an exception aborted the
+        loop — is always appended to the re-queue list before control leaves the loop
+        body.  This eliminates the data-loss window where those entries were held only
+        in local scope with no recovery path.
+
         The re-queue pass always iterates to completion regardless of
         :exc:`RuntimeError` from individual :meth:`~sovereign_edge.buffer.OffGridBuffer.push`
-        calls so that every remaining item is attempted.  If an unexpected exception
-        interrupted the replay pass AND some items cannot be re-queued, the requeue
-        :exc:`RuntimeError` is raised chained from the crash exception so both failure
-        sources are visible in the traceback.
+        calls so that every remaining item is attempted; failed items are collected in a
+        local list rather than just counted.  If the replay loop crashed AND some entries
+        could not be re-queued, :exc:`SovereignDoubleFaultError` is raised with the
+        unrecoverable receipt dicts attached via :attr:`~SovereignDoubleFaultError.uncommitted_receipts`
+        and the crash exception preserved as :attr:`~SovereignDoubleFaultError.ledger_error`.
 
         :return: ``payload_hash`` strings for every receipt successfully committed to
             the ledger on this drain pass.  Entries that could not be committed are
             re-queued and excluded from the returned list.
         :rtype: list[str]
-        :raises RuntimeError: If the off-grid buffer file raises :exc:`OSError` on read
-            (chained from the :exc:`OSError`), or if one or more entries cannot be re-queued
-            after a ledger failure or after the replay loop was interrupted.  The exception
-            is raised only after all requeue items have been attempted; when both the
-            replay crash and a requeue failure occur simultaneously, the requeue
-            :exc:`RuntimeError` is chained from the replay exception via ``__cause__``.
+        :raises RuntimeError: If the off-grid buffer file raises :exc:`OSError` on its
+            read or atomic rotation (chained from the :exc:`OSError`), or if one or more
+            entries cannot be re-queued after a ledger failure without a concurrent replay
+            crash.  The exception is raised only after all requeue items have been attempted.
+        :raises SovereignDoubleFaultError: If the replay loop is interrupted by an
+            unhandled exception AND one or more entries cannot be re-queued to the buffer
+            (i.e., both the ledger replay path and the buffer recovery path fail
+            simultaneously).  The unrecoverable receipt dicts are attached via
+            :attr:`~SovereignDoubleFaultError.uncommitted_receipts`; the replay exception
+            is preserved as :attr:`~SovereignDoubleFaultError.ledger_error`.
         """
         committed: list[str] = []
         requeue: list[tuple[dict[str, Any], str]] = []
 
         try:
             drained: list[tuple[dict[str, Any], str]] = list(self._buffer.drain())
-        except OSError as read_err:
+        except OSError as drain_err:
             raise RuntimeError(
                 "drain_buffer() cannot replay buffered receipts: the off-grid buffer file "
-                "could not be read from disk — verify that the storage tier is accessible"
-            ) from read_err
+                "operation failed — verify that the storage tier is accessible"
+            ) from drain_err
         crash_exc: Exception | None = None
         processed: int = 0
 
@@ -323,24 +351,29 @@ class EdgePipeline:
                 processed += 1
         except Exception as exc:
             crash_exc = exc
+        finally:
             requeue.extend(drained[processed:])
 
+        failed_requeue_entries: list[tuple[dict[str, Any], str]] = []
         push_failure_count: int = 0
         for receipt_dict, sieved_content in requeue:
             try:
                 self._buffer.push(receipt_dict, sieved_content)
             except RuntimeError:
                 push_failure_count += 1
+                failed_requeue_entries.append((receipt_dict, sieved_content))
 
         if crash_exc is not None:
             if push_failure_count:
-                requeue_err: RuntimeError = RuntimeError(
-                    f"drain_buffer() could not re-queue {push_failure_count} "
-                    f"receipt{'s' if push_failure_count != 1 else ''} after an unexpected "
-                    "exception in the ledger replay pass; call drain() on the buffer to "
-                    "recover un-committed entries"
-                )
-                raise requeue_err from crash_exc
+                raise SovereignDoubleFaultError(
+                    f"drain_buffer() suffered a cascading failure: the ledger replay loop "
+                    f"raised and {push_failure_count} "
+                    f"receipt{'s' if push_failure_count != 1 else ''} could not be re-queued "
+                    f"to the off-grid buffer; unrecoverable receipts are attached via "
+                    f"uncommitted_receipts for host-level recovery",
+                    uncommitted_receipts=[r for r, _ in failed_requeue_entries],
+                    ledger_error=crash_exc,
+                ) from crash_exc
             raise crash_exc
 
         if push_failure_count:

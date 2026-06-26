@@ -692,9 +692,28 @@ committed = pipeline.drain_buffer()
   (``drain_read_failed → True``), then successful drain asserts ``drain_read_failed is
   False``; guards the reset path against future regression.
   ``TestOffGridBufferWriteErrors`` grows from 10 to 11 cases.
-* [x] 86-case desktop validation test suite across nine classes (`TestSensorFrame`: 15;
+* [x] `OffGridBuffer.drain()` — rotation failure raises ``OSError`` (not returns ``[]``):
+  bare ``raise`` added at the end of the ``except OSError:`` block so a failed
+  ``os.replace`` propagates to the caller after temp-file cleanup; callers can no longer
+  confuse a filesystem-blocked rotation with a genuinely empty drain; on-disk entries and
+  ``_write_errors`` are preserved for retry.
+* [x] `SovereignDoubleFaultError` — ``uncommitted_receipts: list[dict[str, Any]] | None``
+  attribute: new optional constructor parameter; ``receipt`` made optional (default
+  ``None``); two fault contexts documented: single-receipt (from ``process()``) and
+  batch-drain (from ``drain_buffer()``).
+* [x] `EdgePipeline.drain_buffer()` — ``try/finally`` for guaranteed unprocessed-entry
+  capture; tracked ``failed_requeue_entries`` list (not just count); cascading double fault
+  (replay loop crash + buffer push failures) raises ``SovereignDoubleFaultError`` with
+  ``uncommitted_receipts`` attached; OSError handler message generalised to "operation
+  failed" to cover both read and rotation failures.
+* [x] `test_drain_buffer_raises_on_rotation_failure` (``TestEdgePipelineDrainBuffer``):
+  patches ``sovereign_edge.buffer.os.replace`` with ``OSError``; asserts ``RuntimeError``
+  with ``__cause__ is OSError`` and message matching ``"operation failed"``; then asserts
+  a second ``drain_buffer()`` commits exactly 1 receipt (entries survived the failed
+  rotation).  ``TestEdgePipelineDrainBuffer`` grows from 8 to 9 cases.
+* [x] 87-case desktop validation test suite across nine classes (`TestSensorFrame`: 15;
   `TestOffGridBuffer`: 10; `TestEdgePipelineProcess`: 18; `TestEdgePipelineBuffering`: 8;
-  `TestEdgePipelineDrainBuffer`: 8; `TestOffGridBufferAsync`: 8;
+  `TestEdgePipelineDrainBuffer`: 9; `TestOffGridBufferAsync`: 8;
   `TestEdgePipelineSieveFault`: 4; `TestOffGridBufferWriteErrors`: 11;
   `TestEdgePipelineSecureInit`: 4) covering all
   fortification scenarios: non-blocking `push()` with immediate `size` reporting,
@@ -712,9 +731,11 @@ committed = pipeline.drain_buffer()
   ``SensorFrame.d``, ``SovereignDoubleFaultError`` double-fault receipt recovery,
   drain_buffer OSError halt-and-alert, 16-thread TOCTOU push-vs-crash stress test with
   zero ``_pending`` drift, OS-exit-gap ``_worker_running`` sentinel guard,
-  secure-by-default init with ``SovereignConfigurationError``, and stale
-  ``drain_read_failed`` flag reset after filesystem recovery.
-  **86 passed, 0 skipped (edge); 375 passed, 1 skipped (workspace).**
+  secure-by-default init with ``SovereignConfigurationError``, stale
+  ``drain_read_failed`` flag reset after filesystem recovery, atomic rotation
+  ``OSError`` propagation, and drain_buffer cascading double-fault with
+  ``uncommitted_receipts`` preservation.
+  **87 passed, 0 skipped (edge); 376 passed, 1 skipped (workspace).**
 
 ---
 
