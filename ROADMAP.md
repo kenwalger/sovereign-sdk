@@ -711,16 +711,19 @@ committed = pipeline.drain_buffer()
   with ``__cause__ is OSError`` and message matching ``"operation failed"``; then asserts
   a second ``drain_buffer()`` commits exactly 1 receipt (entries survived the failed
   rotation).  ``TestEdgePipelineDrainBuffer`` grows from 8 to 9 cases.
-* [x] `SensorFrame.text_content()` — float canonicalization via `_canonicalize_payload`:
-  module-level helper replaces every ``float`` with ``float.is_integer() == True`` with its
-  ``int`` equivalent (non-finite floats pass through unchanged); normalizes cross-runtime
-  numeric type variance (MicroPython ``1.0`` vs CPython ``1``) so sieve-layer inputs are
-  byte-identical regardless of runtime JSON serializer; HMAC preimage computation in
-  ``pipeline.py`` is not modified — sensor constructs its own digest from its own
-  serialization, so edge-side normalization would break verification.
-  ``test_text_content_normalizes_integer_valued_floats`` (``TestSensorFrame``) asserts
-  identical ``text_content()`` output for ``d={"value": 1}`` vs ``d={"value": 1.0}``.
-  ``TestSensorFrame`` grows from 15 to 16 cases.
+* [x] `SensorFrame.text_content()` — float literal preservation; `_canonicalize_payload` removed:
+  the ``_canonicalize_payload`` helper (which coerced every ``float`` whose ``is_integer()``
+  returned ``True`` to its ``int`` equivalent) is removed in its entirety; ``text_content()``
+  now calls ``json.dumps(dict(self.d), sort_keys=True, separators=(",", ":"), ensure_ascii=False)``
+  directly, without any numeric type coercion, so ``float(1.0)`` is serialized as ``"1.0"``
+  rather than ``"1"``; the edge-side HMAC preimage is byte-identical to the canonical string
+  the sensor passed to its own HMAC-SHA256 digest function, eliminating the class of signature
+  verification failures caused by cross-runtime float normalization.
+  ``test_text_content_normalizes_integer_valued_floats`` is renamed
+  ``test_text_content_preserves_float_literal_format`` (``TestSensorFrame``) and its
+  assertion is inverted: asserts ``"1.0" in frame_float.text_content()`` and
+  ``frame_float.text_content() != frame_int.text_content()`` — confirming float and int wire
+  representations produce distinct preimage strings.
 * [x] `EdgePipeline.drain_buffer()` — duplicate eviction on `sqlite3.IntegrityError`:
   ``except sqlite3.IntegrityError: pass`` inserted before the broader
   ``except (SovereignStorageError, sqlite3.Error): requeue.append(...)`` guard; a receipt
@@ -832,6 +835,25 @@ committed = pipeline.drain_buffer()
   the inline ``json.dumps(dict(frame.d), ...)`` with ``frame.text_content()`` so the HMAC
   preimage and sieve input share a single normalized, compact canonical; unused
   ``import json`` removed from ``pipeline.py``.
+* [x] `OffGridBuffer._disk_writer` — write errors persisted to disk-backed quarantine log:
+  on ``OSError`` in the disk writer, the failed JSONL entry is appended to
+  ``{path}.quarantine`` via ``open(..., "a")`` + ``flush()`` + ``os.fsync()`` before being
+  recorded in the in-memory ``_write_errors`` list; ``_load_quarantine()`` is called during
+  ``__init__`` (after ``_recover_staging()``, before the worker thread starts) and repopulates
+  ``_write_errors`` from a prior run's quarantine file so the next ``drain()`` surfaces all
+  failed entries across crash-restart boundaries; ``drain()`` unlinks the quarantine file on
+  both the early-return path and the normal completion path after ``_write_errors`` is cleared;
+  quarantine write failures are caught with ``except OSError: pass`` so a missing or
+  unwritable quarantine directory degrades silently without masking the primary write error.
+* [x] `OffGridBuffer._acquire_buffer_lock()` — atomic OS-level lock creation via `os.open`:
+  ``open(self._lock_path, "x", encoding="utf-8")`` replaced with
+  ``os.open(str(self._lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)``; the single
+  atomic kernel syscall prevents two concurrent ``OffGridBuffer`` constructions on the same
+  path from both receiving a successful lock creation (the previous ``open(..., "x")`` could
+  race on some platforms between the existence check and file creation); the fd is closed
+  immediately after writing the PID via ``os.write`` + ``os.close`` in ``try/finally`` so
+  that external callers on Windows (which disallows ``unlink`` of open files without
+  ``FILE_SHARE_DELETE``) can unlink the lock file without contention during test teardown.
 * [x] 96-case desktop validation test suite across nine classes (`TestSensorFrame`: 16;
   `TestOffGridBuffer`: 12; `TestEdgePipelineProcess`: 19; `TestEdgePipelineBuffering`: 8;
   `TestEdgePipelineDrainBuffer`: 12; `TestOffGridBufferAsync`: 8;
@@ -855,8 +877,9 @@ committed = pipeline.drain_buffer()
   secure-by-default init with ``SovereignConfigurationError``, stale
   ``drain_read_failed`` flag reset after filesystem recovery, atomic rotation
   ``OSError`` propagation, drain_buffer cascading double-fault with
-  ``uncommitted_receipts`` preservation, cross-runtime float canonicalization in
-  ``text_content()``, duplicate ledger-entry eviction on ``sqlite3.IntegrityError``,
+  ``uncommitted_receipts`` preservation, float literal preservation in
+  ``text_content()`` for byte-identical HMAC preimage fidelity, duplicate
+  ledger-entry eviction on ``sqlite3.IntegrityError``,
   close-phase evacuation ``try/finally`` sentinel guard, two-phase non-destructive
   drain with ``.staging`` crash recovery, exclusive instance-lock collision guard,
   corrupt-staging quarantine with ``SovereignStorageError`` boot-time alert,
@@ -865,8 +888,11 @@ committed = pipeline.drain_buffer()
   evacuation-finally ``_pending`` decrement for racing-close sentinel,
   direct duplicate eviction in ``process()`` matching drain-buffer eviction contract,
   no lock-file orphan on ``SovereignConfigurationError`` constructor failure,
-  re-queue durability flush before staging commit, and unified compact HMAC
-  canonical via ``text_content()`` with separator alignment.
+  re-queue durability flush before staging commit, unified compact HMAC
+  canonical via ``text_content()`` with separator alignment,
+  disk-backed quarantine file for crash-durable write-error recovery across
+  restart boundaries, and atomic ``os.open(O_CREAT | O_EXCL)`` lock creation
+  eliminating TOCTOU races in concurrent ``OffGridBuffer`` construction.
   **96 passed, 0 skipped (edge); 385 passed, 1 skipped (workspace).**
 
 ---

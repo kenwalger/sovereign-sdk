@@ -1180,6 +1180,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   document compact separators and dual-purpose use.
   **Suite: 96 edge tests, 385 workspace tests passed, 1 skipped (POSIX fchmod).**
 
+- **`SensorFrame.text_content()` — float literal preservation: `_canonicalize_payload` removed**
+  (`models.py`): The ``_canonicalize_payload`` helper that coerced every ``float`` whose
+  ``is_integer()`` returned ``True`` to its ``int`` equivalent is removed, and its call in
+  ``text_content()`` is replaced with a direct ``dict(self.d)`` pass to ``json.dumps``.
+  The prior normalization (``1.0 → 1``) produced a canonical string that diverged from the
+  literal format the sensor embedded in its own HMAC preimage: a sensor that serialized
+  ``{"value": 1.0}`` signed ``'{"value":1.0}'``, but the edge node produced ``'{"value":1}'``,
+  causing HMAC-SHA256 verification to fail deterministically for every float-bearing payload.
+  Preserving the exact float literal ensures the edge-side preimage is byte-identical to the
+  sensor's signed string.  ``test_text_content_normalizes_integer_valued_floats`` is renamed
+  ``test_text_content_preserves_float_literal_format`` and its assertion is inverted: it now
+  asserts that ``"1.0"`` appears in the float frame's ``text_content()`` output and that
+  ``frame_float.text_content() != frame_int.text_content()``, verifying float fidelity rather
+  than normalization equality.
+
+- **`OffGridBuffer._disk_writer` — write errors persisted to disk-backed quarantine log**
+  (`buffer.py`): When the background writer raises :exc:`OSError` during a file write or
+  ``fsync``, the raw JSON entry is now appended to ``{path}.quarantine`` via ``open("a")`` +
+  ``fsync`` before the entry is recorded in ``_write_errors``.  The quarantine write is
+  best-effort: a nested ``except OSError: pass`` ensures that a quarantine-write failure (e.g.
+  the disk is genuinely full) does not mask the original error.  ``_write_errors`` continues to
+  serve as the in-session in-memory record, so ``drain()``, ``size``, ``write_error_count``,
+  and ``close()`` semantics are unchanged.  A new ``_load_quarantine()`` method is called from
+  ``__init__`` after ``_recover_staging()`` returns and before the background writer thread is
+  started; it reads ``{path}.quarantine`` if present, deserializes each line into a
+  ``(receipt_dict, sieved_content)`` tuple, and appends valid entries to ``_write_errors``
+  (malformed lines go to ``_dead_letter``).  ``drain()`` unlinks the quarantine file after
+  clearing ``_write_errors`` on both the empty-buffer early-return path and the normal
+  completion path, so a successful drain consumes both the in-memory and on-disk write-error
+  records atomically.  Together these changes eliminate the data-loss window where a
+  write-failed receipt existed only in the in-memory ``_write_errors`` list and was
+  permanently lost if the process was killed before ``drain()`` was called.
+
+- **`OffGridBuffer._acquire_buffer_lock()` — atomic OS-level lock creation via `os.open`**
+  (`buffer.py`): The ``open(self._lock_path, "x", encoding="utf-8")`` exclusive-create call
+  is replaced with
+  ``os.open(str(self._lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)``.  Both are backed
+  by the same ``O_CREAT | O_EXCL`` kernel semantics, but the raw ``os.open`` call makes the
+  OS-level atomic guarantee explicit: a single syscall either creates the file and returns an
+  fd, or raises ``FileExistsError`` — two concurrent ``OffGridBuffer`` constructions on the
+  same path cannot both receive a successful fd.  The fd is used to write the PID bytes via
+  ``os.write`` and then immediately closed via ``os.close`` in a ``try/finally`` block, so
+  external callers (including test teardown code that unlinks the lock file to allow
+  ``rmdir``) can access the file without contention.  The stale-lock detection and override
+  paths (reading the incumbent PID, probing liveness via ``os.kill``) are unchanged.
+
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing
   sensor observations into versioned, tamper-evident, minified JSON transmission envelopes with

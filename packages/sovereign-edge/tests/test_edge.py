@@ -187,25 +187,28 @@ class TestSensorFrame:
         with pytest.raises(TypeError):
             frame.d["injected_key"] = "malicious_value"  # type: ignore[index]
 
-    def test_text_content_normalizes_integer_valued_floats(self) -> None:
-        """text_content() must produce identical canonical JSON for payload fields
-        carrying integer values as int vs float(1.0) — cross-runtime numeric
-        type variance (e.g. MicroPython vs CPython JSON serialization) must not
-        produce divergent preimage strings."""
-        raw_int: bytes = json.dumps({
-            "v": 1, "n": _NODE_ID, "t": _TIMESTAMP, "q": 1,
-            "alg": "hmac-sha256", "d": {"value": 1}, "s": "a" * 64,
-        }).encode()
+    def test_text_content_preserves_float_literal_format(self) -> None:
+        """text_content() must preserve float values exactly as received so that the
+        edge-side HMAC preimage is byte-identical to the string the sensor signed.
+        Coercing float(1.0) to int 1 produces a preimage mismatch for any sensor
+        that serialized the payload field as a floating-point literal."""
         raw_float: bytes = json.dumps({
             "v": 1, "n": _NODE_ID, "t": _TIMESTAMP, "q": 1,
             "alg": "hmac-sha256", "d": {"value": 1.0}, "s": "a" * 64,
         }).encode()
-        frame_int = SensorFrame.from_bytes(raw_int)
+        raw_int: bytes = json.dumps({
+            "v": 1, "n": _NODE_ID, "t": _TIMESTAMP, "q": 1,
+            "alg": "hmac-sha256", "d": {"value": 1}, "s": "a" * 64,
+        }).encode()
         frame_float = SensorFrame.from_bytes(raw_float)
-        assert frame_int.text_content() == frame_float.text_content(), (
-            "text_content() must normalize float(1.0) to int 1 so that "
-            "cross-platform numeric type variance does not produce divergent "
-            "canonical strings and break HMAC preimage stability"
+        frame_int = SensorFrame.from_bytes(raw_int)
+        assert "1.0" in frame_float.text_content(), (
+            "float(1.0) must appear as '1.0' in text_content() to preserve "
+            "the exact preimage the sensor signed"
+        )
+        assert frame_float.text_content() != frame_int.text_content(), (
+            "text_content() must not coerce float(1.0) to int 1; distinct wire "
+            "representations must produce distinct preimage strings"
         )
 
 

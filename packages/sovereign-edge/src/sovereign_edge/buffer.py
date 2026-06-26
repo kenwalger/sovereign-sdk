@@ -84,6 +84,7 @@ class OffGridBuffer:
         self._path: Path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._staging_path: Path = Path(str(path) + ".staging")
+        self._quarantine_path: Path = Path(str(path) + ".quarantine")
         self._lock_path: Path = Path(str(path) + ".lock")
         self._write_queue: _queue.Queue[str | None] = _queue.Queue()
         self._pending: int = 0
@@ -105,6 +106,7 @@ class OffGridBuffer:
             except OSError:
                 pass
             raise
+        self._load_quarantine()
         self._worker_thread: threading.Thread = threading.Thread(
             target=self._disk_writer,
             daemon=True,
@@ -115,22 +117,33 @@ class OffGridBuffer:
     def _acquire_buffer_lock(self) -> None:
         """Acquire an exclusive instance lock for the buffer file path.
 
-        Creates a ``.lock`` file adjacent to the buffer containing the current
-        process identifier.  If the lock file already exists the owning PID is read
-        and tested for liveness via :func:`os.kill` with signal ``0``.  A stale lock
-        whose owner process no longer exists is overwritten with the current PID.
-        If the owner is still running, :exc:`RuntimeError` is raised immediately to
-        prevent two :class:`OffGridBuffer` instances from writing concurrently to the
-        same JSONL file, which would produce interleaved lines and corrupt the journal.
-        The lock is released by :meth:`close`.
+        Uses :func:`os.open` with ``O_CREAT | O_EXCL | O_WRONLY`` to atomically
+        create the ``.lock`` file in a single kernel call, writing the current process
+        identifier into it.  The OS rejects a concurrent creation attempt from any
+        other process or thread — two :class:`OffGridBuffer` instances racing on the
+        same path cannot both receive a successful ``O_EXCL`` creation.
+
+        If the lock file already exists, the owning PID is read and tested for
+        liveness via :func:`os.kill` with signal ``0``.  A stale lock whose owner
+        process no longer exists is overwritten with the current PID.  If the owner
+        is still running, :exc:`RuntimeError` is raised immediately to prevent two
+        instances from writing concurrently to the same JSONL file, which would
+        produce interleaved lines and corrupt the journal.  The lock is released
+        by :meth:`close`.
 
         :return: None
         :rtype: None
         :raises RuntimeError: If the buffer path is already held by a live process.
         """
         try:
-            with open(self._lock_path, "x", encoding="utf-8") as lf:
-                lf.write(str(os.getpid()))
+            _lock_fd: int = os.open(
+                str(self._lock_path),
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            )
+            try:
+                os.write(_lock_fd, str(os.getpid()).encode("utf-8"))
+            finally:
+                os.close(_lock_fd)
             return
         except FileExistsError:
             pass
@@ -258,6 +271,42 @@ class OffGridBuffer:
                 f"raised; staging file quarantined as '{corrupt_path}'"
             ) from exc
 
+    def _load_quarantine(self) -> None:
+        """Load write-error entries persisted to the quarantine file by a prior run.
+
+        Called once during :meth:`__init__` after :meth:`_recover_staging` completes,
+        before the background writer thread starts.  Entries in the quarantine file are
+        those that raised :exc:`OSError` during a prior background write and were
+        appended to ``{path}.quarantine`` for crash durability.  Loading them into
+        ``_write_errors`` ensures they appear in the next :meth:`drain` call and are
+        not silently abandoned across a process restart.
+
+        Malformed quarantine lines that cannot be deserialized are quarantined in
+        ``_dead_letter`` rather than silently dropped.  If the quarantine file itself
+        cannot be read, this method returns without raising — the absence of recovered
+        entries is safer than aborting construction for a non-critical recovery file.
+
+        :return: None
+        :rtype: None
+        """
+        if not self._quarantine_path.exists():
+            return
+        try:
+            lines: list[str] = self._quarantine_path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError):
+            return
+        for line in lines:
+            stripped: str = line.strip()
+            if not stripped:
+                continue
+            try:
+                _obj: dict[str, Any] = json.loads(stripped)
+                self._write_errors.append((_obj["receipt"], _obj["sieved_content"]))
+            except (json.JSONDecodeError, KeyError):
+                if len(self._dead_letter) >= _DEAD_LETTER_MAX:
+                    del self._dead_letter[0]
+                self._dead_letter.append(stripped)
+
     def _disk_writer(self) -> None:
         """Background daemon worker that serializes JSONL writes to disk.
 
@@ -315,6 +364,13 @@ class OffGridBuffer:
                     written = True
             except OSError:
                 if entry is not None:
+                    try:
+                        with open(self._quarantine_path, "a", encoding="utf-8") as _qf:
+                            _qf.write(entry + "\n")
+                            _qf.flush()
+                            os.fsync(_qf.fileno())
+                    except OSError:
+                        pass
                     try:
                         _obj: dict[str, Any] = json.loads(entry)
                         error_entry = (_obj["receipt"], _obj["sieved_content"])
@@ -515,6 +571,10 @@ class OffGridBuffer:
                 with self._count_lock:
                     self._committed = 0
                     self._write_errors.clear()
+                try:
+                    self._quarantine_path.unlink()
+                except (FileNotFoundError, OSError):
+                    pass
                 pending_error_entries.sort(key=_seq_key)
                 return pending_error_entries
 
@@ -554,6 +614,10 @@ class OffGridBuffer:
             with self._count_lock:
                 self._committed = max(0, self._committed - file_entry_count)
                 self._write_errors.clear()
+            try:
+                self._quarantine_path.unlink()
+            except (FileNotFoundError, OSError):
+                pass
 
             return entries
 
