@@ -44,7 +44,14 @@ from sovereign_ledger import SovereignLedger, SovereignStorageError
 from sovereign_sensor import bootstrap_sensor_node
 from sovereign_sensor.drivers.software_fallback import SoftwareFallbackDriver
 
-from sovereign_edge import EdgePipeline, EdgeResult, OffGridBuffer, SensorFrame, SovereignDoubleFaultError
+from sovereign_edge import (
+    EdgePipeline,
+    EdgeResult,
+    OffGridBuffer,
+    SensorFrame,
+    SovereignConfigurationError,
+    SovereignDoubleFaultError,
+)
 
 _NODE_ID: str = "edge-test-node-001"
 _TIMESTAMP: str = "2026-06-19T00:00:00Z"
@@ -1609,3 +1616,81 @@ class TestOffGridBufferWriteErrors:
         assert buf.drain_read_failed is True
         buf.drain()  # recover on-disk entry so close() does not raise
         buf.close()
+
+    def test_drain_read_failed_flag_resets_on_successful_drain(self, tmp_path: Path) -> None:
+        """drain_read_failed must revert to False on the next successful drain() after a
+        prior OSError so that a transient filesystem fault does not permanently mark the
+        diagnostic telemetry as failed once the storage tier recovers."""
+        import pathlib
+        buf = OffGridBuffer(str(tmp_path / "buf.jsonl"))
+        buf.push(self._make_receipt("B"), "content B")
+        buf.flush()
+        with patch.object(pathlib.Path, "read_text", side_effect=OSError("Transient I/O error")):
+            with pytest.raises(OSError):
+                buf.drain()
+        assert buf.drain_read_failed is True, (
+            "drain_read_failed should be True immediately after the OSError"
+        )
+        buf.push(self._make_receipt("B"), "content B")
+        buf.flush()
+        buf.drain()
+        assert buf.drain_read_failed is False, (
+            "drain_read_failed must reset to False after a successful drain "
+            "— stale True flag persists transient fault as a false-positive"
+        )
+        buf.close()
+
+
+class TestEdgePipelineSecureInit:
+    """Verify that EdgePipeline enforces secure-by-default initialization."""
+
+    def test_pipeline_raises_configuration_error_without_secret(self, tmp_path: Path) -> None:
+        """Constructing EdgePipeline without sensor_secret and without allow_unauthenticated=True
+        must raise SovereignConfigurationError immediately so that accidental unauthenticated
+        deployments are caught at construction time rather than silently passing frames."""
+        ledger = SovereignLedger(":memory:")
+        with pytest.raises(SovereignConfigurationError, match="allow_unauthenticated=True"):
+            EdgePipeline(
+                ledger=ledger,
+                signing_key=str(tmp_path / ".keys" / "edge_identity.pem"),
+                buffer_path=str(tmp_path / ".edge_buffer.jsonl"),
+            )
+        ledger.close()
+
+    def test_pipeline_raises_configuration_error_with_empty_string_secret(self, tmp_path: Path) -> None:
+        """Passing sensor_secret="" is equivalent to omitting it — SovereignConfigurationError
+        must be raised unless allow_unauthenticated=True is also passed."""
+        ledger = SovereignLedger(":memory:")
+        with pytest.raises(SovereignConfigurationError):
+            EdgePipeline(
+                ledger=ledger,
+                signing_key=str(tmp_path / ".keys" / "edge_identity.pem"),
+                buffer_path=str(tmp_path / ".edge_buffer.jsonl"),
+                sensor_secret="",
+            )
+        ledger.close()
+
+    def test_pipeline_construction_succeeds_with_allow_unauthenticated(self, tmp_path: Path) -> None:
+        """Passing allow_unauthenticated=True must suppress SovereignConfigurationError and
+        allow the pipeline to initialize without a secret — the explicit opt-out must work."""
+        ledger = SovereignLedger(":memory:")
+        pipeline = EdgePipeline(
+            ledger=ledger,
+            signing_key=str(tmp_path / ".keys" / "edge_identity.pem"),
+            buffer_path=str(tmp_path / ".edge_buffer.jsonl"),
+            allow_unauthenticated=True,
+        )
+        pipeline.close()
+        ledger.close()
+
+    def test_sovereign_configuration_error_is_value_error_subclass(self, tmp_path: Path) -> None:
+        """SovereignConfigurationError must be catchable as ValueError so existing callers
+        that catch ValueError at construction time handle the new exception without change."""
+        ledger = SovereignLedger(":memory:")
+        with pytest.raises(ValueError):
+            EdgePipeline(
+                ledger=ledger,
+                signing_key=str(tmp_path / ".keys" / "edge_identity.pem"),
+                buffer_path=str(tmp_path / ".edge_buffer.jsonl"),
+            )
+        ledger.close()

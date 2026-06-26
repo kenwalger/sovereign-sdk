@@ -44,6 +44,18 @@ class SovereignDoubleFaultError(RuntimeError):
         self.ledger_error: Exception = ledger_error
 
 
+class SovereignConfigurationError(ValueError):
+    """Raised when :class:`EdgePipeline` is constructed with an insecure or contradictory configuration.
+
+    Signals that the caller attempted to initialize the pipeline without a ``sensor_secret``
+    while ``allow_unauthenticated`` was left at its secure default of ``False``.  To run an
+    unauthenticated pipeline explicitly pass ``allow_unauthenticated=True``.
+
+    Inherits from :exc:`ValueError` so callers that already catch :exc:`ValueError` from
+    the construction phase continue to handle this case without modification.
+    """
+
+
 class EdgePipeline:
     """Ingestion orchestrator that bridges sovereign-sensor raw payloads and sovereign-ledger storage.
 
@@ -75,9 +87,17 @@ class EdgePipeline:
         this deployment.  When non-empty, :meth:`process` verifies the incoming frame's
         ``s`` field against a locally recomputed digest and raises :exc:`ValueError` on
         mismatch before the payload reaches the sieve or ledger.  Accepts either a
-        ``str`` (UTF-8 encoded on assignment) or raw ``bytes``.  Pass an empty string or
-        ``b""`` to disable inbound verification (default).
+        ``str`` (UTF-8 encoded on assignment) or raw ``bytes``.  Omitting this parameter
+        or passing an empty value requires ``allow_unauthenticated=True``; otherwise
+        :exc:`SovereignConfigurationError` is raised immediately at construction time.
     :type sensor_secret: str | bytes
+    :param allow_unauthenticated: Explicit opt-out of the mandatory secret requirement.
+        When ``True``, constructing an :class:`EdgePipeline` without a ``sensor_secret``
+        is permitted and inbound frame verification is disabled.  Defaults to ``False``
+        to enforce secure-by-default initialization.
+    :type allow_unauthenticated: bool
+    :raises SovereignConfigurationError: If ``sensor_secret`` is empty or ``None`` and
+        ``allow_unauthenticated`` is ``False``.
     """
 
     def __init__(
@@ -86,6 +106,7 @@ class EdgePipeline:
         signing_key: str = ".keys/edge_identity.pem",
         buffer_path: str = ".edge_buffer.jsonl",
         sensor_secret: str | bytes = b"",
+        allow_unauthenticated: bool = False,
     ) -> None:
         self._ledger: SovereignLedger = ledger
         self._buffer: OffGridBuffer = OffGridBuffer(buffer_path)
@@ -98,6 +119,12 @@ class EdgePipeline:
         self._sensor_secret: bytes = (
             sensor_secret.encode("utf-8") if isinstance(sensor_secret, str) else sensor_secret
         )
+        if not self._sensor_secret and not allow_unauthenticated:
+            raise SovereignConfigurationError(
+                "EdgePipeline requires a non-empty sensor_secret for HMAC-SHA256 inbound "
+                "frame verification.  To deliberately run without authentication pass "
+                "allow_unauthenticated=True."
+            )
 
     def process(self, frame_bytes: bytes) -> EdgeResult:
         """Parse, sieve, sign, and commit a sealed sensor wire frame.

@@ -346,6 +346,8 @@ class OffGridBuffer:
                 pending_error_entries.sort(key=_seq_key)
                 return pending_error_entries
 
+            with self._count_lock:
+                self._drain_read_failed = False
             try:
                 raw_lines: list[str] = self._path.read_text(encoding="utf-8").splitlines()
             except OSError:

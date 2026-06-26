@@ -472,7 +472,8 @@ ledger = SovereignLedger(".keys/sovereign_audit.db")
 pipeline = EdgePipeline(
     ledger=ledger,
     signing_key=".keys/edge_identity.pem",
-    sensor_secret=b"<shared-hmac-secret>",  # omit to disable inbound verification
+    sensor_secret=b"<shared-hmac-secret>",
+    # allow_unauthenticated=True  # required if sensor_secret is omitted
 )
 
 # Intercept a sealed wire frame from sovereign-sensor
@@ -672,10 +673,30 @@ committed = pipeline.drain_buffer()
   are not frozen" — removes the implication of deep immutability.
 * [x] `test_close_is_idempotent` docstring corrected: references ``_worker_running``
   state flag instead of ``is_alive()``, matching the OS-exit-gap implementation.
-* [x] 81-case desktop validation test suite across eight classes (`TestSensorFrame`: 15;
+* [x] `EdgePipeline.__init__()` — secure-by-default initialization: new
+  ``SovereignConfigurationError(ValueError)`` raised when ``sensor_secret`` is empty or
+  ``None`` and ``allow_unauthenticated=False`` (the default); new
+  ``allow_unauthenticated: bool = False`` keyword parameter allows deliberate opt-out;
+  ``SovereignConfigurationError`` exported from ``sovereign_edge.__all__``.
+* [x] `OffGridBuffer.drain()` — stale read-failure flag reset: ``self._drain_read_failed``
+  set to ``False`` under ``_count_lock`` immediately before each ``Path.read_text()``
+  attempt so a prior transient ``OSError`` does not persist as a false-positive after
+  filesystem recovery.
+* [x] `TestEdgePipelineSecureInit` — four new tests: construction without secret raises
+  ``SovereignConfigurationError`` matching ``"allow_unauthenticated=True"``; empty-string
+  secret also raises; ``allow_unauthenticated=True`` permits construction; error is
+  catchable as ``ValueError`` (inheritance invariant).  New class
+  ``TestEdgePipelineSecureInit``: 4 cases.
+* [x] `test_drain_read_failed_flag_resets_on_successful_drain`
+  (``TestOffGridBufferWriteErrors``): simulates transient ``OSError``
+  (``drain_read_failed → True``), then successful drain asserts ``drain_read_failed is
+  False``; guards the reset path against future regression.
+  ``TestOffGridBufferWriteErrors`` grows from 10 to 11 cases.
+* [x] 86-case desktop validation test suite across nine classes (`TestSensorFrame`: 15;
   `TestOffGridBuffer`: 10; `TestEdgePipelineProcess`: 18; `TestEdgePipelineBuffering`: 8;
   `TestEdgePipelineDrainBuffer`: 8; `TestOffGridBufferAsync`: 8;
-  `TestEdgePipelineSieveFault`: 4; `TestOffGridBufferWriteErrors`: 10) covering all
+  `TestEdgePipelineSieveFault`: 4; `TestOffGridBufferWriteErrors`: 11;
+  `TestEdgePipelineSecureInit`: 4) covering all
   fortification scenarios: non-blocking `push()` with immediate `size` reporting,
   chronological `drain()` sort by sequence, non-integer sequence value tolerance,
   `_committed` counter accuracy after drain, sieve fault fallback with raw text and
@@ -690,8 +711,10 @@ committed = pipeline.drain_buffer()
   guard, exhaustive replay-crash re-queue, deep MappingProxyType immutability on
   ``SensorFrame.d``, ``SovereignDoubleFaultError`` double-fault receipt recovery,
   drain_buffer OSError halt-and-alert, 16-thread TOCTOU push-vs-crash stress test with
-  zero ``_pending`` drift, and OS-exit-gap ``_worker_running`` sentinel guard.
-  **81 passed, 0 skipped (edge); 370 passed, 1 skipped (workspace).**
+  zero ``_pending`` drift, OS-exit-gap ``_worker_running`` sentinel guard,
+  secure-by-default init with ``SovereignConfigurationError``, and stale
+  ``drain_read_failed`` flag reset after filesystem recovery.
+  **86 passed, 0 skipped (edge); 375 passed, 1 skipped (workspace).**
 
 ---
 

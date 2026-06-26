@@ -773,6 +773,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   round where the ``is_alive()`` check was replaced by the flag precisely to close the
   race window this test exercises.
 
+- **`EdgePipeline.__init__()` — secure-by-default initialization: `SovereignConfigurationError`
+  and `allow_unauthenticated` parameter** (`pipeline.py`, `__init__.py`): A new
+  ``SovereignConfigurationError(ValueError)`` class is introduced before ``EdgePipeline``.
+  ``EdgePipeline.__init__`` gains a new ``allow_unauthenticated: bool = False`` keyword
+  parameter.  When ``sensor_secret`` is empty or ``None`` and ``allow_unauthenticated`` is
+  ``False``, the constructor raises ``SovereignConfigurationError`` immediately — before any
+  key-directory creation, buffer construction, or key-manager wiring — so that accidental
+  unauthenticated deployments are surfaced at object construction rather than silently
+  passing every inbound frame without verification.  Callers that deliberately require no
+  authentication must pass ``allow_unauthenticated=True`` to acknowledge the trade-off
+  explicitly.  ``SovereignConfigurationError`` inherits from ``ValueError`` so existing
+  callers that catch ``ValueError`` from the construction phase continue to handle it
+  without modification.  The class and its new ``raises`` contract are exported from
+  ``sovereign_edge.__init__`` via the ``__all__`` list.  The class docstring and
+  ``EdgePipeline`` class docstring ``:param sensor_secret:`` and new
+  ``:param allow_unauthenticated:`` / ``:raises SovereignConfigurationError:`` entries are
+  updated accordingly.
+
+- **`OffGridBuffer.drain()` — stale read-failure flag reset** (`buffer.py`): A
+  ``with self._count_lock: self._drain_read_failed = False`` statement is added immediately
+  before the ``try: raw_lines = self._path.read_text(...)`` block.  Without this reset, a
+  prior ``OSError`` on ``read_text`` set ``_drain_read_failed = True`` permanently; once the
+  filesystem recovered and subsequent drains succeeded, the flag remained ``True``
+  indefinitely, causing any diagnostic poller to see a stale fault signal long after the
+  storage tier had returned to a healthy state.  The reset is placed under ``_count_lock``
+  for thread safety, co-located with the ``OSError`` handler that sets it to ``True``.
+  Because the flag is only reached after ``_path.exists()`` returns ``True``, a
+  non-existent buffer file path continues to return the prior flag state unchanged (no reset
+  fires for an empty drain).
+
+- **`TestEdgePipelineSecureInit` — four-case secure-init validation class** (`test_edge.py`):
+  New top-level class ``TestEdgePipelineSecureInit`` adds four cases: (1)
+  ``test_pipeline_raises_configuration_error_without_secret`` asserts
+  ``SovereignConfigurationError`` matching ``"allow_unauthenticated=True"`` when no
+  ``sensor_secret`` is passed; (2)
+  ``test_pipeline_raises_configuration_error_with_empty_string_secret`` asserts the same for
+  ``sensor_secret=""``, confirming that an empty string is treated identically to omission;
+  (3) ``test_pipeline_construction_succeeds_with_allow_unauthenticated`` asserts construction
+  succeeds and the pipeline can be cleanly closed when ``allow_unauthenticated=True`` is
+  passed without a secret; (4)
+  ``test_sovereign_configuration_error_is_value_error_subclass`` asserts that constructing
+  without a secret raises as ``ValueError``, verifying the inheritance invariant.
+
+- **`TestOffGridBufferWriteErrors` — `test_drain_read_failed_flag_resets_on_successful_drain`**
+  (`test_edge.py`): Simulates a transient filesystem failure (``OSError`` from
+  ``pathlib.Path.read_text``) so ``drain_read_failed`` becomes ``True``.  After the patch
+  context exits, re-pushes an entry, flushes, and drains successfully.  Asserts
+  ``drain_read_failed is False`` after the successful drain, verifying the reset path and
+  guarding against future regression where stale ``True`` persists after storage recovery.
+  ``TestOffGridBufferWriteErrors`` grows from 10 to 11 cases.
+  **Suite: 86 edge tests, 375 workspace tests passed, 1 skipped (POSIX fchmod).**
+
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing
   sensor observations into versioned, tamper-evident, minified JSON transmission envelopes with
