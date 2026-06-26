@@ -8,6 +8,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from sovereign_ledger import SovereignStorageError
+
 _DEAD_LETTER_MAX: int = 100
 
 
@@ -159,22 +161,62 @@ class OffGridBuffer:
           to the active path.
         * **Both exist**: staging content (older entries) is prepended to the active
           content (newer entries) via a temp-file atomic merge; the staging file is then
-          unlinked.  If the merge fails, both files are left intact for manual recovery.
+          unlinked.
+
+        The staging file is always read first — even in the promote-only branch — to
+        detect corruption at boot time.  If the read raises :exc:`OSError` or
+        :exc:`UnicodeDecodeError`, the staging file is quarantined by renaming it to
+        ``{staging_path}.corrupt`` and :exc:`~sovereign_ledger.SovereignStorageError`
+        is raised immediately so the host process is notified before the background
+        writer thread starts.  Silently skipping a corrupt read would allow an
+        undetected data-loss condition to masquerade as a clean boot.  If the
+        quarantine rename itself fails the original staging file is left in place;
+        the :exc:`~sovereign_ledger.SovereignStorageError` is re-raised in either case.
+
+        The same quarantine-and-raise pattern applies when :func:`os.replace` or the
+        merge temp-file operations raise :exc:`OSError` after the staging content has
+        been confirmed readable.
 
         :return: None
         :rtype: None
+        :raises SovereignStorageError: If the staging file cannot be read due to
+            :exc:`OSError` or :exc:`UnicodeDecodeError`, or if the active-file
+            promotion or merge operation raises :exc:`OSError`.  The staging file is
+            quarantined as ``{staging_path}.corrupt`` before raising in all cases.
+            The process-exclusive lock file is not cleaned up on a staging recovery
+            failure; the caller must not retry construction on the same path without
+            resolving the quarantined file.
         """
         if not self._staging_path.exists():
             return
+        corrupt_path: Path = Path(str(self._staging_path) + ".corrupt")
+        try:
+            staging_text: str = self._staging_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            try:
+                os.replace(self._staging_path, corrupt_path)
+            except OSError:
+                pass
+            raise SovereignStorageError(
+                f"OffGridBuffer boot-time staging recovery failed: cannot read "
+                f"'{self._staging_path}'; file quarantined as '{corrupt_path}'"
+            ) from exc
         if not self._path.exists():
             try:
                 os.replace(self._staging_path, self._path)
-            except OSError:
-                pass
+            except OSError as exc:
+                try:
+                    os.replace(self._staging_path, corrupt_path)
+                except OSError:
+                    pass
+                raise SovereignStorageError(
+                    f"OffGridBuffer boot-time staging recovery failed: cannot promote "
+                    f"'{self._staging_path}' to '{self._path}'; "
+                    f"file quarantined as '{corrupt_path}'"
+                ) from exc
             return
         tmp_path: str = ""
         try:
-            staging_text: str = self._staging_path.read_text(encoding="utf-8")
             active_text: str = self._path.read_text(encoding="utf-8")
             if staging_text and not staging_text.endswith("\n"):
                 staging_text += "\n"
@@ -193,12 +235,20 @@ class OffGridBuffer:
                 self._staging_path.unlink()
             except OSError:
                 pass
-        except OSError:
+        except OSError as exc:
             if tmp_path:
                 try:
                     os.remove(tmp_path)
                 except OSError:
                     pass
+            try:
+                os.replace(self._staging_path, corrupt_path)
+            except OSError:
+                pass
+            raise SovereignStorageError(
+                f"OffGridBuffer boot-time staging recovery failed: merge operation "
+                f"raised; staging file quarantined as '{corrupt_path}'"
+            ) from exc
 
     def _disk_writer(self) -> None:
         """Background daemon worker that serializes JSONL writes to disk.

@@ -1009,6 +1009,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``TestEdgePipelineDrainBuffer`` grows from 10 to 11 cases.
   **Suite: 90 edge tests, 379 workspace tests passed, 1 skipped (POSIX fchmod).**
 
+- **`OffGridBuffer._recover_staging()` — corrupt-staging quarantine and loud failure**
+  (`buffer.py`): The method previously caught ``OSError`` silently (``except OSError: pass``)
+  in both the promote-only and merge branches, allowing a staging file that cannot be read
+  (corrupted bytes, permission loss) to be skipped entirely.  The process would boot with the
+  corrupt staging content invisible, silently losing every entry that had been serialized into
+  it before the crash.  The fix restructures the method to always attempt
+  ``self._staging_path.read_text(encoding="utf-8")`` first — even in the promote-only branch
+  where only a rename would otherwise occur — so corruption is detected at boot time before
+  any worker thread starts.  If ``read_text`` raises ``OSError`` or ``UnicodeDecodeError``,
+  the staging file is quarantined by renaming it to ``{staging_path}.corrupt`` via
+  ``os.replace`` (best-effort; if the rename fails the original staging file is left in place)
+  and ``SovereignStorageError`` is raised immediately.  The same quarantine-and-raise pattern
+  is applied when the ``os.replace`` promotion or the merge temp-file operation raises
+  ``OSError`` after the staging content has been confirmed readable.  An import of
+  ``SovereignStorageError`` from ``sovereign_ledger`` is added to ``buffer.py``; the package
+  already depends on ``sovereign_ledger`` via ``pipeline.py`` so no new workspace dependency
+  is introduced.  The ``_recover_staging`` docstring is updated with the quarantine contract
+  and the observation that the process-exclusive lock file is not cleaned up on a staging
+  recovery failure.
+
+- **`EdgePipeline.drain_buffer()` — crash-recovery deduplication documented in docstring**
+  (`pipeline.py`): A new paragraph is added to the ``drain_buffer()`` docstring explicitly
+  documenting the ``sqlite3.IntegrityError`` eviction mechanism as the crash-recovery
+  deduplication guarantee.  When ``_recover_staging()`` merges a leftover staging file back
+  into the active buffer on boot, the merged active file may contain entries that were
+  already committed to the ledger before the crash.  The inner replay loop's
+  ``except sqlite3.IntegrityError: pass`` clause catches the ``UNIQUE constraint failed``
+  error raised by ``append_receipt()`` for those entries and silently evicts them — neither
+  counting them in ``committed`` nor re-queuing them — ensuring each receipt is persisted to
+  the ledger exactly once across a crash-restart boundary.  No code change is required; the
+  existing ``IntegrityError`` handler already provides this guarantee; the docstring addition
+  makes the invariant explicit.
+
+- **`TestOffGridBuffer` — `test_recover_staging_quarantines_corrupt_file`** (`test_edge.py`):
+  Writes ``b"\xff\xfe invalid utf-8 \x80\x81"`` (invalid UTF-8) to the ``.staging`` path
+  before constructing an ``OffGridBuffer`` at the same base path.  Asserts that
+  ``OffGridBuffer.__init__`` raises ``SovereignStorageError``, that the ``.staging.corrupt``
+  quarantine file exists at the expected path, and that the original ``.staging`` file no
+  longer exists (it was renamed, not left in place).  Without the fix the constructor
+  silently swallowed the ``UnicodeDecodeError`` and booted in a state where every staged
+  entry was permanently invisible to subsequent drain passes.
+  ``TestOffGridBuffer`` grows from 10 to 11 cases.
+
+- **`TestEdgePipelineDrainBuffer` — `test_drain_buffer_deduplicates_on_post_crash_restart`**
+  (`test_edge.py`): Full three-phase crash-restart integration test for the ``IntegrityError``
+  deduplication path.  Phase 1 buffers two receipts via a closed ledger on ``pipeline_a``.
+  Phase 2 opens a recovery pipeline ``pipeline_b`` and patches ``append_receipt`` to succeed on
+  entry 1 and raise ``RuntimeError`` on entry 2; after ``drain_buffer()`` raises, entry 2 is
+  re-queued to the active buffer and the staging file is confirmed to exist.  ``pipeline_b``'s
+  buffer is closed (flushing entry 2 to disk).  Phase 3 constructs ``pipeline_c``: the
+  ``__init__`` call triggers ``_recover_staging()`` which merges staging (entries 1+2) into
+  active (entry 2), producing three JSONL lines.  ``drain_buffer()`` submits all three to the
+  recovery ledger: entry 1 raises ``IntegrityError`` (already committed) → evicted; entry 2
+  is committed; the duplicate entry 2 raises ``IntegrityError`` → evicted.  Asserts
+  ``len(committed) == 1`` — exactly one new ledger row — confirming that the
+  ``IntegrityError`` eviction mechanism prevents a crash-restart cycle from persisting the
+  same receipt more than once.  ``TestEdgePipelineDrainBuffer`` grows from 11 to 12 cases.
+  **Suite: 92 edge tests, 381 workspace tests passed, 1 skipped (POSIX fchmod).**
+
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing
   sensor observations into versioned, tamper-evident, minified JSON transmission envelopes with

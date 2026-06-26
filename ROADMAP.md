@@ -758,9 +758,34 @@ committed = pipeline.drain_buffer()
   are stolen; live locks raise ``RuntimeError`` at construction time; lock is released by
   ``close()`` on clean shutdown; write-error tests updated to unlink the lock file before
   ``buf_dir.rmdir()``.
-* [x] 90-case desktop validation test suite across nine classes (`TestSensorFrame`: 16;
-  `TestOffGridBuffer`: 10; `TestEdgePipelineProcess`: 18; `TestEdgePipelineBuffering`: 8;
-  `TestEdgePipelineDrainBuffer`: 11; `TestOffGridBufferAsync`: 8;
+* [x] `OffGridBuffer._recover_staging()` — corrupt-staging quarantine: always reads the
+  staging file first (even in the promote-only branch) so that ``OSError`` or
+  ``UnicodeDecodeError`` is detected at boot time before the worker thread starts; on any
+  read or operation failure the staging file is renamed to ``{path}.staging.corrupt`` and
+  ``SovereignStorageError`` is raised immediately, preventing a corrupt staging file from
+  being silently skipped and its entries permanently lost; ``SovereignStorageError``
+  imported into ``buffer.py`` from ``sovereign_ledger`` (no new workspace dependency —
+  the package already depends on ``sovereign_ledger`` via ``pipeline.py``).
+  ``test_recover_staging_quarantines_corrupt_file`` (``TestOffGridBuffer``) writes invalid
+  UTF-8 bytes to the staging path and asserts ``SovereignStorageError`` from
+  ``OffGridBuffer.__init__`` and the presence of the ``.staging.corrupt`` quarantine file.
+  ``TestOffGridBuffer`` grows from 10 to 11 cases.
+* [x] `EdgePipeline.drain_buffer()` docstring — crash-recovery deduplication explicitly
+  documented: a new paragraph specifies that ``sqlite3.IntegrityError`` eviction (the
+  existing ``except sqlite3.IntegrityError: pass`` clause) is the crash-recovery
+  deduplication mechanism; after a crash-restart cycle where ``_recover_staging()`` merges
+  a staging file back into the active buffer, re-submitted entries already in the ledger
+  raise ``IntegrityError`` and are silently evicted — not re-queued — guaranteeing each
+  receipt is persisted exactly once across a crash-restart boundary.  No code change.
+* [x] `test_drain_buffer_deduplicates_on_post_crash_restart` (``TestEdgePipelineDrainBuffer``):
+  three-phase integration test: Phase 1 buffers 2 receipts via a closed ledger; Phase 2
+  crashes ``drain_buffer()`` after entry 1 is committed (entry 2 re-queued, staging intact);
+  Phase 3 constructs a new pipeline triggering ``_recover_staging()`` merge → 3 active lines;
+  ``drain_buffer()`` deduplicates via ``IntegrityError`` → exactly 1 new commit.
+  ``TestEdgePipelineDrainBuffer`` grows from 11 to 12 cases.
+* [x] 92-case desktop validation test suite across nine classes (`TestSensorFrame`: 16;
+  `TestOffGridBuffer`: 11; `TestEdgePipelineProcess`: 18; `TestEdgePipelineBuffering`: 8;
+  `TestEdgePipelineDrainBuffer`: 12; `TestOffGridBufferAsync`: 8;
   `TestEdgePipelineSieveFault`: 4; `TestOffGridBufferWriteErrors`: 11;
   `TestEdgePipelineSecureInit`: 4) covering all
   fortification scenarios: non-blocking `push()` with immediate `size` reporting,
@@ -784,8 +809,10 @@ committed = pipeline.drain_buffer()
   ``uncommitted_receipts`` preservation, cross-runtime float canonicalization in
   ``text_content()``, duplicate ledger-entry eviction on ``sqlite3.IntegrityError``,
   close-phase evacuation ``try/finally`` sentinel guard, two-phase non-destructive
-  drain with ``.staging`` crash recovery, and exclusive instance-lock collision guard.
-  **90 passed, 0 skipped (edge); 379 passed, 1 skipped (workspace).**
+  drain with ``.staging`` crash recovery, exclusive instance-lock collision guard,
+  corrupt-staging quarantine with ``SovereignStorageError`` boot-time alert, and
+  crash-restart ``IntegrityError`` deduplication end-to-end integration.
+  **92 passed, 0 skipped (edge); 381 passed, 1 skipped (workspace).**
 
 ---
 

@@ -345,6 +345,34 @@ class TestOffGridBuffer:
         finally:
             buf.close()
 
+    def test_recover_staging_quarantines_corrupt_file(self, tmp_path: Path) -> None:
+        """OffGridBuffer.__init__ must raise SovereignStorageError and quarantine the
+        staging file as *.staging.corrupt when the file contains bytes that cannot be
+        decoded as UTF-8.  Silently skipping a corrupt staging read would allow an
+        undetected data-loss condition to masquerade as a clean boot and leave staged
+        entries permanently invisible to every subsequent drain pass.
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        buf_path: Path = tmp_path / "buf.jsonl"
+        staging_path: Path = Path(str(buf_path) + ".staging")
+        corrupt_path: Path = Path(str(staging_path) + ".corrupt")
+
+        staging_path.write_bytes(b"\xff\xfe invalid utf-8 \x80\x81")
+
+        with pytest.raises(SovereignStorageError):
+            OffGridBuffer(str(buf_path))
+
+        assert corrupt_path.exists(), (
+            "staging file must be quarantined as .staging.corrupt when reading fails; "
+            "a missing quarantine file indicates the error was silently suppressed"
+        )
+        assert not staging_path.exists(), (
+            "original staging file must be renamed to .staging.corrupt, not left at "
+            "the original path where it could be re-encountered on the next boot attempt"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -1247,6 +1275,98 @@ class TestEdgePipelineDrainBuffer:
         finally:
             pipeline_b._buffer.close()
             open_ledger.close()
+
+    def test_drain_buffer_deduplicates_on_post_crash_restart(self, tmp_path: Path) -> None:
+        """A crash-restart cycle must not cause already-committed receipts to be
+        submitted to the ledger a second time.
+
+        When drain_buffer() aborts mid-replay, :meth:`_recover_staging` merges the
+        surviving staging file (containing all original entries) back into the active
+        buffer on the next boot.  Re-submitted entries that are already in the ledger
+        trigger ``sqlite3.IntegrityError``; the inner replay loop must catch that error
+        and silently evict the duplicate rather than re-queuing it, ensuring each
+        receipt is persisted exactly once across a crash-restart boundary.
+
+        Phase 1: buffer 2 receipts via a closed ledger so both land on disk.
+        Phase 2: crash the replay loop after committing entry 1; staging file is
+        preserved, entry 2 is re-queued to the active buffer.
+        Phase 3: construct a new pipeline, triggering ``_recover_staging()`` to merge
+        staging (entries 1+2) into active (entry 2), producing three lines.
+        ``drain_buffer()`` must commit exactly 1 new entry — the second receipt — while
+        silently evicting the duplicate first receipt via ``IntegrityError``.
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        buffer_path: str = str(tmp_path / ".edge_buffer.jsonl")
+        staging_path: Path = Path(buffer_path + ".staging")
+        key_path: str = str(tmp_path / ".keys" / "edge_identity.pem")
+
+        # Phase 1: force 2 receipts into the buffer via a closed ledger.
+        closed_ledger: SovereignLedger = SovereignLedger(":memory:")
+        pipeline_a: EdgePipeline = EdgePipeline(
+            ledger=closed_ledger,
+            signing_key=key_path,
+            buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
+        )
+        closed_ledger.close()
+        try:
+            pipeline_a.process(_seal_frame(tmp_path))
+            pipeline_a.process(_seal_frame(tmp_path))
+            pipeline_a._buffer.flush()
+        finally:
+            pipeline_a._buffer.close()
+
+        # Phase 2: crash the replay loop after committing entry 1 so that the
+        # staging file survives and entry 2 is re-queued to the active buffer.
+        recovery_ledger: SovereignLedger = SovereignLedger(str(tmp_path / "recovery.db"))
+        pipeline_b: EdgePipeline = EdgePipeline(
+            ledger=recovery_ledger,
+            signing_key=key_path,
+            buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
+        )
+        call_count: list[int] = [0]
+        original_append = recovery_ledger.append_receipt
+
+        def _crash_on_second(
+            receipt_dict: dict[str, Any], sieved_content: str
+        ) -> str:
+            call_count[0] += 1
+            if call_count[0] >= 2:
+                raise RuntimeError("simulated mid-replay crash")
+            return original_append(receipt_dict, sieved_content)
+
+        try:
+            with patch.object(recovery_ledger, "append_receipt", side_effect=_crash_on_second):
+                with pytest.raises(RuntimeError, match="simulated mid-replay crash"):
+                    pipeline_b.drain_buffer()
+            pipeline_b._buffer.flush()
+            assert staging_path.exists(), "staging file must survive mid-replay crash"
+        finally:
+            pipeline_b._buffer.close()
+
+        # Phase 3: new pipeline triggers _recover_staging() to merge staging (entries
+        # 1+2) into the active buffer (entry 2), producing 3 total lines.
+        # drain_buffer() must commit exactly 1 new entry — entry 2 — and silently
+        # evict entry 1 (already committed) and the duplicate entry 2 via IntegrityError.
+        pipeline_c: EdgePipeline = EdgePipeline(
+            ledger=recovery_ledger,
+            signing_key=key_path,
+            buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
+        )
+        try:
+            committed: list[str] = pipeline_c.drain_buffer()
+            assert len(committed) == 1, (
+                f"Expected exactly 1 new commit after crash-restart deduplication; "
+                f"got {len(committed)} — entry already committed to the ledger before "
+                "the crash must be silently evicted via IntegrityError, not re-committed"
+            )
+        finally:
+            pipeline_c._buffer.close()
+            recovery_ledger.close()
 
 
 # ---------------------------------------------------------------------------

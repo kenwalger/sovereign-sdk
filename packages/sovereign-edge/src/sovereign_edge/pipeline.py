@@ -299,6 +299,19 @@ class EdgePipeline:
         or ``sqlite3.Error`` is re-queued to the buffer so that no receipt is
         discarded on a transient ledger fault.
 
+        **Crash-recovery deduplication**: entries that were already committed to the
+        ledger before a prior crash (e.g., the first entry in a mid-replay abort) will
+        trigger ``sqlite3.IntegrityError`` on re-submission because their
+        ``payload_hash`` already occupies a ``UNIQUE`` ledger slot.  The inner replay
+        loop catches ``sqlite3.IntegrityError`` explicitly — before the broader
+        ``sqlite3.Error`` guard — and silently evicts the duplicate without re-queuing
+        it, preventing infinite replay loops where an already-persisted receipt is
+        perpetually re-submitted on every drain-buffer invocation.  After a
+        crash-restart cycle where :meth:`~sovereign_edge.buffer.OffGridBuffer._recover_staging`
+        merges a staging file back into the active buffer, this eviction mechanism
+        guarantees that each receipt is committed to the ledger exactly once regardless
+        of how many times it appears in the merged active file.
+
         A ``try/finally`` block guarantees that ``drained[processed:]`` — the exact
         slice of entries that had not yet been resolved when an exception aborted the
         loop — is always appended to the re-queue list before control leaves the loop
