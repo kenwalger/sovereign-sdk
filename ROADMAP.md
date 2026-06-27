@@ -954,7 +954,32 @@ committed = pipeline.drain_buffer()
   when both the primary buffer and the quarantine disk path are unwritable,
   and selective open() mock in ``test_close_propagates_buffer_write_error_as_runtime_error``
   isolating primary-buffer failures from quarantine writes.
-  **99 passed, 0 skipped (edge); 388 passed, 1 skipped (workspace).**
+
+- Stale-sentinel elimination: outer ``try/finally`` belt-and-suspenders sweep in
+  ``_disk_writer`` drains any sentinel stranded in the queue after the main loop exits;
+  re-indented ``while True:`` from 10-space to canonical 12-space nesting with
+  consistent 4-space body indentation throughout.
+
+- Atomic sentinel placement in ``close()``: ``_write_queue.put(None)`` moved inside
+  ``_count_lock`` acquisition so the sentinel is always in the queue when ``_closed =
+  True`` becomes visible to the evacuation ``finally`` block, closing the race window
+  where the evacuation could drain an empty queue before ``put(None)`` fires.
+
+- Permanent data-format fault eviction in ``drain_buffer()``: inner
+  ``except (ValueError, TypeError) as permanent_err:`` clause in the per-entry replay
+  loop emits a ``SOVEREIGN-EDGE CRITICAL`` line to ``sys.stderr`` and skips re-queuing
+  for entries that will never succeed (bad schema, type mismatch), preventing infinite
+  replay loops while still allowing operational ``RuntimeError`` to abort the loop and
+  preserve the staging file; ``import sys`` added to ``pipeline.py``.
+
+- Three new/updated tests: ``test_drain_buffer_evicts_permanently_on_non_storage_exception``
+  (renamed from ``test_drain_buffer_requeues_all_items_on_unexpected_exception``, verifies
+  ``ValueError`` → permanent eviction, no re-queue, ``drain_buffer()`` returns normally),
+  ``test_drain_buffer_permanent_fault_emits_critical_log`` (guards stderr format: CRITICAL
+  prefix, exception type, exception message), and
+  ``test_racing_close_sentinel_drained_by_evacuation`` (verifies close() does not hang
+  when racing with an in-progress crash, ``_pending == 0`` after resolution).
+  **101 passed, 0 skipped (edge); 390 passed, 1 skipped (workspace).**
 
 ---
 

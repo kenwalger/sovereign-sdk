@@ -4,6 +4,7 @@ import binascii
 import hashlib
 import hmac as _hmac
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -316,20 +317,30 @@ class EdgePipeline:
 
         Eagerly materialises the drained entry list before the replay loop so
         that a ``processed`` index can track how far through the list the loop
-        advanced.  If an unexpected exception (any :exc:`Exception` not caught
-        by the inner :exc:`~sovereign_ledger.SovereignStorageError` /
-        ``sqlite3.Error`` guard) aborts the replay pass mid-iteration, the
+        advanced.  Each entry is dispatched through a four-tier inner exception
+        hierarchy: ``sqlite3.IntegrityError`` → silent duplicate eviction;
+        :exc:`~sovereign_ledger.SovereignStorageError` / ``sqlite3.Error`` →
+        transient storage fault, entry re-queued; :exc:`ValueError` /
+        :exc:`TypeError` → permanent data-format fault, entry evicted and a
+        ``SOVEREIGN-EDGE CRITICAL`` line emitted to :data:`sys.stderr` with the
+        exception type, message, and ``payload_hash``; all other
+        :exc:`Exception` subclasses → unhandled, propagate to the outer
+        ``except`` block which aborts the replay loop.  Permanent eviction on
+        ``ValueError`` / ``TypeError`` prevents an infinite replay loop where a
+        receipt with a bad schema would be re-buffered and fail on every
+        subsequent drain pass, while still allowing operational failures such as
+        :exc:`RuntimeError` to abort the replay and preserve the staging file for
+        manual recovery.  If an unexpected exception escapes the per-entry
+        handlers entirely and aborts the replay loop mid-iteration, the outer
         ``except`` branch appends every un-processed entry
         (``drained[processed:]``) to the requeue list before the exception is
-        re-raised.  This closes the data-loss window where local function scope
-        held the only surviving references to those entries: when the original
-        ``for`` loop was interrupted, all entries after the crash point were
-        silently abandoned.
+        re-raised, closing the data-loss window where those entries would
+        otherwise be held only in local scope.
 
         Successfully committed entries are returned as ``payload_hash`` strings.
-        Any entry that fails due to a persistent :exc:`~sovereign_ledger.SovereignStorageError`
+        Any entry that fails due to a transient :exc:`~sovereign_ledger.SovereignStorageError`
         or ``sqlite3.Error`` is re-queued to the buffer so that no receipt is
-        discarded on a transient ledger fault.
+        discarded on a recoverable storage fault.
 
         **Crash-recovery deduplication**: entries that were already committed to the
         ledger before a prior crash (e.g., the first entry in a mid-replay abort) will
@@ -412,6 +423,14 @@ class EdgePipeline:
                     pass
                 except (SovereignStorageError, sqlite3.Error):
                     requeue.append((receipt_dict, sieved_content))
+                except (ValueError, TypeError) as permanent_err:
+                    _phash: str = receipt_dict.get("payload_hash", "<unknown>")
+                    sys.stderr.write(
+                        f"SOVEREIGN-EDGE CRITICAL: receipt evicted during drain_buffer() replay — "
+                        f"permanent non-storage exception {type(permanent_err).__name__}: {permanent_err}; "
+                        f"payload_hash={_phash}\n"
+                    )
+                    sys.stderr.flush()
                 processed += 1
         except Exception as exc:
             crash_exc = exc

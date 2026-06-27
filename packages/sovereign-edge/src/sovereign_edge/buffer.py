@@ -371,105 +371,122 @@ class OffGridBuffer:
         sentinel is consumed by the evacuation sweep or the normal loop iteration and
         ``_pending`` is correctly decremented.
 
+        After the main loop exits (via ``return`` on either path), an outer ``try/finally``
+        block performs a non-blocking sweep of the write queue.  Under the
+        ``_count_lock``-atomic sentinel placement guarantee in :meth:`close`, this sweep
+        is always a no-op; it defends against any future regression where
+        :meth:`queue.Queue.put` could race after the evacuation ``finally`` block has
+        already checked the queue.
+
         :return: None
         :rtype: None
         """
-        while True:
-            entry: str | None = self._write_queue.get()
-            stop: bool = entry is None
-            written: bool = False
-            error_entry: tuple[dict[str, Any], str] | None = None
-            dead_letter_entry: str | None = None
-            worker_failed: bool = False
-            try:
-                if not stop:
-                    with open(self._path, "a", encoding="utf-8") as fh:
-                        fh.write(entry + "\n")
-                        fh.flush()
-                        os.fsync(fh.fileno())
-                    written = True
-            except OSError:
-                if entry is not None:
-                    try:
-                        with open(self._quarantine_path, "a", encoding="utf-8") as _qf:
-                            _qf.write(entry + "\n")
-                            _qf.flush()
-                            os.fsync(_qf.fileno())
-                    except Exception:
-                        sys.stderr.write(
-                            f"SOVEREIGN-EDGE CRITICAL: quarantine write failed; "
-                            f"entry emitted to stderr for supervisor recovery: {entry}\n"
-                        )
-                        sys.stderr.flush()
-                        worker_failed = True
-                    try:
-                        _obj: dict[str, Any] = json.loads(entry)
-                        error_entry = (_obj["receipt"], _obj["sieved_content"])
-                    except (json.JSONDecodeError, KeyError):
-                        dead_letter_entry = entry
-            except Exception:
-                worker_failed = True
-                if entry is not None:
-                    try:
-                        _obj = json.loads(entry)
-                        error_entry = (_obj["receipt"], _obj["sieved_content"])
-                    except (json.JSONDecodeError, KeyError):
-                        dead_letter_entry = entry
-            finally:
-                with self._count_lock:
-                    if worker_failed:
-                        self._worker_failed = True
-                    self._pending -= 1
-                    if written:
-                        self._committed += 1
-                    elif error_entry is not None:
-                        self._write_errors.append(error_entry)
-                    elif dead_letter_entry is not None:
-                        if len(self._dead_letter) >= _DEAD_LETTER_MAX:
-                            del self._dead_letter[0]
-                        self._dead_letter.append(dead_letter_entry)
-                self._write_queue.task_done()
-            if stop or worker_failed:
-                if worker_failed:
-                    try:
-                        with self._count_lock:
-                            while True:
-                                try:
-                                    orphan: str | None = self._write_queue.get_nowait()
-                                    if orphan is not None:
-                                        try:
-                                            _orphan_obj: dict[str, Any] = json.loads(orphan)
-                                            orphan_pair: tuple[dict[str, Any], str] = (
-                                                _orphan_obj["receipt"],
-                                                _orphan_obj["sieved_content"],
-                                            )
-                                            self._pending -= 1
-                                            self._write_errors.append(orphan_pair)
-                                        except (json.JSONDecodeError, KeyError):
-                                            self._pending -= 1
-                                            if len(self._dead_letter) >= _DEAD_LETTER_MAX:
-                                                del self._dead_letter[0]
-                                            self._dead_letter.append(orphan)
-                                    else:
-                                        self._pending -= 1
-                                    self._write_queue.task_done()
-                                except _queue.Empty:
-                                    break
-                    finally:
-                        with self._count_lock:
-                            if self._closed:
-                                try:
-                                    while True:
-                                        self._write_queue.get_nowait()
-                                        self._pending -= 1
-                                        self._write_queue.task_done()
-                                except _queue.Empty:
-                                    pass
-                            self._worker_running = False
-                else:
+        try:
+            while True:
+                entry: str | None = self._write_queue.get()
+                stop: bool = entry is None
+                written: bool = False
+                error_entry: tuple[dict[str, Any], str] | None = None
+                dead_letter_entry: str | None = None
+                worker_failed: bool = False
+                try:
+                    if not stop:
+                        with open(self._path, "a", encoding="utf-8") as fh:
+                            fh.write(entry + "\n")
+                            fh.flush()
+                            os.fsync(fh.fileno())
+                        written = True
+                except OSError:
+                    if entry is not None:
+                        try:
+                            with open(self._quarantine_path, "a", encoding="utf-8") as _qf:
+                                _qf.write(entry + "\n")
+                                _qf.flush()
+                                os.fsync(_qf.fileno())
+                        except Exception:
+                            sys.stderr.write(
+                                f"SOVEREIGN-EDGE CRITICAL: quarantine write failed; "
+                                f"entry emitted to stderr for supervisor recovery: {entry}\n"
+                            )
+                            sys.stderr.flush()
+                            worker_failed = True
+                        try:
+                            _obj: dict[str, Any] = json.loads(entry)
+                            error_entry = (_obj["receipt"], _obj["sieved_content"])
+                        except (json.JSONDecodeError, KeyError):
+                            dead_letter_entry = entry
+                except Exception:
+                    worker_failed = True
+                    if entry is not None:
+                        try:
+                            _obj = json.loads(entry)
+                            error_entry = (_obj["receipt"], _obj["sieved_content"])
+                        except (json.JSONDecodeError, KeyError):
+                            dead_letter_entry = entry
+                finally:
                     with self._count_lock:
-                        self._worker_running = False
-                return
+                        if worker_failed:
+                            self._worker_failed = True
+                        self._pending -= 1
+                        if written:
+                            self._committed += 1
+                        elif error_entry is not None:
+                            self._write_errors.append(error_entry)
+                        elif dead_letter_entry is not None:
+                            if len(self._dead_letter) >= _DEAD_LETTER_MAX:
+                                del self._dead_letter[0]
+                            self._dead_letter.append(dead_letter_entry)
+                    self._write_queue.task_done()
+                if stop or worker_failed:
+                    if worker_failed:
+                        try:
+                            with self._count_lock:
+                                while True:
+                                    try:
+                                        orphan: str | None = self._write_queue.get_nowait()
+                                        if orphan is not None:
+                                            try:
+                                                _orphan_obj: dict[str, Any] = json.loads(orphan)
+                                                orphan_pair: tuple[dict[str, Any], str] = (
+                                                    _orphan_obj["receipt"],
+                                                    _orphan_obj["sieved_content"],
+                                                )
+                                                self._pending -= 1
+                                                self._write_errors.append(orphan_pair)
+                                            except (json.JSONDecodeError, KeyError):
+                                                self._pending -= 1
+                                                if len(self._dead_letter) >= _DEAD_LETTER_MAX:
+                                                    del self._dead_letter[0]
+                                                self._dead_letter.append(orphan)
+                                        else:
+                                            self._pending -= 1
+                                        self._write_queue.task_done()
+                                    except _queue.Empty:
+                                        break
+                        finally:
+                            with self._count_lock:
+                                if self._closed:
+                                    try:
+                                        while True:
+                                            self._write_queue.get_nowait()
+                                            self._pending -= 1
+                                            self._write_queue.task_done()
+                                    except _queue.Empty:
+                                        pass
+                                self._worker_running = False
+                    else:
+                        with self._count_lock:
+                            self._worker_running = False
+                    return
+        finally:
+            try:
+                while True:
+                    _stray: str | None = self._write_queue.get_nowait()
+                    with self._count_lock:
+                        self._pending -= 1
+                    self._write_queue.task_done()
+            except _queue.Empty:
+                pass
 
     def push(self, receipt: dict[str, Any], sieved_content: str) -> None:
         """Enqueue a receipt entry for asynchronous JSONL persistence.
@@ -747,9 +764,8 @@ class OffGridBuffer:
                 if not self._closed and self._worker_running:
                     self._closed = True
                     self._pending += 1
+                    self._write_queue.put(None)
                     sentinel_placed = True
-            if sentinel_placed:
-                self._write_queue.put(None)
         if sentinel_placed:
             self._worker_thread.join()
         try:

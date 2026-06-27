@@ -1366,6 +1366,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the new double-fault detection logic.
   **Suite: 99 edge tests, 388 workspace tests passed, 1 skipped (POSIX fchmod).**
 
+- **`OffGridBuffer._disk_writer` — outer `try/finally` belt-and-suspenders sweep and
+  `while True:` re-indentation** (`buffer.py`): Wraps the entire `while True:` worker loop
+  in an outer `try/finally` block.  After the loop exits via `return` on either the
+  normal-stop or crash-evacuation path, the `finally:` performs a non-blocking
+  `get_nowait()` drain sweep that decrements `_pending` and calls `task_done()` for any
+  sentinel stranded in the queue.  Under the ``_count_lock``-atomic sentinel placement
+  guarantee (see below), this sweep is always a no-op on the happy path; it defends against
+  any regression where `queue.Queue.put` could race after the evacuation `finally` block
+  has already cleared the queue.  The prior edit had introduced `while True:` at 10-space
+  indentation (2 more than `try:`, yielding 2-space delta instead of the canonical
+  4-space delta used throughout the rest of the method); this release re-indents the
+  entire loop body to the correct 12-space position for `while True:` and 16-space for
+  its first-level body statements.
+
+- **`OffGridBuffer.close()` — atomic sentinel placement under `_count_lock`** (`buffer.py`):
+  Moves `self._write_queue.put(None)` from AFTER the `_count_lock` release to INSIDE the
+  `_count_lock` acquisition block.  The previous placement had a race window: the lock was
+  released with `_closed = True` and `_pending` incremented, but the sentinel had not yet
+  entered the queue.  The crash-evacuation `finally` block, running on the worker thread,
+  could acquire `_count_lock`, observe `_closed = True`, attempt a `get_nowait()` drain
+  (finding the queue empty because `put(None)` had not yet fired), clear `_worker_running
+  = False`, and return.  The worker thread then exited, and `close()`'s subsequent
+  `put(None)` placed the sentinel into a permanently dead queue — incrementing
+  `unfinished_tasks` with no consumer alive to call `task_done()`.  Any subsequent
+  `flush()` call would block on `queue.join()` indefinitely.  With the sentinel placement
+  inside `_count_lock`, both `_closed = True` and `queue.put(None)` are committed
+  atomically before the lock is released, guaranteeing the evacuation `finally` always
+  finds the sentinel when it observes `_closed = True`.
+
+- **`EdgePipeline.drain_buffer()` — permanent data-format fault eviction with stderr
+  emission** (`pipeline.py`): Adds an inner `except (ValueError, TypeError) as
+  permanent_err:` clause to the per-entry replay loop, inserting between the
+  `(SovereignStorageError, sqlite3.Error)` re-queue clause and the loop body's normal
+  flow.  When `append_receipt` raises `ValueError` or `TypeError` for a specific entry
+  (e.g., an adapter-level schema validation failure), the entry is permanently evicted:
+  a ``SOVEREIGN-EDGE CRITICAL`` line is emitted to ``sys.stderr`` via
+  ``sys.stderr.write()`` + ``flush()`` containing the exception type, message, and
+  ``payload_hash``, then the loop advances to the next entry without re-queuing.  This
+  prevents an infinite replay loop where a receipt with a permanently bad data format
+  would be re-buffered and fail on every subsequent drain pass.  Operational exceptions
+  (`RuntimeError`, etc.) are intentionally left uncaught by this clause so that
+  catastrophic ledger failures still abort the replay loop and preserve the staging file.
+  Adds ``import sys`` to pipeline.py.  Updates the ``drain_buffer()`` docstring to
+  document the four-tier per-entry exception hierarchy.
+
+- **`TestEdgePipelineBuffering` — `test_drain_buffer_evicts_permanently_on_non_storage_exception`**
+  (`test_edge.py`): Renamed and rewritten from
+  ``test_drain_buffer_requeues_all_items_on_unexpected_exception`` to guard the new
+  eviction semantics.  Buffers 3 receipts via a closed ledger, then replays with a mock
+  that raises ``ValueError("permanent schema validation failure")`` on the second call.
+  Asserts that ``drain_buffer()`` returns without raising, that ``committed`` contains
+  exactly 2 hashes (entries 1 and 3), and that ``buffer_depth == 0`` — entry 2 was
+  permanently evicted rather than re-queued.  ``TestEdgePipelineBuffering`` case count
+  unchanged (rename-in-place).
+
+- **`TestEdgePipelineBuffering` — `test_drain_buffer_permanent_fault_emits_critical_log`**
+  (`test_edge.py`): New test guarding the stderr emission path for permanent per-entry
+  eviction.  Buffers 1 receipt, replays with a ``TypeError("receipt dict missing required
+  field")`` mock on ``append_receipt``, and substitutes ``sys.stderr`` with a
+  ``StringIO`` sink.  Asserts that the captured stderr output contains
+  ``"SOVEREIGN-EDGE CRITICAL"``, ``"TypeError"``, and the exception message, confirming
+  that the supervisor-recovery log line is both emitted and correctly formatted.
+  ``TestEdgePipelineBuffering`` grows from 9 to 10 cases.
+
+- **`TestOffGridBufferWriteErrors` — `test_racing_close_sentinel_drained_by_evacuation`**
+  (`test_edge.py`): New test guarding the sentinel-non-hang guarantee when ``close()``
+  races with an in-progress non-OSError worker crash.  A gated ``builtins.open`` mock
+  allows the background writer to signal entry into the crash path before raising, then
+  blocks until the main thread has started the close thread.  The close thread calls
+  ``buf.close()`` (catching the expected ``RuntimeError`` about un-journaled entries)
+  and signals ``close_done``.  The crash is released; the test asserts
+  ``close_done.wait(timeout=5.0)`` returns ``True`` (close did not hang) and
+  ``buf._pending == 0`` (no counter drift from an unconsumed sentinel).
+  ``TestOffGridBufferWriteErrors`` grows from 13 to 14 cases.
+  **Suite: 101 edge tests, 390 workspace tests passed, 1 skipped (POSIX fchmod).**
+
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing
   sensor observations into versioned, tamper-evident, minified JSON transmission envelopes with

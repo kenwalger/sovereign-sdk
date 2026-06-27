@@ -1073,22 +1073,27 @@ class TestEdgePipelineDrainBuffer:
             pipeline_b.close()
             recovery_ledger.close()
 
-    def test_drain_buffer_requeues_all_items_on_unexpected_exception(
+    def test_drain_buffer_evicts_permanently_on_non_storage_exception(
         self, tmp_path: Path
     ) -> None:
-        """drain_buffer() must re-queue every un-committed entry when an unexpected
-        exception aborts the replay loop mid-iteration; without the fix, entries after
-        the crash point are abandoned in local function scope and permanently lost.
+        """Per-entry non-storage exceptions in the replay loop must be permanently evicted,
+        not re-queued.  A ValueError raised by append_receipt is caught by the inner
+        ``except Exception as permanent_err:`` clause; the entry is silently discarded and
+        the loop advances to the next entry without propagating the exception.
 
-        Setup: buffer 3 receipts via a closed ledger.  On the recovery drain pass, mock
-        append_receipt to succeed on the first call and raise ValueError on the second.
-        After the resulting ValueError propagates, the 2nd and 3rd receipts must be
-        visible in the buffer (size == 2); without the safety net, only the 2nd would be
-        attempted and the 3rd would vanish mid-iteration."""
+        Setup: buffer 3 receipts.  On replay, entries 1 and 3 commit successfully; entry 2
+        raises ValueError.  drain_buffer() must return without raising, committed must
+        contain exactly 2 hashes (entries 1 and 3), and buffer_depth must be 0 — entry 2
+        was evicted, not re-queued.
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        import io
+        import sys as _sys
         buffer_path: str = str(tmp_path / ".edge_buffer.jsonl")
         key_path: str = str(tmp_path / ".keys" / "edge_identity.pem")
 
-        # Phase 1: force 3 receipts into the buffer via a closed ledger.
         closed_ledger: SovereignLedger = SovereignLedger(":memory:")
         pipeline_a: EdgePipeline = EdgePipeline(
             ledger=closed_ledger,
@@ -1106,7 +1111,6 @@ class TestEdgePipelineDrainBuffer:
         finally:
             pipeline_a._buffer.close()
 
-        # Phase 2: replay with an open ledger that crashes on the 2nd item.
         open_ledger: SovereignLedger = SovereignLedger(str(tmp_path / "recovery.db"))
         pipeline_b: EdgePipeline = EdgePipeline(
             ledger=open_ledger,
@@ -1117,26 +1121,89 @@ class TestEdgePipelineDrainBuffer:
         call_count: list[int] = [0]
         real_append = open_ledger.append_receipt
 
-        def _crash_on_second(receipt: dict[str, Any], content: str) -> str:
+        def _fail_on_second(receipt: dict[str, Any], content: str) -> str:
             call_count[0] += 1
             if call_count[0] == 2:
-                raise ValueError("unexpected ledger error mid-iteration")
+                raise ValueError("permanent schema validation failure")
             return real_append(receipt, content)
 
+        stderr_sink: io.StringIO = io.StringIO()
         try:
-            with patch.object(open_ledger, "append_receipt", side_effect=_crash_on_second):
-                with pytest.raises(ValueError, match="unexpected ledger error"):
-                    pipeline_b.drain_buffer()
+            with patch.object(open_ledger, "append_receipt", side_effect=_fail_on_second):
+                with patch("sys.stderr", stderr_sink):
+                    committed: list[str] = pipeline_b.drain_buffer()
 
-            pipeline_b._buffer.flush()
-            assert pipeline_b._buffer.size == 2, (
-                f"Expected 2 items re-queued after crash; got {pipeline_b._buffer.size} — "
-                "entries after the crash point were abandoned in local function scope"
+            assert len(committed) == 2, (
+                f"Expected 2 committed hashes (entries 1 and 3); got {len(committed)} — "
+                "entry 2 (ValueError) must be evicted, not re-queued"
+            )
+            assert pipeline_b.buffer_depth == 0, (
+                f"buffer_depth={pipeline_b.buffer_depth} — evicted entry must not be "
+                "re-queued to the buffer; only transient storage faults are re-queued"
             )
         finally:
-            pipeline_b._buffer.drain()  # clear buffer so close() does not raise
             pipeline_b._buffer.close()
             open_ledger.close()
+
+    def test_drain_buffer_permanent_fault_emits_critical_log(
+        self, tmp_path: Path
+    ) -> None:
+        """Per-entry permanent eviction must write a SOVEREIGN-EDGE CRITICAL line to
+        sys.stderr containing the exception type, message, and payload_hash so that a
+        process supervisor can identify and recover the dropped receipt out-of-band.
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        import io
+        buffer_path: str = str(tmp_path / ".edge_buffer.jsonl")
+        key_path: str = str(tmp_path / ".keys" / "edge_identity.pem")
+
+        closed_ledger: SovereignLedger = SovereignLedger(":memory:")
+        pipeline: EdgePipeline = EdgePipeline(
+            ledger=closed_ledger,
+            signing_key=key_path,
+            buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
+        )
+        closed_ledger.close()
+        try:
+            pipeline.process(_seal_frame(tmp_path, {"seq": 1}))
+            pipeline._buffer.flush()
+        finally:
+            pipeline._buffer.close()
+
+        open_ledger: SovereignLedger = SovereignLedger(str(tmp_path / "recovery.db"))
+        pipeline2: EdgePipeline = EdgePipeline(
+            ledger=open_ledger,
+            signing_key=key_path,
+            buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
+        )
+        stderr_sink: io.StringIO = io.StringIO()
+        try:
+            with patch.object(
+                open_ledger,
+                "append_receipt",
+                side_effect=TypeError("receipt dict missing required field"),
+            ):
+                with patch("sys.stderr", stderr_sink):
+                    pipeline2.drain_buffer()
+        finally:
+            pipeline2._buffer.close()
+            open_ledger.close()
+
+        stderr_output: str = stderr_sink.getvalue()
+        assert "SOVEREIGN-EDGE CRITICAL" in stderr_output, (
+            "stderr must contain the CRITICAL prefix so process supervisors can filter "
+            f"permanent eviction events; got: {stderr_output!r}"
+        )
+        assert "TypeError" in stderr_output, (
+            f"stderr must name the exception type for diagnosis; got: {stderr_output!r}"
+        )
+        assert "receipt dict missing required field" in stderr_output, (
+            f"stderr must include the exception message; got: {stderr_output!r}"
+        )
 
     def test_drain_buffer_survives_push_failure_on_requeue(
         self, tmp_path: Path
@@ -2138,6 +2205,66 @@ class TestOffGridBufferWriteErrors:
             f"_pending={buf._pending} after crash + concurrent close(); "
             "sentinel placed by a racing close() was not decremented in the "
             "evacuation finally block"
+        )
+
+    def test_racing_close_sentinel_drained_by_evacuation(self, tmp_path: Path) -> None:
+        """Sentinel placed by close() inside _count_lock must be consumed by the
+        evacuation finally block when close() races with an in-progress worker crash,
+        preventing an orphaned sentinel from stalling flush() → queue.join().
+
+        The sentinel is placed atomically with _closed=True under _count_lock.  The
+        evacuation finally block re-acquires _count_lock, observes _closed=True, and
+        drains the sentinel before clearing _worker_running=False.  The outer
+        try/finally belt-and-suspenders sweep handles any sentinel that survives past
+        the evacuation path.  Together these guards guarantee _pending reaches zero and
+        close() returns without blocking even when racing with an active crash.
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        import builtins as _builtins
+        _real_open = _builtins.open
+
+        crash_entered: threading.Event = threading.Event()
+        release_crash: threading.Event = threading.Event()
+
+        def _gated_crash(*args: Any, **kwargs: Any) -> Any:
+            mode: str = args[1] if len(args) > 1 else kwargs.get("mode", "r")
+            if "a" in mode:
+                crash_entered.set()
+                release_crash.wait(timeout=5.0)
+                raise RuntimeError("gated synthetic crash for sentinel race")
+            return _real_open(*args, **kwargs)
+
+        buf: OffGridBuffer = OffGridBuffer(str(tmp_path / "race_buf.jsonl"))
+        close_done: threading.Event = threading.Event()
+
+        def _close_buf() -> None:
+            try:
+                buf.close()
+            except RuntimeError:
+                pass  # expected: un-journaled entries remain; we are testing non-hang
+            finally:
+                close_done.set()
+
+        with patch("builtins.open", side_effect=_gated_crash):
+            buf.push(self._make_receipt("race", sequence=1), "race content")
+            crash_entered.wait(timeout=5.0)
+            close_thread: threading.Thread = threading.Thread(
+                target=_close_buf, daemon=True
+            )
+            close_thread.start()
+            release_crash.set()
+
+        assert close_done.wait(timeout=5.0), (
+            "close() stalled — sentinel placed by racing close() was not consumed by "
+            "the evacuation finally block or the outer try/finally sweep; "
+            "flush() -> queue.join() blocked indefinitely with _pending > 0"
+        )
+        assert buf._pending == 0, (
+            f"_pending={buf._pending} after crash + racing close(); "
+            "sentinel or entry was not decremented — counter drift would stall "
+            "any subsequent flush() call"
         )
 
     def test_double_write_fault_emits_to_stderr(self, tmp_path: Path) -> None:
