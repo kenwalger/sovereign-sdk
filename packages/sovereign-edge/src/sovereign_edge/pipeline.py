@@ -177,10 +177,13 @@ class EdgePipeline:
            mints a :class:`~sovereign_core.crypto.ForensicReceipt` whose ``metadata``
            embeds the originating node identifier and the full Prose Tax summary.
         4. **Commit** — the receipt is submitted to the ledger via
-           :meth:`~sovereign_ledger.SovereignLedger.append_receipt`.  On
-           :exc:`~sovereign_ledger.SovereignStorageError` or ``sqlite3.Error``, the
-           receipt is written to the off-grid buffer and ``buffered=True`` is set in
-           the returned :class:`EdgeResult`.
+           :meth:`~sovereign_ledger.SovereignLedger.append_receipt`.  On any
+           :exc:`Exception` (including :exc:`~sovereign_ledger.SovereignStorageError`,
+           ``sqlite3.Error``, and application-level validation faults such as
+           :exc:`ValueError`), the receipt is written to the off-grid buffer and
+           ``buffered=True`` is set in the returned :class:`EdgeResult`.  The only
+           exception not routed to the buffer is ``sqlite3.IntegrityError``, which
+           signals a duplicate ``payload_hash`` and is silently evicted (see below).
 
         HMAC-SHA256 preimage canonicalization: the ``d``-payload segment of the
         preimage is produced via :meth:`SensorFrame.text_content`, which applies
@@ -203,10 +206,10 @@ class EdgePipeline:
             ``"hmac-sha256"`` (unsupported or unauthenticated algorithm), or if the
             frame's HMAC-SHA256 digest does not match the locally recomputed expected
             signature.
-        :raises SovereignDoubleFaultError: If the ledger raises
-            :exc:`~sovereign_ledger.SovereignStorageError` or ``sqlite3.Error`` *and*
-            the subsequent :meth:`~sovereign_edge.buffer.OffGridBuffer.push` also raises.
-            The signed receipt dict is attached to the exception via :attr:`~SovereignDoubleFaultError.receipt`.
+        :raises SovereignDoubleFaultError: If ``append_receipt`` raises any
+            :exc:`Exception` other than ``sqlite3.IntegrityError`` *and* the subsequent
+            :meth:`~sovereign_edge.buffer.OffGridBuffer.push` also raises.  The signed
+            receipt dict is attached to the exception via :attr:`~SovereignDoubleFaultError.receipt`.
 
         When the ledger raises ``sqlite3.IntegrityError`` (duplicate ``payload_hash``),
         the receipt is silently evicted — ``buffered`` is set to ``False`` and the receipt
@@ -285,7 +288,7 @@ class EdgePipeline:
             payload_hash: str = self._ledger.append_receipt(receipt_dict, sieve_result.text)
         except sqlite3.IntegrityError:
             payload_hash = receipt_dict["payload_hash"]
-        except (SovereignStorageError, sqlite3.Error) as ledger_err:
+        except Exception as ledger_err:
             try:
                 self._buffer.push(receipt_dict, sieve_result.text)
                 payload_hash = receipt_dict["payload_hash"]

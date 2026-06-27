@@ -760,15 +760,29 @@ class TestEdgePipelineBuffering:
 
         Setup: close the ledger to force buffering, pre-seal both frames outside the
         patch context so sequence-file writes succeed, then patch builtins.open with
-        ENOSPC to make the background writer place the receipt in _write_errors instead
-        of on disk.  A second identical patch during close() ensures the drain_buffer()
-        re-queue also fails, keeping _write_errors non-empty when buffer.close()
+        ENOSPC only for the primary buffer file to make the background writer place the
+        receipt in _write_errors instead of on disk.  The quarantine path is excluded
+        from the patch so the quarantine write succeeds and worker_failed remains False.
+        A second identical patch during close() ensures the drain_buffer() re-queue also
+        fails on the primary buffer, keeping _write_errors non-empty when buffer.close()
         inspects it and raises."""
+        import builtins as _builtins
+
+        _real_open = _builtins.open
+        buffer_path: str = str(tmp_path / ".edge_buffer.jsonl")
+
+        def _fail_on_primary_append(*args: Any, **kwargs: Any) -> Any:
+            path_arg: str = str(args[0]) if args else str(kwargs.get("file", ""))
+            mode: str = args[1] if len(args) > 1 else kwargs.get("mode", "r")
+            if "a" in mode and not path_arg.endswith(".quarantine"):
+                raise OSError("ENOSPC: no space left on device")
+            return _real_open(*args, **kwargs)
+
         ledger = SovereignLedger(":memory:")
         pipeline = EdgePipeline(
             ledger=ledger,
             signing_key=str(tmp_path / ".keys" / "edge_identity.pem"),
-            buffer_path=str(tmp_path / ".edge_buffer.jsonl"),
+            buffer_path=buffer_path,
             sensor_secret=_SENSOR_SECRET,
         )
         frame_a: bytes = _seal_frame(tmp_path)
@@ -776,13 +790,13 @@ class TestEdgePipelineBuffering:
         ledger.close()
 
         frame_b: bytes = _seal_frame(tmp_path)
-        with patch("builtins.open", side_effect=OSError("ENOSPC: no space left on device")):
+        with patch("builtins.open", side_effect=_fail_on_primary_append):
             pipeline.process(frame_b)
             pipeline._buffer.flush()
 
         assert pipeline._buffer.write_error_count == 1
 
-        with patch("builtins.open", side_effect=OSError("ENOSPC: no space left on device")):
+        with patch("builtins.open", side_effect=_fail_on_primary_append):
             with pytest.raises(RuntimeError, match="un-journaled"):
                 pipeline.close()
 
@@ -815,6 +829,46 @@ class TestEdgePipelineBuffering:
             "buffer RuntimeError must be chained from drain RuntimeError via __cause__; "
             "root-cause exception was suppressed"
         )
+        ledger.close()
+
+    def test_process_buffers_on_application_level_ledger_exception(self, tmp_path: Path) -> None:
+        """Any non-IntegrityError exception from append_receipt — including application-level
+        validation failures such as ValueError — must route the ForensicReceipt to the
+        off-grid buffer rather than propagating to the caller.
+
+        The catch handler in process() must match Exception (not just SovereignStorageError
+        or sqlite3.Error) so that unforeseen ledger-layer faults trigger the same
+        buffer-fallback path as recognised storage errors, eliminating silent drops.
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        ledger: SovereignLedger = SovereignLedger(":memory:")
+        pipeline: EdgePipeline = EdgePipeline(
+            ledger=ledger,
+            signing_key=str(tmp_path / ".keys" / "edge_identity.pem"),
+            buffer_path=str(tmp_path / ".edge_buffer.jsonl"),
+            sensor_secret=_SENSOR_SECRET,
+        )
+        try:
+            _seal_frame(tmp_path)  # warm up sequence file before patching
+            with patch.object(
+                ledger,
+                "append_receipt",
+                side_effect=ValueError("ledger schema validation failed"),
+            ):
+                result: EdgeResult = pipeline.process(_seal_frame(tmp_path))
+            assert result.buffered is True, (
+                "process() must route the receipt to the off-grid buffer when "
+                "append_receipt raises a non-storage application-level exception; "
+                "ValueError must not propagate to the caller"
+            )
+            assert pipeline.buffer_depth > 0, (
+                "buffer_depth must be non-zero after the receipt was diverted "
+                "to the off-grid buffer on an application-level ledger fault"
+            )
+        finally:
+            pipeline.close()
         ledger.close()
 
     def test_process_raises_sovereign_double_fault_error_on_double_failure(
@@ -2085,6 +2139,46 @@ class TestOffGridBufferWriteErrors:
             "sentinel placed by a racing close() was not decremented in the "
             "evacuation finally block"
         )
+
+    def test_double_write_fault_emits_to_stderr(self, tmp_path: Path) -> None:
+        """When both the primary JSONL write and the quarantine file write fail, the raw
+        entry must be written to sys.stderr with an unbuffered flush so the container or
+        process supervisor can capture and recover the payload out-of-band.  The
+        background worker must mark itself as failed (worker_failed=True) rather than
+        leaving the entry to sit in a volatile in-memory list with no external signal.
+
+        Setup: the buffer directory is removed after construction so every file open()
+        call — both the primary write to the JSONL file and the quarantine write to
+        {path}.quarantine — raises FileNotFoundError (a subclass of OSError), triggering
+        the double-fault path in _disk_writer.
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        import io
+        buf_dir: Path = tmp_path / "dbl"
+        buf_dir.mkdir()
+        buf_path: Path = buf_dir / "buf.jsonl"
+        buf: OffGridBuffer = OffGridBuffer(str(buf_path))
+        lock_path: Path = Path(str(buf_path) + ".lock")
+        receipt: dict[str, Any] = self._make_receipt("double-fault", sequence=7)
+        stderr_sink: io.StringIO = io.StringIO()
+        lock_path.unlink()
+        buf_dir.rmdir()
+        with patch("sys.stderr", stderr_sink):
+            buf.push(receipt, "double-fault-content")
+            buf.flush()
+        assert buf.worker_failed, (
+            "worker must mark itself as failed after a double write-fault "
+            "(both primary write and quarantine write raised)"
+        )
+        assert "double-fault" in stderr_sink.getvalue(), (
+            "sys.stderr must contain the raw entry payload after a double write-fault "
+            "so the supervisor can capture and recover the receipt that could not be "
+            "persisted to either the JSONL file or the quarantine file"
+        )
+        buf.drain()
+        buf.close()
 
 
 class TestEdgePipelineSecureInit:

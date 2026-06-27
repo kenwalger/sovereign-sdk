@@ -945,8 +945,16 @@ committed = pipeline.drain_buffer()
   on ``PermissionError`` lock-file access preventing silent lock theft,
   snapshot-bounded ``_write_errors`` drain clearing preserving post-snapshot entries,
   and unconditional ``.lock`` unlink in ``close()`` ``finally`` block guaranteeing
-  lock release even when ``RuntimeError`` propagates from the write-error check.
-  **97 passed, 0 skipped (edge); 386 passed, 1 skipped (workspace).**
+  lock release even when ``RuntimeError`` propagates from the write-error check,
+  ledger exception handler in ``process()`` broadened to ``except Exception`` so
+  custom adapter faults that inherit from neither ``SovereignStorageError`` nor
+  ``sqlite3.Error`` route to the off-grid buffer instead of propagating unhandled,
+  quarantine double-fault detector: ``sys.stderr`` emission + ``worker_failed``
+  flag on secondary quarantine write failure so no entry is silently lost even
+  when both the primary buffer and the quarantine disk path are unwritable,
+  and selective open() mock in ``test_close_propagates_buffer_write_error_as_runtime_error``
+  isolating primary-buffer failures from quarantine writes.
+  **99 passed, 0 skipped (edge); 388 passed, 1 skipped (workspace).**
 
 ---
 

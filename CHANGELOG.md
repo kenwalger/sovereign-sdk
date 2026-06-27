@@ -1300,6 +1300,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``SovereignConfigurationError`` rather than silently disabling verification.
   **Suite: 97 edge tests, 386 workspace tests passed, 1 skipped (POSIX fchmod).**
 
+- **`EdgePipeline.process()` — ledger exception handler broadened to `except Exception`**
+  (`pipeline.py`): The ``except (SovereignStorageError, sqlite3.Error) as ledger_err:``
+  clause that routes ledger failures to the off-grid buffer is replaced with
+  ``except Exception as ledger_err:``.  Custom ledger adapters and plugin layers may raise
+  domain-specific exceptions that inherit from neither ``SovereignStorageError`` nor
+  ``sqlite3.Error``; under the narrow guard those exceptions propagated unhandled to the
+  caller, bypassing the buffer entirely and losing the signed receipt.  ``except Exception``
+  closes this gap while still excluding ``SystemExit`` and ``KeyboardInterrupt`` (both
+  inherit from ``BaseException``, not ``Exception``) so host-level abort signals are never
+  silently swallowed.  ``sqlite3.IntegrityError`` continues to be intercepted by its own
+  ``except sqlite3.IntegrityError:`` clause placed before the broadened guard, preserving
+  the silent-eviction contract for duplicate submissions.  The ``process()`` docstring step 4
+  description and ``:raises SovereignDoubleFaultError:`` entry are updated to reflect the
+  broader exception scope.
+
+- **`OffGridBuffer._disk_writer` — quarantine double-fault emits to `sys.stderr` and marks
+  `worker_failed`** (`buffer.py`): When the background writer raises :exc:`OSError` and the
+  subsequent write to the quarantine file also raises (a double-fault: primary disk full and
+  quarantine path unwritable), the previous ``except OSError: pass`` on the quarantine write
+  silently discarded the entry with no operator signal.  The handler is replaced with
+  ``except Exception:`` (which catches all ``OSError`` subclasses as well as any other
+  exception from the quarantine path): on quarantine write failure, the raw JSONL entry is
+  emitted to ``sys.stderr`` via ``sys.stderr.write`` + ``sys.stderr.flush`` so a process
+  supervisor's log stream receives the payload for out-of-band recovery, and
+  ``worker_failed = True`` is set to prevent any further enqueue into the distressed writer.
+  The in-memory recovery path (``error_entry`` / ``dead_letter_entry``) still executes after
+  the quarantine try/except block regardless of outcome, so the entry is added to
+  ``_write_errors`` in the normal fashion; the ``worker_failed`` flag is then set in the
+  ``finally`` block's ``_count_lock`` section as the existing crash-evacuation path dictates.
+  ``import sys`` is added to the ``buffer.py`` module imports.
+
+- **`TestEdgePipelineBuffering` — `test_process_buffers_on_application_level_ledger_exception`**
+  (`test_edge.py`): Patches ``mem_ledger.append_receipt`` with a custom ``ApplicationError``
+  class that inherits only from ``Exception`` (not from ``SovereignStorageError`` or
+  ``sqlite3.Error``); asserts ``result.buffered is True`` and ``edge_pipeline.buffer_depth == 1``.
+  With the previous narrow guard the custom exception propagated unhandled; this test is the
+  authoritative regression guard that the broadened ``except Exception`` clause routes all
+  non-duplicate application faults to the buffer.
+  ``TestEdgePipelineBuffering`` grows from 8 to 9 cases.
+
+- **`TestOffGridBufferWriteErrors` — `test_double_write_fault_emits_to_stderr`**
+  (`test_edge.py`): Constructs a buffer whose directory is removed after construction (forcing
+  ``OSError`` on primary writes), patches ``builtins.open`` with a mock that also raises
+  ``OSError`` for the quarantine path (simulating a full secondary disk), and captures
+  ``sys.stderr`` output via ``StringIO`` substitution.  After ``push()`` + ``flush()``, asserts
+  that ``sys.stderr`` output contains the emitted JSONL entry and that ``buf.worker_failed is
+  True``, confirming both the supervisor-recovery emission and the worker shutdown path are
+  exercised under the double-fault condition.
+  ``TestOffGridBufferWriteErrors`` grows from 12 to 13 cases.
+
+- **`test_close_propagates_buffer_write_error_as_runtime_error` — selective open() mock**
+  (`test_edge.py`): The previous ``patch("builtins.open", side_effect=OSError(...))`` applied
+  universally to all open calls including the quarantine write.  With the new
+  ``except Exception:`` handler on the quarantine path, an all-open patch caused the quarantine
+  write failure to set ``worker_failed = True``, which made subsequent ``push()`` calls in
+  ``drain_buffer()``'s requeue pass raise ``RuntimeError("background writer thread
+  terminated")``, propagating as ``drain_buffer()``'s own ``RuntimeError("could not re-queue
+  N receipts...")`` instead of the expected ``buffer.close()`` ``RuntimeError("un-journaled")``.
+  The patch is replaced with a ``_fail_on_primary_append`` closure that captures the real
+  ``builtins.open``, raises ``OSError`` only for append-mode opens that do not target a
+  ``.quarantine`` path, and delegates all other opens (including the quarantine write) to the
+  real implementation.  This preserves the test's original contract — single-fault write error
+  → ``_write_errors`` → ``close()`` raises ``"un-journaled"`` — while remaining correct under
+  the new double-fault detection logic.
+  **Suite: 99 edge tests, 388 workspace tests passed, 1 skipped (POSIX fchmod).**
+
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing
   sensor observations into versioned, tamper-evident, minified JSON transmission envelopes with

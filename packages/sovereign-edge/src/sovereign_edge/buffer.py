@@ -3,6 +3,7 @@
 import json
 import os
 import queue as _queue
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -327,13 +328,21 @@ class OffGridBuffer:
     def _disk_writer(self) -> None:
         """Background daemon worker that serializes JSONL writes to disk.
 
-        When a write or ``fsync`` raises :exc:`OSError`, the serialized entry is
-        deserialized and appended to ``_write_errors`` under the count lock so that
-        :meth:`drain` can surface and recover it on the next pass instead of silently
-        discarding the receipt.  If the entry cannot be deserialized due to
-        :exc:`json.JSONDecodeError` or :exc:`KeyError`, the raw string is quarantined in
-        ``_dead_letter`` under the count lock so that the corrupt payload is not silently
-        discarded and remains available for out-of-band inspection.
+        When a write or ``fsync`` raises :exc:`OSError`, the serialized entry is first
+        appended to the disk-backed quarantine file (``{path}.quarantine``) for crash
+        durability, then deserialized and appended to ``_write_errors`` under the count
+        lock so that :meth:`drain` can surface and recover it on the next pass.  If the
+        quarantine write itself raises any :exc:`Exception` (a double write-fault: both
+        the primary JSONL file and the quarantine file are unwritable), the raw entry
+        string is written to :data:`sys.stderr` with an unbuffered flush so that a
+        container or process supervisor can capture and recover the payload out-of-band;
+        ``_worker_failed`` is then set to ``True`` via the local ``worker_failed`` flag
+        so the thread halts after the current item's ``finally`` block completes and
+        evacuates remaining queued items.  The entry is still appended to
+        ``_write_errors`` even on a double-fault so that a :meth:`drain` call issued
+        before the process exits can surface it.  If the entry cannot be deserialized
+        due to :exc:`json.JSONDecodeError` or :exc:`KeyError`, the raw string is
+        quarantined in ``_dead_letter`` rather than silently discarded.
 
         If an unexpected non-:exc:`OSError` exception is raised during a write, the thread
         sets ``_worker_failed`` under the count lock **before** any other state update in
@@ -386,8 +395,13 @@ class OffGridBuffer:
                             _qf.write(entry + "\n")
                             _qf.flush()
                             os.fsync(_qf.fileno())
-                    except OSError:
-                        pass
+                    except Exception:
+                        sys.stderr.write(
+                            f"SOVEREIGN-EDGE CRITICAL: quarantine write failed; "
+                            f"entry emitted to stderr for supervisor recovery: {entry}\n"
+                        )
+                        sys.stderr.flush()
+                        worker_failed = True
                     try:
                         _obj: dict[str, Any] = json.loads(entry)
                         error_entry = (_obj["receipt"], _obj["sieved_content"])
