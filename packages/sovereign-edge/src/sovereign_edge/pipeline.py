@@ -61,6 +61,31 @@ class SovereignDoubleFaultError(RuntimeError):
         self.ledger_error: Exception = ledger_error
 
 
+class SovereignRequeueAllocationError(RuntimeError):
+    """Raised when the emergency retry-log write fails during :meth:`EdgePipeline.drain_buffer`.
+
+    Emitted when a :meth:`~sovereign_edge.buffer.OffGridBuffer.push` call fails during the
+    re-queue pass *and* the fallback write to ``{buffer_path}.retry`` also raises.  The
+    exception carries every receipt dict that had not yet been confirmed as durable at the
+    moment the disk write failed — both entries whose push already raised and entries that
+    had not yet been attempted — so the host application can perform out-of-band recovery
+    rather than losing them silently.
+
+    :param args: Positional message arguments forwarded to :class:`RuntimeError`.
+    :param uncommitted_receipts: List of ForensicReceipt dicts that could not be persisted
+        or logged during the re-queue pass.
+    :type uncommitted_receipts: list[dict[str, Any]]
+    """
+
+    def __init__(
+        self,
+        *args: object,
+        uncommitted_receipts: list[dict[str, Any]],
+    ) -> None:
+        super().__init__(*args)
+        self.uncommitted_receipts: list[dict[str, Any]] = uncommitted_receipts
+
+
 class SovereignConfigurationError(ValueError):
     """Raised when :class:`EdgePipeline` is constructed with an insecure or contradictory configuration.
 
@@ -434,7 +459,7 @@ class EdgePipeline:
 
         failed_requeue_entries: list[tuple[dict[str, Any], str]] = []
         push_failure_count: int = 0
-        for receipt_dict, sieved_content in requeue:
+        for _rq_idx, (receipt_dict, sieved_content) in enumerate(requeue):
             try:
                 self._buffer.push(receipt_dict, sieved_content)
             except RuntimeError:
@@ -450,8 +475,18 @@ class EdgePipeline:
                             + "\n"
                         )
                         _rf.flush()
-                except OSError:
-                    pass
+                except Exception as _disk_err:
+                    _remaining: list[dict[str, Any]] = [r for r, _ in requeue[_rq_idx + 1 :]]
+                    _all_uncommitted: list[dict[str, Any]] = (
+                        [r for r, _ in failed_requeue_entries] + _remaining
+                    )
+                    _alloc_err = SovereignRequeueAllocationError(
+                        "Emergency backup logging failed during drain_buffer() re-queue pass; "
+                        "uncommitted receipts are attached via uncommitted_receipts for "
+                        "host-level recovery",
+                        uncommitted_receipts=_all_uncommitted,
+                    )
+                    raise _alloc_err from _disk_err
 
         if crash_exc is not None:
             if push_failure_count:

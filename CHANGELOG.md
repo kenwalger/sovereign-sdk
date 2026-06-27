@@ -1525,6 +1525,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unchanged.
   **Suite: 102 edge tests, 391 workspace tests passed, 1 skipped (POSIX fchmod).**
 
+- **`OffGridBuffer._acquire_buffer_lock()` — PID-reuse false-positive elimination via
+  two-line lock metadata** (`buffer.py`): The `.lock` file payload is changed from a bare
+  PID string to `{pid}\n{instance_uuid}` (two-line UTF-8 format written via `os.write`).
+  A class-level `_instance_registry: set[str]` and `_instance_registry_lock: threading.Lock`
+  are added to `OffGridBuffer` to record every live instance UUID in this process.  When
+  an existing `.lock` file is found whose PID responds to `os.kill(pid, 0)`, the UUID
+  field is cross-verified against the registry: if the UUID is absent the PID was recycled
+  by an unrelated process (OS PID-reuse), the lock is safely overtaken, and construction
+  proceeds.  If the UUID is present, a sibling `OffGridBuffer` in this process genuinely
+  holds the path and `RuntimeError` is raised.  Old-format lock files (no UUID field) fall
+  back to the original strict liveness check.  `import uuid as _uuid` is added to supply
+  `str(_uuid.uuid4())` for per-instance identifiers.  UUID deregistration is executed in
+  `close()` under `_instance_registry_lock` and in the `except BaseException` guard in
+  `__init__` (if `_recover_staging()` raises before the background thread starts) so the
+  registry never retains stale entries across instance teardown.
+
+- **`OffGridBuffer.__init__()` — boot-time `_committed` seeded from on-disk line count**
+  (`buffer.py`): After `_recover_staging()` and `_load_quarantine()` complete, `__init__`
+  now counts non-blank lines in the active JSONL file (if it exists) via
+  `Path.read_text().splitlines()` and assigns the count to `self._committed`.  The scan
+  executes before the background writer thread starts, so no race with concurrent writes
+  is possible.  An `except OSError: pass` guard silently bypasses the scan on any filesystem
+  fault, leaving `_committed = 0` as the safe conservative fallback.  This eliminates
+  counter-drift on any construction that targets a path carrying pre-existing JSONL data
+  (e.g., crash-restart after staging recovery merges prior entries back into the active
+  buffer): `size` (`_pending + _committed + len(_write_errors)`) is accurate from the
+  first call without requiring a `drain()` round-trip to reload the counter.
+
+- **`SovereignRequeueAllocationError`** (`pipeline.py`): New `RuntimeError` subclass with
+  `uncommitted_receipts: list[dict[str, Any]]` attribute.  Raised from
+  `EdgePipeline.drain_buffer()` when `push()` fails during the re-queue pass *and* the
+  fallback write to `{buffer_path}.retry` also raises any `Exception`.  The exception
+  carries every receipt dict that was not yet confirmed durable at the moment the disk
+  write failed — both entries whose push already raised (accumulated in
+  `failed_requeue_entries`) and entries that had not yet been attempted (computed from
+  `requeue[_rq_idx + 1:]` via `enumerate(requeue)`) — so the host application can perform
+  out-of-band recovery rather than losing them silently.  `except OSError: pass` on the
+  retry-file write is replaced by `except Exception as _disk_err: raise
+  SovereignRequeueAllocationError(...) from _disk_err`.  The class is exported from
+  `sovereign_edge/__init__.py` and added to `__all__`.
+
+- **`test_buffer_depth_reflects_disk_entries_at_instantiation`**
+  (`TestOffGridBuffer`, `test_edge.py`): Pushes 2 entries to a buffer, flushes, closes,
+  then constructs a second `OffGridBuffer` on the same path and immediately asserts
+  `size == 2`.  Verifies that `_committed` is seeded from the on-disk line count at
+  construction time so `buffer_depth` is accurate before any push or drain is issued.
+
+- **`test_requeue_allocation_error_exposes_uncommitted_receipts`**
+  (`TestEdgePipelineDrainBuffer`, `test_edge.py`): Buffers 2 receipts via a closed ledger.
+  On `drain_buffer()`, patches `append_receipt` to raise `SovereignStorageError` (both
+  entries enter the re-queue list), patches `push()` to raise `RuntimeError`, and patches
+  `builtins.open` selectively for the `.retry` path to raise `OSError`.  Asserts that
+  `SovereignRequeueAllocationError` is raised and that `uncommitted_receipts` contains at
+  least one receipt dict, each of which is a `dict` instance.
+  **Suite: 104 edge tests, 393 workspace tests passed, 1 skipped (POSIX fchmod).**
+
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing
   sensor observations into versioned, tamper-evident, minified JSON transmission envelopes with

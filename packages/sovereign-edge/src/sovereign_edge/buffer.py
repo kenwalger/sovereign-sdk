@@ -6,6 +6,7 @@ import queue as _queue
 import sys
 import tempfile
 import threading
+import uuid as _uuid
 from pathlib import Path
 from typing import Any
 
@@ -81,7 +82,11 @@ class OffGridBuffer:
     :type path: str
     """
 
+    _instance_registry: set[str] = set()
+    _instance_registry_lock: threading.Lock = threading.Lock()
+
     def __init__(self, path: str) -> None:
+        self._instance_id: str = str(_uuid.uuid4())
         self._path: Path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._staging_path: Path = Path(str(path) + ".staging")
@@ -106,8 +111,19 @@ class OffGridBuffer:
                 self._lock_path.unlink()
             except OSError:
                 pass
+            with OffGridBuffer._instance_registry_lock:
+                OffGridBuffer._instance_registry.discard(self._instance_id)
             raise
         self._load_quarantine()
+        if self._path.exists():
+            try:
+                self._committed = sum(
+                    1
+                    for _ln in self._path.read_text(encoding="utf-8").splitlines()
+                    if _ln.strip()
+                )
+            except OSError:
+                pass
         self._worker_thread: threading.Thread = threading.Thread(
             target=self._disk_writer,
             daemon=True,
@@ -119,37 +135,41 @@ class OffGridBuffer:
         """Acquire an exclusive instance lock for the buffer file path.
 
         Uses :func:`os.open` with ``O_CREAT | O_EXCL | O_WRONLY`` to atomically
-        create the ``.lock`` file in a single kernel call, writing the current process
-        identifier into it.  The OS rejects a concurrent creation attempt from any
-        other process or thread — two :class:`OffGridBuffer` instances racing on the
-        same path cannot both receive a successful ``O_EXCL`` creation.
+        create the ``.lock`` file in a single kernel call, writing ``{pid}\\n{uuid}``
+        into it.  The OS rejects a concurrent creation attempt from any other process
+        or thread — two :class:`OffGridBuffer` instances racing on the same path
+        cannot both receive a successful ``O_EXCL`` creation.
 
-        If the lock file already exists, the owning PID is read and tested for
-        liveness via :func:`os.kill` with signal ``0``.  A stale lock whose owner
-        process no longer exists is overwritten with the current PID.  If the owner
-        is still running, :exc:`RuntimeError` is raised immediately to prevent two
-        instances from writing concurrently to the same JSONL file, which would
-        produce interleaved lines and corrupt the journal.  The lock is released
-        by :meth:`close`.
+        If the lock file already exists, the owning PID and UUID are read and the
+        PID is tested for liveness via :func:`os.kill` with signal ``0``.  A stale
+        lock whose owner process no longer exists is overwritten.  If the owner PID
+        is alive, the UUID is cross-verified against the class-level
+        ``_instance_registry``: if the UUID is absent from the registry the PID was
+        recycled by an unrelated process, the lock is treated as stale and safely
+        overtaken.  Old-format lock files that contain only a PID (no UUID field)
+        fall back to the original strict liveness check.  The lock is released by
+        :meth:`close`.
 
         :return: None
         :rtype: None
-        :raises RuntimeError: If the buffer path is already held by a live process.
-        :raises SovereignStorageError: If the lock file cannot be created or read due to
-            a :exc:`PermissionError` or unexpected :exc:`OSError` (e.g., the parent
-            directory is not writable, or :func:`os.kill` is denied by the OS because the
-            lock owner belongs to a different user).  The path must not be assumed free
-            when a permission boundary prevents evaluation of the existing lock state.
+        :raises RuntimeError: If the buffer path is already held by a live
+            :class:`OffGridBuffer` instance in this process whose UUID is present in
+            the class registry.
+        :raises SovereignStorageError: If the lock file cannot be created or read due
+            to a :exc:`PermissionError` or unexpected :exc:`OSError`.
         """
+        _lock_payload: str = f"{os.getpid()}\n{self._instance_id}"
         try:
             _lock_fd: int = os.open(
                 str(self._lock_path),
                 os.O_CREAT | os.O_EXCL | os.O_WRONLY,
             )
             try:
-                os.write(_lock_fd, str(os.getpid()).encode("utf-8"))
+                os.write(_lock_fd, _lock_payload.encode("utf-8"))
             finally:
                 os.close(_lock_fd)
+            with OffGridBuffer._instance_registry_lock:
+                OffGridBuffer._instance_registry.add(self._instance_id)
             return
         except FileExistsError:
             pass
@@ -158,26 +178,43 @@ class OffGridBuffer:
                 "Lock file acquisition failed due to permission or system boundaries"
             ) from exc
         try:
-            held_pid: int = int(self._lock_path.read_text(encoding="utf-8").strip())
+            _lock_content: str = self._lock_path.read_text(encoding="utf-8").strip()
+            _lock_parts: list[str] = _lock_content.split("\n", 1)
+            held_pid: int = int(_lock_parts[0].strip())
+            held_uuid: str = _lock_parts[1].strip() if len(_lock_parts) > 1 else ""
         except PermissionError as exc:
             raise SovereignStorageError(
                 "Lock file acquisition failed due to permission or system boundaries"
             ) from exc
         except (OSError, ValueError):
-            self._lock_path.write_text(str(os.getpid()), encoding="utf-8")
+            self._lock_path.write_text(_lock_payload, encoding="utf-8")
+            with OffGridBuffer._instance_registry_lock:
+                OffGridBuffer._instance_registry.add(self._instance_id)
             return
         try:
             os.kill(held_pid, 0)
         except ProcessLookupError:
-            self._lock_path.write_text(str(os.getpid()), encoding="utf-8")
+            self._lock_path.write_text(_lock_payload, encoding="utf-8")
+            with OffGridBuffer._instance_registry_lock:
+                OffGridBuffer._instance_registry.add(self._instance_id)
             return
         except PermissionError as exc:
             raise SovereignStorageError(
                 "Lock file acquisition failed due to permission or system boundaries"
             ) from exc
         except OSError:
-            self._lock_path.write_text(str(os.getpid()), encoding="utf-8")
+            self._lock_path.write_text(_lock_payload, encoding="utf-8")
+            with OffGridBuffer._instance_registry_lock:
+                OffGridBuffer._instance_registry.add(self._instance_id)
             return
+        if held_uuid:
+            with OffGridBuffer._instance_registry_lock:
+                _uuid_is_ours: bool = held_uuid in OffGridBuffer._instance_registry
+            if not _uuid_is_ours:
+                self._lock_path.write_text(_lock_payload, encoding="utf-8")
+                with OffGridBuffer._instance_registry_lock:
+                    OffGridBuffer._instance_registry.add(self._instance_id)
+                return
         raise RuntimeError(
             f"OffGridBuffer path '{self._path}' is already held by process {held_pid}; "
             "each instance must use a distinct buffer_path"
@@ -782,6 +819,8 @@ class OffGridBuffer:
                 self._lock_path.unlink()
             except OSError:
                 pass
+            with OffGridBuffer._instance_registry_lock:
+                OffGridBuffer._instance_registry.discard(self._instance_id)
 
     @property
     def size(self) -> int:

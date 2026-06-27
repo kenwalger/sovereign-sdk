@@ -51,6 +51,7 @@ from sovereign_edge import (
     SensorFrame,
     SovereignConfigurationError,
     SovereignDoubleFaultError,
+    SovereignRequeueAllocationError,
 )
 
 _NODE_ID: str = "edge-test-node-001"
@@ -435,6 +436,37 @@ class TestOffGridBuffer:
             assert buf.size == 0
         finally:
             buf.close()
+
+    def test_buffer_depth_reflects_disk_entries_at_instantiation(
+        self, tmp_path: Path
+    ) -> None:
+        """OffGridBuffer initialized on a path with pre-existing JSONL entries must
+        report size accurately from the first call, not 0.
+
+        Verifies that ``_committed`` is seeded from the on-disk non-blank line count
+        during ``__init__`` so that ``size`` (``_pending + _committed + len(_write_errors)``)
+        is accurate immediately after construction, before any push or drain is issued.
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        buf_path: str = str(tmp_path / ".buf.jsonl")
+        buf_a: OffGridBuffer = OffGridBuffer(buf_path)
+        try:
+            buf_a.push(self._make_receipt("alpha"), "alpha content")
+            buf_a.push(self._make_receipt("beta"), "beta content")
+            buf_a.flush()
+            assert buf_a.size == 2
+        finally:
+            buf_a.close()
+        buf_b: OffGridBuffer = OffGridBuffer(buf_path)
+        try:
+            assert buf_b.size == 2, (
+                f"size={buf_b.size} — _committed must be initialized from the "
+                "on-disk entry count so buffer_depth is accurate at instantiation"
+            )
+        finally:
+            buf_b.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1593,6 +1625,85 @@ class TestEdgePipelineDrainBuffer:
         finally:
             pipeline_c._buffer.close()
             recovery_ledger.close()
+
+    def test_requeue_allocation_error_exposes_uncommitted_receipts(
+        self, tmp_path: Path
+    ) -> None:
+        """SovereignRequeueAllocationError must be raised with uncommitted_receipts
+        populated when push() fails during re-queue AND the retry-file write also fails.
+
+        Setup: buffer 2 receipts via a closed ledger.  On drain_buffer(), patch
+        ``append_receipt`` to raise SovereignStorageError (both entries enter the
+        re-queue list).  Patch ``push()`` to raise RuntimeError.  Patch ``builtins.open``
+        selectively for the ``.retry`` path to raise OSError so the retry-file write also
+        fails.  Assert that SovereignRequeueAllocationError is raised and that
+        ``uncommitted_receipts`` contains at least one receipt dict.
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        import builtins
+
+        buffer_path: str = str(tmp_path / ".edge_buffer.jsonl")
+        retry_path: str = buffer_path + ".retry"
+        key_path: str = str(tmp_path / ".keys" / "edge_identity.pem")
+
+        closed_ledger: SovereignLedger = SovereignLedger(":memory:")
+        pipeline_a: EdgePipeline = EdgePipeline(
+            ledger=closed_ledger,
+            signing_key=key_path,
+            buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
+        )
+        closed_ledger.close()
+        try:
+            pipeline_a.process(_seal_frame(tmp_path, {"seq": 1}))
+            pipeline_a.process(_seal_frame(tmp_path, {"seq": 2}))
+            pipeline_a._buffer.flush()
+            assert pipeline_a._buffer.size == 2
+        finally:
+            pipeline_a._buffer.close()
+
+        open_ledger: SovereignLedger = SovereignLedger(str(tmp_path / "recovery.db"))
+        pipeline_b: EdgePipeline = EdgePipeline(
+            ledger=open_ledger,
+            signing_key=key_path,
+            buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
+        )
+        _real_open = builtins.open
+
+        def _selective_open(file: Any, *args: Any, **kwargs: Any) -> Any:
+            if str(file) == retry_path:
+                raise OSError("simulated retry-file disk fault")
+            return _real_open(file, *args, **kwargs)
+
+        try:
+            with patch.object(
+                open_ledger,
+                "append_receipt",
+                side_effect=SovereignStorageError("ledger down"),
+            ):
+                with patch.object(
+                    pipeline_b._buffer,
+                    "push",
+                    side_effect=RuntimeError("buffer worker terminated"),
+                ):
+                    with patch("builtins.open", side_effect=_selective_open):
+                        with pytest.raises(SovereignRequeueAllocationError) as exc_info:
+                            pipeline_b.drain_buffer()
+            err: SovereignRequeueAllocationError = exc_info.value
+            assert len(err.uncommitted_receipts) >= 1, (
+                f"uncommitted_receipts must contain at least 1 receipt dict; "
+                f"got {len(err.uncommitted_receipts)}"
+            )
+            for r in err.uncommitted_receipts:
+                assert isinstance(r, dict), (
+                    "each element of uncommitted_receipts must be a receipt dict"
+                )
+        finally:
+            pipeline_b._buffer.close()
+            open_ledger.close()
 
 
 # ---------------------------------------------------------------------------

@@ -1008,6 +1008,27 @@ committed = pipeline.drain_buffer()
   verify retry-file existence, line count, and ``receipt``/``sieved_content`` key presence.
   **102 passed, 0 skipped (edge); 391 passed, 1 skipped (workspace).**
 
+* [x] **PID-reuse false-positive elimination via two-line lock metadata** (`buffer.py`):
+  `.lock` payload changed to `{pid}\n{instance_uuid}`; class-level `_instance_registry`
+  and `_instance_registry_lock` cross-verify the UUID against all live instances in this
+  process before deciding whether an alive-PID lock is a genuine conflict or a recycled
+  PID.  UUID deregistration in `close()` and on `_recover_staging()` exception.
+
+* [x] **Boot-time `_committed` seeded from on-disk line count** (`buffer.py`):
+  Non-blank lines in the active JSONL file are counted in `__init__` after
+  `_recover_staging()` + `_load_quarantine()` complete and before the background thread
+  starts; `_committed` is initialized to that count so `size` is accurate at first call.
+
+* [x] **`SovereignRequeueAllocationError`** (`pipeline.py`): New `RuntimeError` subclass
+  with `uncommitted_receipts: list[dict[str, Any]]` attribute raised when the retry-file
+  write fails inside the re-queue push-failure handler; uses `enumerate(requeue)` to
+  compute remaining un-attempted entries.  Exported from `sovereign_edge/__init__.py`.
+
+* [x] **`test_buffer_depth_reflects_disk_entries_at_instantiation`** and
+  **`test_requeue_allocation_error_exposes_uncommitted_receipts`** added to
+  `TestOffGridBuffer` and `TestEdgePipelineDrainBuffer` respectively.
+  **104 passed, 0 skipped (edge); 393 passed, 1 skipped (workspace).**
+
 ---
 
 ## Phase 10 — Isolated Context Vault & Governance Server (`sovereign-vault`)
