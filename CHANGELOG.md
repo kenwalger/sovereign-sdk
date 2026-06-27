@@ -1226,6 +1226,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``rmdir``) can access the file without contention.  The stale-lock detection and override
   paths (reading the incumbent PID, probing liveness via ``os.kill``) are unchanged.
 
+- **`EdgePipeline.__init__()` — buffer closed on post-buffer constructor failure**
+  (`pipeline.py`): All initialization steps that follow ``OffGridBuffer(buffer_path)``
+  (key path resolution, ``mkdir``, ``chmod``, and ``SovereignKeyManager`` construction) are
+  now wrapped in a ``try/except BaseException`` block.  On any exception, ``self._buffer.close()``
+  is called (with ``except Exception: pass`` suppressing any close error so it cannot mask the
+  original exception) before re-raising.  Previously, a failure in any of those steps left the
+  ``OffGridBuffer`` daemon thread running and the ``.lock`` file on disk with no owning
+  ``EdgePipeline`` instance — every subsequent construction attempt on the same ``buffer_path``
+  would then raise ``RuntimeError("already held by process …")`` for the remainder of the
+  process lifetime.  ``test_init_failure_after_buffer_creation_closes_worker_thread``
+  (``TestEdgePipelineSecureInit``) patches ``sovereign_edge.pipeline.SovereignKeyManager`` to
+  raise ``RuntimeError`` and asserts that the ``.lock`` file is absent after the failed
+  constructor, confirming the thread was joined and the lock unlinked.
+  ``TestEdgePipelineSecureInit`` grows from 5 to 6 cases.
+
+- **`OffGridBuffer._acquire_buffer_lock()` — `PermissionError` and unexpected `OSError` raise `SovereignStorageError`**
+  (`buffer.py`): Three permission-boundary guards are added across the lock acquisition sequence:
+  (1) an ``except OSError`` clause after the existing ``except FileExistsError`` in the initial
+  ``os.open(O_CREAT | O_EXCL | O_WRONLY)`` block converts any kernel rejection that is not a
+  simple file-already-exists condition (e.g., ``PermissionError`` on a read-only directory) into
+  ``SovereignStorageError`` rather than propagating the raw ``OSError``;
+  (2) an ``except PermissionError`` clause placed before ``except (OSError, ValueError)`` in the
+  held-PID read block prevents a permission-denied read from being misclassified as a stale lock
+  and overwriting a live foreign-owner lock file;
+  (3) an ``except PermissionError`` clause placed before ``except OSError`` in the
+  ``os.kill(held_pid, 0)`` block prevents a permission-denied kill — which indicates the owner
+  process IS alive but belongs to a different user — from being silently treated as a dead
+  process and triggering a lock steal.  In all three cases ``SovereignStorageError`` is raised
+  with the message ``"Lock file acquisition failed due to permission or system boundaries"`` and
+  the original OS exception chained as ``__cause__``.  The ``_acquire_buffer_lock`` docstring
+  is updated to declare the new ``:raises SovereignStorageError:`` condition.
+
+- **`OffGridBuffer.drain()` — write-error clear bounded to snapshot count**
+  (`buffer.py`): ``drain()`` now records ``_error_snapshot_count = len(self._write_errors)``
+  atomically alongside the ``pending_error_entries`` snapshot under ``_count_lock``.  On the
+  success path the former ``self._write_errors.clear()`` is replaced with
+  ``del self._write_errors[:_error_snapshot_count]`` in both the file-absent early-return branch
+  and the normal ``os.replace`` completion branch.  This bounds the clear to exactly the entries
+  that were visible at snapshot time: any entry appended to ``_write_errors`` by the background
+  writer after the snapshot boundary (theoretically possible between ``flush()`` return and
+  ``_count_lock`` re-acquisition) survives into the next drain pass rather than being silently
+  discarded.  If ``os.replace`` raises ``OSError``, the early-exit path is taken before any
+  ``del`` statement executes, so the full ``_write_errors`` list remains intact — no write-error
+  entry is cleared or orphaned by a failed file swap.  The ``drain()`` docstring is updated to
+  describe the snapshot-bounded removal contract.
+  **Suite: 97 edge tests, 386 workspace tests passed, 1 skipped (POSIX fchmod).**
+
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing
   sensor observations into versioned, tamper-evident, minified JSON transmission envelopes with

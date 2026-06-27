@@ -854,11 +854,42 @@ committed = pipeline.drain_buffer()
   immediately after writing the PID via ``os.write`` + ``os.close`` in ``try/finally`` so
   that external callers on Windows (which disallows ``unlink`` of open files without
   ``FILE_SHARE_DELETE``) can unlink the lock file without contention during test teardown.
-* [x] 96-case desktop validation test suite across nine classes (`TestSensorFrame`: 16;
+* [x] `EdgePipeline.__init__()` — buffer closed on post-buffer construction failure:
+  all initialization steps after ``OffGridBuffer(buffer_path)`` (key path resolution,
+  ``mkdir``, ``chmod``, ``SovereignKeyManager`` construction) are wrapped in
+  ``try/except BaseException``; the handler calls ``self._buffer.close()`` — with
+  ``except Exception: pass`` suppressing any close error so it cannot mask the constructor
+  exception — then re-raises; previously a failure in any of those steps left the daemon
+  thread running and the ``.lock`` file on disk, permanently blocking every subsequent
+  construction attempt on the same path for the lifetime of the process.
+  ``test_init_failure_after_buffer_creation_closes_worker_thread``
+  (``TestEdgePipelineSecureInit``) patches ``SovereignKeyManager`` to raise and asserts
+  the ``.lock`` file is absent, confirming the thread was joined and lock released.
+  ``TestEdgePipelineSecureInit`` grows from 5 to 6 cases.
+* [x] `OffGridBuffer._acquire_buffer_lock()` — `PermissionError` and unexpected `OSError` raise `SovereignStorageError`:
+  three permission-boundary guards added: (1) ``except OSError`` after ``except FileExistsError``
+  in the initial ``os.open`` block converts any non-file-exists OS rejection to
+  ``SovereignStorageError``; (2) ``except PermissionError`` before ``except (OSError, ValueError)``
+  in the held-PID read block prevents a permission-denied read from being misclassified as a
+  stale lock; (3) ``except PermissionError`` before ``except OSError`` in the
+  ``os.kill(held_pid, 0)`` block prevents a permission-denied kill — meaning the owner IS alive
+  under a different user — from triggering a lock steal.  All three cases raise
+  ``SovereignStorageError("Lock file acquisition failed due to permission or system boundaries")``
+  with the original OS exception chained as ``__cause__``.
+* [x] `OffGridBuffer.drain()` — write-error clear bounded to snapshot count:
+  ``_error_snapshot_count = len(self._write_errors)`` is recorded atomically with the
+  ``pending_error_entries`` snapshot under ``_count_lock``; the former
+  ``self._write_errors.clear()`` on both the file-absent early-return path and the normal
+  ``os.replace`` completion path is replaced with
+  ``del self._write_errors[:_error_snapshot_count]``, so any entry appended to
+  ``_write_errors`` after the snapshot boundary survives into the next drain pass;
+  if ``os.replace`` raises ``OSError``, the code exits before any ``del`` executes,
+  guaranteeing no write-error entry is cleared or orphaned by a failed file swap.
+* [x] 97-case desktop validation test suite across nine classes (`TestSensorFrame`: 16;
   `TestOffGridBuffer`: 12; `TestEdgePipelineProcess`: 19; `TestEdgePipelineBuffering`: 8;
   `TestEdgePipelineDrainBuffer`: 12; `TestOffGridBufferAsync`: 8;
   `TestEdgePipelineSieveFault`: 4; `TestOffGridBufferWriteErrors`: 12;
-  `TestEdgePipelineSecureInit`: 5) covering all
+  `TestEdgePipelineSecureInit`: 6) covering all
   fortification scenarios: non-blocking `push()` with immediate `size` reporting,
   chronological `drain()` sort by sequence, non-integer sequence value tolerance,
   `_committed` counter accuracy after drain, sieve fault fallback with raw text and
@@ -891,9 +922,13 @@ committed = pipeline.drain_buffer()
   re-queue durability flush before staging commit, unified compact HMAC
   canonical via ``text_content()`` with separator alignment,
   disk-backed quarantine file for crash-durable write-error recovery across
-  restart boundaries, and atomic ``os.open(O_CREAT | O_EXCL)`` lock creation
-  eliminating TOCTOU races in concurrent ``OffGridBuffer`` construction.
-  **96 passed, 0 skipped (edge); 385 passed, 1 skipped (workspace).**
+  restart boundaries, atomic ``os.open(O_CREAT | O_EXCL)`` lock creation
+  eliminating TOCTOU races in concurrent ``OffGridBuffer`` construction,
+  buffer worker thread termination on post-buffer constructor failure with lock
+  release verified via ``SovereignKeyManager`` injection, ``SovereignStorageError``
+  on ``PermissionError`` lock-file access preventing silent lock theft, and
+  snapshot-bounded ``_write_errors`` drain clearing preserving post-snapshot entries.
+  **97 passed, 0 skipped (edge); 386 passed, 1 skipped (workspace).**
 
 ---
 

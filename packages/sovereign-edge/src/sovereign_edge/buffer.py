@@ -134,6 +134,11 @@ class OffGridBuffer:
         :return: None
         :rtype: None
         :raises RuntimeError: If the buffer path is already held by a live process.
+        :raises SovereignStorageError: If the lock file cannot be created or read due to
+            a :exc:`PermissionError` or unexpected :exc:`OSError` (e.g., the parent
+            directory is not writable, or :func:`os.kill` is denied by the OS because the
+            lock owner belongs to a different user).  The path must not be assumed free
+            when a permission boundary prevents evaluation of the existing lock state.
         """
         try:
             _lock_fd: int = os.open(
@@ -147,8 +152,16 @@ class OffGridBuffer:
             return
         except FileExistsError:
             pass
+        except OSError as exc:
+            raise SovereignStorageError(
+                "Lock file acquisition failed due to permission or system boundaries"
+            ) from exc
         try:
             held_pid: int = int(self._lock_path.read_text(encoding="utf-8").strip())
+        except PermissionError as exc:
+            raise SovereignStorageError(
+                "Lock file acquisition failed due to permission or system boundaries"
+            ) from exc
         except (OSError, ValueError):
             self._lock_path.write_text(str(os.getpid()), encoding="utf-8")
             return
@@ -157,6 +170,10 @@ class OffGridBuffer:
         except ProcessLookupError:
             self._lock_path.write_text(str(os.getpid()), encoding="utf-8")
             return
+        except PermissionError as exc:
+            raise SovereignStorageError(
+                "Lock file acquisition failed due to permission or system boundaries"
+            ) from exc
         except OSError:
             self._lock_path.write_text(str(os.getpid()), encoding="utf-8")
             return
@@ -536,9 +553,12 @@ class OffGridBuffer:
         next :meth:`__init__` call via :meth:`_recover_staging`.  ``_committed`` is
         decremented by the total count of non-blank disk lines (valid entries plus
         dead-letter lines) so that every byte footprint removed from the active file is
-        reflected in the counter; ``_write_errors`` is cleared on success.  If
-        :func:`os.replace` raises :exc:`OSError`, the active file is unchanged, the
-        exception re-raises, and neither counter is modified.
+        reflected in the counter; only the entries present in ``_write_errors`` at the
+        moment the snapshot was taken are removed on success — any entries appended by
+        the background writer after the snapshot boundary are preserved for the next drain
+        pass.  If :func:`os.replace` raises :exc:`OSError`, the active file is unchanged,
+        the exception re-raises, no ``_write_errors`` entries are removed, and neither
+        counter is modified.
         Disk lines that cannot be parsed as valid JSON or that are missing the
         ``receipt`` / ``sieved_content`` keys are quarantined in ``_dead_letter`` under
         the count lock rather than silently dropped; :attr:`dead_letter_count` reflects
@@ -565,12 +585,13 @@ class OffGridBuffer:
                     return 0
 
             with self._count_lock:
+                _error_snapshot_count: int = len(self._write_errors)
                 pending_error_entries: list[tuple[dict[str, Any], str]] = list(self._write_errors)
 
             if not self._path.exists():
                 with self._count_lock:
                     self._committed = 0
-                    self._write_errors.clear()
+                    del self._write_errors[:_error_snapshot_count]
                 try:
                     self._quarantine_path.unlink()
                 except (FileNotFoundError, OSError):
@@ -613,7 +634,7 @@ class OffGridBuffer:
 
             with self._count_lock:
                 self._committed = max(0, self._committed - file_entry_count)
-                self._write_errors.clear()
+                del self._write_errors[:_error_snapshot_count]
             try:
                 self._quarantine_path.unlink()
             except (FileNotFoundError, OSError):

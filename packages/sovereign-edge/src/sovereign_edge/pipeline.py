@@ -116,6 +116,13 @@ class EdgePipeline:
         ``allow_unauthenticated`` is ``False``.  This validation fires before
         :class:`OffGridBuffer` is constructed so no ``.lock`` file is written when the
         exception propagates.
+    :raises BaseException: If any exception is raised after :class:`OffGridBuffer` is
+        constructed but before ``__init__`` completes (e.g., key directory creation,
+        ``chmod``, or :class:`~sovereign_core.crypto.SovereignKeyManager` initialization),
+        :meth:`~sovereign_edge.buffer.OffGridBuffer.close` is called unconditionally to
+        terminate the background writer thread and release the ``.lock`` file before the
+        exception propagates.  This prevents a stranded daemon thread and an orphaned
+        lock from blocking any subsequent construction attempt on the same buffer path.
     """
 
     def __init__(
@@ -137,13 +144,20 @@ class EdgePipeline:
             )
         self._ledger: SovereignLedger = ledger
         self._buffer: OffGridBuffer = OffGridBuffer(buffer_path)
-        key_path: Path = Path(signing_key).resolve()
-        key_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        key_path.parent.chmod(0o700)
-        self._key_manager: SovereignKeyManager = SovereignKeyManager(key_dir=key_path.parent)
-        self._key_manager.private_key_path = key_path
-        self._key_manager.public_key_path = key_path.with_suffix(".pub")
-        self._sensor_secret: bytes = _sensor_secret
+        try:
+            key_path: Path = Path(signing_key).resolve()
+            key_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            key_path.parent.chmod(0o700)
+            self._key_manager: SovereignKeyManager = SovereignKeyManager(key_dir=key_path.parent)
+            self._key_manager.private_key_path = key_path
+            self._key_manager.public_key_path = key_path.with_suffix(".pub")
+            self._sensor_secret: bytes = _sensor_secret
+        except BaseException:
+            try:
+                self._buffer.close()
+            except Exception:
+                pass
+            raise
 
     def process(self, frame_bytes: bytes) -> EdgeResult:
         """Parse, sieve, sign, and commit a sealed sensor wire frame.

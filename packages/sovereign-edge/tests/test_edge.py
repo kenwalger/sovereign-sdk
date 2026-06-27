@@ -2166,3 +2166,40 @@ class TestEdgePipelineSecureInit:
             "misconfigured constructor does not orphan a lock on every failed attempt"
         )
         ledger.close()
+
+    def test_init_failure_after_buffer_creation_closes_worker_thread(self, tmp_path: Path) -> None:
+        """A post-buffer construction failure must close the OffGridBuffer so the
+        background writer thread is stopped and the .lock file is not orphaned.
+
+        Without the try/except wrapper around the post-buffer init steps, an exception
+        raised by SovereignKeyManager (or any other step after OffGridBuffer is
+        constructed) leaves the daemon thread running and the .lock file on disk.
+        A subsequent construction attempt on the same buffer_path then raises
+        RuntimeError("already held by process …") even though the original pipeline
+        never completed initialization, blocking the recovery path indefinitely.
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        ledger: SovereignLedger = SovereignLedger(":memory:")
+        buffer_path: Path = tmp_path / ".edge_buffer.jsonl"
+        lock_path: Path = Path(str(buffer_path) + ".lock")
+        with patch(
+            "sovereign_edge.pipeline.SovereignKeyManager",
+            side_effect=RuntimeError("key manager init failed"),
+        ):
+            with pytest.raises(RuntimeError, match="key manager init failed"):
+                EdgePipeline(
+                    ledger=ledger,
+                    signing_key=str(tmp_path / ".keys" / "edge_identity.pem"),
+                    buffer_path=str(buffer_path),
+                    allow_unauthenticated=True,
+                )
+        assert not lock_path.exists(), (
+            ".lock file must be released after a post-buffer construction failure; "
+            "EdgePipeline.__init__ must call self._buffer.close() in its except handler "
+            "so the background writer thread is joined and the lock is unlinked before "
+            "the exception propagates — a stranded thread and orphaned lock on the same "
+            "path permanently block every subsequent construction attempt"
+        )
+        ledger.close()
