@@ -75,11 +75,15 @@ from sovereign_ledger import SovereignLedger
 # Initialize destination tier
 ledger = SovereignLedger(".keys/sovereign_audit.db")
 
-# Bind middleware pipeline
+# Bind middleware pipeline.
+# sensor_secret is mandatory by default; pass allow_unauthenticated=True only
+# when operating in an environment where HMAC-SHA256 frame verification is
+# explicitly not required.
 pipeline = EdgePipeline(
     ledger=ledger,
     signing_key=".keys/edge_identity.pem",
-    buffer_path=".edge_buffer.jsonl"
+    buffer_path=".edge_buffer.jsonl",
+    sensor_secret=b"<shared-hmac-secret>",
 )
 
 # Process incoming wire frames arriving from sovereign-sensor hardware

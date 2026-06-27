@@ -1271,6 +1271,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``del`` statement executes, so the full ``_write_errors`` list remains intact — no write-error
   entry is cleared or orphaned by a failed file swap.  The ``drain()`` docstring is updated to
   describe the snapshot-bounded removal contract.
+
+- **`OffGridBuffer.close()` — lock file unlinked unconditionally in `finally` block**
+  (`buffer.py`): The ``self._lock_path.unlink()`` call is moved from after the write-error
+  check into a ``finally`` block that wraps the entire check-and-raise sequence.  Previously,
+  if ``_write_errors`` was non-empty the ``RuntimeError`` propagated before ``unlink()`` was
+  reached, leaving the ``.lock`` file on disk after the background thread had already been
+  joined and exited.  Any subsequent ``OffGridBuffer`` construction on the same path would then
+  raise ``RuntimeError("already held by process …")`` permanently, even though no live worker
+  owned the lock.  The ``finally`` guarantee ensures the lock is released whether ``close()``
+  returns normally or raises, so the path is immediately available for a new construction
+  attempt after a faulted shutdown.  The ``close()`` docstring is updated with a paragraph
+  describing this guarantee and the ``:raises RuntimeError:`` entry is annotated to clarify
+  that the ``.lock`` file is unlinked before the exception propagates.
+
+- **`packages/sovereign-edge/README.md` — Quick Start snippet updated for secure-by-default contract**
+  (`README.md`): The ``EdgePipeline`` constructor call in the Quick Start block previously omitted
+  ``sensor_secret``, which now raises ``SovereignConfigurationError`` at runtime under the
+  secure-by-default policy.  ``sensor_secret=b"<shared-hmac-secret>"`` is added to the
+  constructor call and a preceding comment explains that ``allow_unauthenticated=True`` is the
+  explicit opt-out when HMAC-SHA256 frame verification is intentionally not required.
+
+- **Root `README.md` — `sovereign-edge` sensor_secret comment corrected**
+  (`README.md`): The inline comment ``# omit to disable inbound verification`` on the
+  ``sensor_secret`` parameter is replaced with
+  ``# required; pass allow_unauthenticated=True to opt out``, accurately reflecting that
+  omitting ``sensor_secret`` without the explicit opt-out flag raises
+  ``SovereignConfigurationError`` rather than silently disabling verification.
   **Suite: 97 edge tests, 386 workspace tests passed, 1 skipped (POSIX fchmod).**
 
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace

@@ -885,6 +885,22 @@ committed = pipeline.drain_buffer()
   ``_write_errors`` after the snapshot boundary survives into the next drain pass;
   if ``os.replace`` raises ``OSError``, the code exits before any ``del`` executes,
   guaranteeing no write-error entry is cleared or orphaned by a failed file swap.
+* [x] `OffGridBuffer.close()` — lock file unlinked unconditionally in `finally` block:
+  ``self._lock_path.unlink()`` moved from after the write-error check into a ``finally``
+  block that wraps the entire check-and-raise sequence; previously a non-empty
+  ``_write_errors`` caused ``RuntimeError`` to propagate before ``unlink()`` was reached,
+  leaving the ``.lock`` file on disk after the worker thread had exited and permanently
+  blocking every subsequent construction attempt on the same path; the ``finally`` guarantee
+  ensures the lock is always released regardless of whether ``close()`` returns normally or
+  raises, so a faulted shutdown never creates a permanent construction barrier.
+* [x] `packages/sovereign-edge/README.md` and root `README.md` — `EdgePipeline` examples aligned with secure-by-default contract:
+  the Quick Start snippet in ``packages/sovereign-edge/README.md`` previously omitted
+  ``sensor_secret``, which raises ``SovereignConfigurationError`` under the secure-by-default
+  policy; ``sensor_secret=b"<shared-hmac-secret>"`` added and a preceding comment explains
+  ``allow_unauthenticated=True`` as the explicit opt-out; the root ``README.md``
+  ``sensor_secret`` inline comment ``"omit to disable inbound verification"`` replaced with
+  ``"required; pass allow_unauthenticated=True to opt out"`` to accurately reflect the
+  constructor contract.
 * [x] 97-case desktop validation test suite across nine classes (`TestSensorFrame`: 16;
   `TestOffGridBuffer`: 12; `TestEdgePipelineProcess`: 19; `TestEdgePipelineBuffering`: 8;
   `TestEdgePipelineDrainBuffer`: 12; `TestOffGridBufferAsync`: 8;
@@ -926,8 +942,10 @@ committed = pipeline.drain_buffer()
   eliminating TOCTOU races in concurrent ``OffGridBuffer`` construction,
   buffer worker thread termination on post-buffer constructor failure with lock
   release verified via ``SovereignKeyManager`` injection, ``SovereignStorageError``
-  on ``PermissionError`` lock-file access preventing silent lock theft, and
-  snapshot-bounded ``_write_errors`` drain clearing preserving post-snapshot entries.
+  on ``PermissionError`` lock-file access preventing silent lock theft,
+  snapshot-bounded ``_write_errors`` drain clearing preserving post-snapshot entries,
+  and unconditional ``.lock`` unlink in ``close()`` ``finally`` block guaranteeing
+  lock release even when ``RuntimeError`` propagates from the write-error check.
   **97 passed, 0 skipped (edge); 386 passed, 1 skipped (workspace).**
 
 ---

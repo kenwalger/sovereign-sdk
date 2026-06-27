@@ -177,7 +177,7 @@ pipeline = EdgePipeline(
     ledger=ledger,
     signing_key=".keys/edge_identity.pem",
     buffer_path=".edge_buffer.jsonl",
-    sensor_secret=b"<shared-hmac-secret>",  # omit to disable inbound verification
+    sensor_secret=b"<shared-hmac-secret>",  # required; pass allow_unauthenticated=True to opt out
 )
 try:
     # Intercept a sealed wire frame from sovereign-sensor

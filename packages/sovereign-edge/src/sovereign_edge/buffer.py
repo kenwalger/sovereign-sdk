@@ -710,6 +710,12 @@ class OffGridBuffer:
         possibility of prior disk write failures; :meth:`drain` surfaces and clears
         ``_write_errors`` so the subsequent :meth:`close` completes without error.
 
+        The ``.lock`` file is unlinked in an unconditional ``finally`` block that executes
+        after the write-error check regardless of whether that check raises.  This
+        guarantees that the lock is always released — even when ``_write_errors`` causes
+        a :exc:`RuntimeError` to propagate — so that a subsequent construction attempt on
+        the same path is never blocked by a stale lock left behind by a faulted shutdown.
+
         This method is idempotent across both sequential and concurrent teardown paths:
         sequential second calls observe ``_closed = True`` and skip the sentinel; concurrent
         calls are serialized by ``_drain_lock`` so only the first acquirer ever places one.
@@ -718,7 +724,8 @@ class OffGridBuffer:
         :rtype: None
         :raises RuntimeError: If one or more receipt entries are preserved in
             ``_write_errors`` at shutdown time, indicating that they failed to reach
-            disk and have not been recovered via :meth:`drain`.
+            disk and have not been recovered via :meth:`drain`.  The ``.lock`` file is
+            still unlinked before the exception propagates.
         """
         sentinel_placed: bool = False
         with self._drain_lock:
@@ -731,18 +738,20 @@ class OffGridBuffer:
                 self._write_queue.put(None)
         if sentinel_placed:
             self._worker_thread.join()
-        with self._count_lock:
-            error_count: int = len(self._write_errors)
-        if error_count:
-            raise RuntimeError(
-                f"OffGridBuffer closed with {error_count} un-journaled "
-                f"receipt{'s' if error_count != 1 else ''} in _write_errors; "
-                "call drain() before close() to recover pending entries"
-            )
         try:
-            self._lock_path.unlink()
-        except OSError:
-            pass
+            with self._count_lock:
+                error_count: int = len(self._write_errors)
+            if error_count:
+                raise RuntimeError(
+                    f"OffGridBuffer closed with {error_count} un-journaled "
+                    f"receipt{'s' if error_count != 1 else ''} in _write_errors; "
+                    "call drain() before close() to recover pending entries"
+                )
+        finally:
+            try:
+                self._lock_path.unlink()
+            except OSError:
+                pass
 
     @property
     def size(self) -> int:
