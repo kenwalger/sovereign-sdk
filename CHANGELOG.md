@@ -1442,6 +1442,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``TestOffGridBufferWriteErrors`` grows from 13 to 14 cases.
   **Suite: 101 edge tests, 390 workspace tests passed, 1 skipped (POSIX fchmod).**
 
+- **`SensorFrame` — postponed annotation evaluation guard** (`models.py`): Adds
+  ``from __future__ import annotations`` as the first line of code in ``models.py``.
+  Under Python 3.12, class-body annotations are evaluated eagerly at class-definition
+  time by default; the ``d: MappingProxyType[str, Any]`` field annotation on
+  :class:`SensorFrame` exercises generic subscripting on ``types.MappingProxyType``
+  which can trigger a crash on Python builds where the runtime has not yet acquired
+  ``__class_getitem__`` support for that type.  With ``from __future__ import
+  annotations`` (PEP 563), all annotations in the module become opaque string literals
+  at runtime; evaluation is deferred until an explicit ``typing.get_type_hints()`` call
+  requires it, eliminating the import-time subscripting hazard without changing the
+  public API or the :class:`~types.MappingProxyType` runtime type of the ``d`` field.
+
+- **`TestModuleImport` — top-level import smoke test** (`test_edge.py`): Adds a new
+  ``TestModuleImport`` class at the head of the test suite with a single test,
+  ``test_sovereign_edge_top_level_import``, that performs a fresh
+  ``from sovereign_edge import EdgePipeline, SensorFrame`` import inside the test body
+  and asserts both names are non-None.  Any annotation evaluation regression that would
+  surface as :exc:`ImportError` or :exc:`TypeError` at module load time breaks this
+  test immediately, providing a precise signal before the failure reaches the code review
+  loop.  ``TestModuleImport`` contributes 1 new case.
+  **Suite: 102 edge tests, 391 workspace tests passed, 1 skipped (POSIX fchmod).**
+
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing
   sensor observations into versioned, tamper-evident, minified JSON transmission envelopes with

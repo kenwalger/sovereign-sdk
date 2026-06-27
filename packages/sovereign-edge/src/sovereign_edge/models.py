@@ -1,5 +1,7 @@
 # packages/sovereign-edge/src/sovereign_edge/models.py
 """Typed data models for the sovereign-edge ingestion pipeline."""
+from __future__ import annotations
+
 import json
 from dataclasses import dataclass
 from types import MappingProxyType

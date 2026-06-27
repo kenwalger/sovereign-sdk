@@ -69,6 +69,29 @@ def _seal_frame(tmp_path: Path, payload: dict[str, Any] | None = None) -> bytes:
 
 
 # ---------------------------------------------------------------------------
+# TestModuleImport
+# ---------------------------------------------------------------------------
+
+class TestModuleImport:
+    """Verify that the sovereign_edge package imports without error at the top level."""
+
+    def test_sovereign_edge_top_level_import(self) -> None:
+        """Importing EdgePipeline and SensorFrame must not raise any exception.
+
+        Guards against annotation evaluation regressions — e.g. ``MappingProxyType``
+        subscripting that fails at class-definition time in older Python runtimes —
+        that would surface as :exc:`ImportError` or :exc:`TypeError` at module load,
+        silently blocking the entire test suite from collecting.
+
+        :return: None
+        :rtype: None
+        """
+        from sovereign_edge import EdgePipeline, SensorFrame as _SensorFrame  # noqa: F401
+        assert EdgePipeline is not None, "EdgePipeline must be importable from sovereign_edge"
+        assert _SensorFrame is not None, "SensorFrame must be importable from sovereign_edge"
+
+
+# ---------------------------------------------------------------------------
 # TestSensorFrame
 # ---------------------------------------------------------------------------
 

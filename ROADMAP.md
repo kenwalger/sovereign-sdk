@@ -979,7 +979,17 @@ committed = pipeline.drain_buffer()
   prefix, exception type, exception message), and
   ``test_racing_close_sentinel_drained_by_evacuation`` (verifies close() does not hang
   when racing with an in-progress crash, ``_pending == 0`` after resolution).
-  **101 passed, 0 skipped (edge); 390 passed, 1 skipped (workspace).**
+
+- Postponed annotation evaluation in ``models.py``: ``from __future__ import
+  annotations`` added as the first line of code; eliminates the Python 3.12
+  class-definition-time subscripting hazard on ``MappingProxyType[str, Any]`` without
+  changing the public API or the runtime ``MappingProxyType`` type of the ``d`` field.
+
+- Module import smoke test: new ``TestModuleImport`` class with
+  ``test_sovereign_edge_top_level_import`` asserts ``EdgePipeline`` and ``SensorFrame``
+  are importable and non-None; any future annotation evaluation regression breaks this
+  test immediately at collection time.
+  **102 passed, 0 skipped (edge); 391 passed, 1 skipped (workspace).**
 
 ---
 
