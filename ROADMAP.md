@@ -989,6 +989,23 @@ committed = pipeline.drain_buffer()
   ``test_sovereign_edge_top_level_import`` asserts ``EdgePipeline`` and ``SensorFrame``
   are importable and non-None; any future annotation evaluation regression breaks this
   test immediately at collection time.
+
+- Exception-paradox resolution and staging-tracking hardening: ``ValueError`` and
+  ``TypeError`` removed from the per-entry eviction clause and merged into the re-queue
+  except tuple ``(SovereignStorageError, sqlite3.Error, ValueError, TypeError)`` so that
+  generic runtime exceptions are treated as retryable anomalies, matching the direct
+  ingestion buffering profile in ``process()``; ``sqlite3.IntegrityError`` remains the
+  sole permanent eviction criterion.  ``import sys`` removed from ``pipeline.py``;
+  ``import json`` added for the new retry-file path.  ``self._retry_path`` attribute added
+  to ``EdgePipeline.__init__`` pointing to ``{buffer_path}.retry``.  Push-failure retry
+  log: when ``push()`` raises ``RuntimeError`` in the re-queue pass, the failed entry is
+  appended as a JSONL line to ``{buffer_path}.retry`` (best-effort, ``except OSError:
+  pass``) so the receipt is durable even when the buffer worker has terminated.
+  ``test_drain_buffer_evicts_permanently_on_non_storage_exception`` renamed to
+  ``test_drain_buffer_requeues_on_non_storage_exception`` with assertion updated to
+  ``buffer_depth == 1``; ``test_drain_buffer_permanent_fault_emits_critical_log`` renamed
+  to ``test_drain_buffer_requeue_failure_writes_retry_log`` with assertions updated to
+  verify retry-file existence, line count, and ``receipt``/``sieved_content`` key presence.
   **102 passed, 0 skipped (edge); 391 passed, 1 skipped (workspace).**
 
 ---

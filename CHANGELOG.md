@@ -1464,6 +1464,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loop.  ``TestModuleImport`` contributes 1 new case.
   **Suite: 102 edge tests, 391 workspace tests passed, 1 skipped (POSIX fchmod).**
 
+- **`EdgePipeline.drain_buffer()` — `ValueError`/`TypeError` reclassified as retryable;
+  push-failure retry log at `{buffer_path}.retry`** (`pipeline.py`): Removes the
+  ``except (ValueError, TypeError) as permanent_err:`` eviction clause and the
+  ``sys.stderr.write()`` emission introduced in the previous round.  Instead,
+  ``ValueError`` and ``TypeError`` are appended to the existing re-queue except tuple,
+  which now reads ``except (SovereignStorageError, sqlite3.Error, ValueError, TypeError):``.
+  This aligns the replay-loop eviction contract with the direct-ingestion buffering profile
+  in :meth:`process`: both paths treat generic runtime exceptions as retryable anomalies
+  rather than permanent data-format faults, preventing accidental permanent eviction where
+  a transient processing fault shares an exception class with a structural schema failure.
+  ``sqlite3.IntegrityError`` remains the sole criterion for permanent silent eviction, as it
+  is a verified, explicit ledger-level duplicate constraint rather than a generic exception.
+  ``import sys`` is removed from ``pipeline.py``; ``import json`` (used by the new retry
+  file path) is added.  The ``drain_buffer()`` docstring is updated from a four-tier to a
+  three-tier per-entry exception hierarchy.
+
+- **`EdgePipeline.__init__()` — `_retry_path` attribute** (`pipeline.py`): A new
+  ``self._retry_path: Path = Path(buffer_path + ".retry")`` assignment is added
+  immediately after ``self._buffer = OffGridBuffer(buffer_path)``.  The path is used
+  exclusively by the re-queue push-failure handler (see below) and carries no lifecycle
+  responsibility — the file is created on demand only when a push fails, and is never
+  opened or deleted by any other ``EdgePipeline`` method.
+
+- **`EdgePipeline.drain_buffer()` — push-failure retry log** (`pipeline.py`): When
+  ``self._buffer.push()`` raises :exc:`RuntimeError` in the re-queue pass (indicating the
+  buffer worker has terminated or the buffer is closed), the failed entry is now also
+  appended as a JSONL line to ``self._retry_path`` (``{buffer_path}.retry``) before
+  the re-queue loop continues.  Each line has the form
+  ``{"receipt": <receipt_dict>, "sieved_content": <str>}`` serialized via
+  ``json.dumps(..., ensure_ascii=False)``.  The file is opened in append mode so multiple
+  push failures within a single drain pass accumulate into the same file without
+  overwriting prior recovery data from previous drain passes.  The ``_rf.flush()`` call
+  after each write ensures the line is visible to external readers without requiring
+  ``fsync``; an outer ``except OSError: pass`` swallows write failures to the retry file
+  so a secondary disk fault does not mask the primary push-failure signal.  The retry file
+  provides a process-visible, durable recovery artefact for receipts that could not be
+  re-queued to the buffer, ensuring no receipt is held only in volatile memory when the
+  buffer worker has terminated.
+
+- **`test_drain_buffer_requeues_on_non_storage_exception`** (renamed from
+  ``test_drain_buffer_evicts_permanently_on_non_storage_exception``,
+  ``TestEdgePipelineDrainBuffer``, `test_edge.py`): Updates the assertion on entry 2's
+  ``ValueError`` disposition from ``buffer_depth == 0`` (permanent eviction) to
+  ``buffer_depth == 1`` (re-queued).  The ``sys.stderr`` substitution and ``StringIO``
+  sink are removed since the eviction emission path no longer exists.  The docstring and
+  ``pytest.raises`` context are updated to document the retryable-fault semantics.
+  Rename-in-place: test case count is unchanged.
+
+- **`test_drain_buffer_requeue_failure_writes_retry_log`** (renamed from
+  ``test_drain_buffer_permanent_fault_emits_critical_log``,
+  ``TestEdgePipelineDrainBuffer``, `test_edge.py`): Replaces the ``stderr`` emission
+  assertions with a retry-file existence and content check.  Setup: buffers 1 receipt via
+  a closed ledger; on drain, patches ``append_receipt`` to raise
+  :exc:`SovereignStorageError` (routing the entry to the re-queue list) and patches
+  ``pipeline_b._buffer.push`` to raise :exc:`RuntimeError` (simulating a terminated
+  buffer worker).  After ``drain_buffer()`` raises, asserts that ``{buffer_path}.retry``
+  exists, contains exactly one JSONL line, and that the line deserializes to a dict with
+  ``"receipt"`` and ``"sieved_content"`` keys.  Rename-in-place: test case count is
+  unchanged.
+  **Suite: 102 edge tests, 391 workspace tests passed, 1 skipped (POSIX fchmod).**
+
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing
   sensor observations into versioned, tamper-evident, minified JSON transmission envelopes with

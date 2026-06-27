@@ -3,8 +3,8 @@
 import binascii
 import hashlib
 import hmac as _hmac
+import json
 import sqlite3
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -145,6 +145,7 @@ class EdgePipeline:
             )
         self._ledger: SovereignLedger = ledger
         self._buffer: OffGridBuffer = OffGridBuffer(buffer_path)
+        self._retry_path: Path = Path(buffer_path + ".retry")
         try:
             key_path: Path = Path(signing_key).resolve()
             key_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -317,18 +318,16 @@ class EdgePipeline:
 
         Eagerly materialises the drained entry list before the replay loop so
         that a ``processed`` index can track how far through the list the loop
-        advanced.  Each entry is dispatched through a four-tier inner exception
+        advanced.  Each entry is dispatched through a three-tier inner exception
         hierarchy: ``sqlite3.IntegrityError`` → silent duplicate eviction;
-        :exc:`~sovereign_ledger.SovereignStorageError` / ``sqlite3.Error`` →
-        transient storage fault, entry re-queued; :exc:`ValueError` /
-        :exc:`TypeError` → permanent data-format fault, entry evicted and a
-        ``SOVEREIGN-EDGE CRITICAL`` line emitted to :data:`sys.stderr` with the
-        exception type, message, and ``payload_hash``; all other
+        :exc:`~sovereign_ledger.SovereignStorageError` / ``sqlite3.Error`` /
+        :exc:`ValueError` / :exc:`TypeError` → transient or format fault, entry
+        re-queued to match the direct ingestion buffering profile; all other
         :exc:`Exception` subclasses → unhandled, propagate to the outer
-        ``except`` block which aborts the replay loop.  Permanent eviction on
-        ``ValueError`` / ``TypeError`` prevents an infinite replay loop where a
-        receipt with a bad schema would be re-buffered and fail on every
-        subsequent drain pass, while still allowing operational failures such as
+        ``except`` block which aborts the replay loop.  Treating
+        :exc:`ValueError` and :exc:`TypeError` as retryable prevents accidental
+        permanent eviction when transient processing faults overlap with generic
+        exception types, while still allowing operational failures such as
         :exc:`RuntimeError` to abort the replay and preserve the staging file for
         manual recovery.  If an unexpected exception escapes the per-entry
         handlers entirely and aborts the replay loop mid-iteration, the outer
@@ -364,10 +363,14 @@ class EdgePipeline:
         The re-queue pass always iterates to completion regardless of
         :exc:`RuntimeError` from individual :meth:`~sovereign_edge.buffer.OffGridBuffer.push`
         calls so that every remaining item is attempted; failed items are collected in a
-        local list rather than just counted.  If the replay loop crashed AND some entries
-        could not be re-queued, :exc:`SovereignDoubleFaultError` is raised with the
-        unrecoverable receipt dicts attached via :attr:`~SovereignDoubleFaultError.uncommitted_receipts`
-        and the crash exception preserved as :attr:`~SovereignDoubleFaultError.ledger_error`.
+        local list rather than just counted.  Each push failure additionally appends the
+        entry as a JSONL line to ``{buffer_path}.retry`` (``self._retry_path``) so the
+        receipt is durable even when the buffer worker has terminated; :exc:`OSError` from
+        the retry-file write is silently swallowed to avoid masking the primary failure
+        signal.  If the replay loop crashed AND some entries could not be re-queued,
+        :exc:`SovereignDoubleFaultError` is raised with the unrecoverable receipt dicts
+        attached via :attr:`~SovereignDoubleFaultError.uncommitted_receipts` and the crash
+        exception preserved as :attr:`~SovereignDoubleFaultError.ledger_error`.
 
         Two-phase commit: :meth:`~sovereign_edge.buffer.OffGridBuffer.drain` atomically
         renames the active buffer to a staging file and returns all entries.  The staging
@@ -421,16 +424,8 @@ class EdgePipeline:
                     committed.append(payload_hash)
                 except sqlite3.IntegrityError:
                     pass
-                except (SovereignStorageError, sqlite3.Error):
+                except (SovereignStorageError, sqlite3.Error, ValueError, TypeError):
                     requeue.append((receipt_dict, sieved_content))
-                except (ValueError, TypeError) as permanent_err:
-                    _phash: str = receipt_dict.get("payload_hash", "<unknown>")
-                    sys.stderr.write(
-                        f"SOVEREIGN-EDGE CRITICAL: receipt evicted during drain_buffer() replay — "
-                        f"permanent non-storage exception {type(permanent_err).__name__}: {permanent_err}; "
-                        f"payload_hash={_phash}\n"
-                    )
-                    sys.stderr.flush()
                 processed += 1
         except Exception as exc:
             crash_exc = exc
@@ -445,6 +440,18 @@ class EdgePipeline:
             except RuntimeError:
                 push_failure_count += 1
                 failed_requeue_entries.append((receipt_dict, sieved_content))
+                try:
+                    with open(self._retry_path, "a", encoding="utf-8") as _rf:
+                        _rf.write(
+                            json.dumps(
+                                {"receipt": receipt_dict, "sieved_content": sieved_content},
+                                ensure_ascii=False,
+                            )
+                            + "\n"
+                        )
+                        _rf.flush()
+                except OSError:
+                    pass
 
         if crash_exc is not None:
             if push_failure_count:

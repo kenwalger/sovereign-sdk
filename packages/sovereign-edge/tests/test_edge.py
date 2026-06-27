@@ -1096,24 +1096,23 @@ class TestEdgePipelineDrainBuffer:
             pipeline_b.close()
             recovery_ledger.close()
 
-    def test_drain_buffer_evicts_permanently_on_non_storage_exception(
+    def test_drain_buffer_requeues_on_non_storage_exception(
         self, tmp_path: Path
     ) -> None:
-        """Per-entry non-storage exceptions in the replay loop must be permanently evicted,
-        not re-queued.  A ValueError raised by append_receipt is caught by the inner
-        ``except Exception as permanent_err:`` clause; the entry is silently discarded and
-        the loop advances to the next entry without propagating the exception.
+        """Per-entry non-storage exceptions in the replay loop are treated as retryable
+        faults and re-queued to the buffer rather than permanently evicted.  A ValueError
+        raised by append_receipt is caught by the inner
+        ``except (SovereignStorageError, sqlite3.Error, ValueError, TypeError):`` clause;
+        the entry is re-buffered so it can be retried on the next drain_buffer() pass.
 
         Setup: buffer 3 receipts.  On replay, entries 1 and 3 commit successfully; entry 2
         raises ValueError.  drain_buffer() must return without raising, committed must
-        contain exactly 2 hashes (entries 1 and 3), and buffer_depth must be 0 — entry 2
-        was evicted, not re-queued.
+        contain exactly 2 hashes (entries 1 and 3), and buffer_depth must be 1 — entry 2
+        was re-queued, not permanently evicted.
 
         :param tmp_path: Pytest-provided isolated temporary directory.
         :type tmp_path: Path
         """
-        import io
-        import sys as _sys
         buffer_path: str = str(tmp_path / ".edge_buffer.jsonl")
         key_path: str = str(tmp_path / ".keys" / "edge_identity.pem")
 
@@ -1147,39 +1146,42 @@ class TestEdgePipelineDrainBuffer:
         def _fail_on_second(receipt: dict[str, Any], content: str) -> str:
             call_count[0] += 1
             if call_count[0] == 2:
-                raise ValueError("permanent schema validation failure")
+                raise ValueError("transient schema validation failure")
             return real_append(receipt, content)
 
-        stderr_sink: io.StringIO = io.StringIO()
         try:
             with patch.object(open_ledger, "append_receipt", side_effect=_fail_on_second):
-                with patch("sys.stderr", stderr_sink):
-                    committed: list[str] = pipeline_b.drain_buffer()
+                committed: list[str] = pipeline_b.drain_buffer()
 
             assert len(committed) == 2, (
                 f"Expected 2 committed hashes (entries 1 and 3); got {len(committed)} — "
-                "entry 2 (ValueError) must be evicted, not re-queued"
+                "entry 2 (ValueError) must be re-queued, not permanently evicted"
             )
-            assert pipeline_b.buffer_depth == 0, (
-                f"buffer_depth={pipeline_b.buffer_depth} — evicted entry must not be "
-                "re-queued to the buffer; only transient storage faults are re-queued"
+            assert pipeline_b.buffer_depth == 1, (
+                f"buffer_depth={pipeline_b.buffer_depth} — ValueError must cause the "
+                "entry to be re-queued to the buffer for retry on the next drain pass"
             )
         finally:
             pipeline_b._buffer.close()
             open_ledger.close()
 
-    def test_drain_buffer_permanent_fault_emits_critical_log(
+    def test_drain_buffer_requeue_failure_writes_retry_log(
         self, tmp_path: Path
     ) -> None:
-        """Per-entry permanent eviction must write a SOVEREIGN-EDGE CRITICAL line to
-        sys.stderr containing the exception type, message, and payload_hash so that a
-        process supervisor can identify and recover the dropped receipt out-of-band.
+        """When push() fails during the re-queue pass, the entry must be appended as a
+        JSONL line to ``{buffer_path}.retry`` before the exception propagates, ensuring the
+        receipt is durable even when the buffer worker has terminated.
+
+        Setup: buffer 1 receipt.  On drain, append_receipt raises SovereignStorageError
+        so the entry enters the re-queue list.  push() is patched to raise RuntimeError,
+        simulating a terminated buffer worker.  The retry file must exist and contain
+        exactly one JSONL line carrying ``receipt`` and ``sieved_content`` fields.
 
         :param tmp_path: Pytest-provided isolated temporary directory.
         :type tmp_path: Path
         """
-        import io
         buffer_path: str = str(tmp_path / ".edge_buffer.jsonl")
+        retry_path: Path = Path(buffer_path + ".retry")
         key_path: str = str(tmp_path / ".keys" / "edge_identity.pem")
 
         closed_ledger: SovereignLedger = SovereignLedger(":memory:")
@@ -1193,40 +1195,47 @@ class TestEdgePipelineDrainBuffer:
         try:
             pipeline.process(_seal_frame(tmp_path, {"seq": 1}))
             pipeline._buffer.flush()
+            assert pipeline._buffer.size == 1
         finally:
             pipeline._buffer.close()
 
         open_ledger: SovereignLedger = SovereignLedger(str(tmp_path / "recovery.db"))
-        pipeline2: EdgePipeline = EdgePipeline(
+        pipeline_b: EdgePipeline = EdgePipeline(
             ledger=open_ledger,
             signing_key=key_path,
             buffer_path=buffer_path,
             sensor_secret=_SENSOR_SECRET,
         )
-        stderr_sink: io.StringIO = io.StringIO()
         try:
             with patch.object(
                 open_ledger,
                 "append_receipt",
-                side_effect=TypeError("receipt dict missing required field"),
+                side_effect=SovereignStorageError("ledger temporarily unavailable"),
             ):
-                with patch("sys.stderr", stderr_sink):
-                    pipeline2.drain_buffer()
+                with patch.object(
+                    pipeline_b._buffer, "push",
+                    side_effect=RuntimeError("buffer closed"),
+                ):
+                    with pytest.raises(RuntimeError):
+                        pipeline_b.drain_buffer()
         finally:
-            pipeline2._buffer.close()
+            pipeline_b._buffer.close()
             open_ledger.close()
 
-        stderr_output: str = stderr_sink.getvalue()
-        assert "SOVEREIGN-EDGE CRITICAL" in stderr_output, (
-            "stderr must contain the CRITICAL prefix so process supervisors can filter "
-            f"permanent eviction events; got: {stderr_output!r}"
+        assert retry_path.exists(), (
+            f"retry file {retry_path!s} must be created when push() fails during re-queue; "
+            "the receipt must be durable even when the buffer worker has terminated"
         )
-        assert "TypeError" in stderr_output, (
-            f"stderr must name the exception type for diagnosis; got: {stderr_output!r}"
+        retry_lines: list[str] = [
+            ln for ln in retry_path.read_text(encoding="utf-8").splitlines() if ln.strip()
+        ]
+        assert len(retry_lines) == 1, (
+            f"retry file must contain exactly 1 JSONL line for the failed push; "
+            f"got {len(retry_lines)} lines"
         )
-        assert "receipt dict missing required field" in stderr_output, (
-            f"stderr must include the exception message; got: {stderr_output!r}"
-        )
+        entry: dict[str, Any] = json.loads(retry_lines[0])
+        assert "receipt" in entry, "retry file line must contain 'receipt' key"
+        assert "sieved_content" in entry, "retry file line must contain 'sieved_content' key"
 
     def test_drain_buffer_survives_push_failure_on_requeue(
         self, tmp_path: Path
