@@ -2,7 +2,7 @@
 
 **High-Integrity Cryptographic Provenance and Inbound Protection Boundaries for Agentic Workflows.**
 
-Sovereign Systems is a local-first AI WAF and compliance gate. It intercepts every inbound payload before it reaches a model or agentic loop, strips high-entropy boilerplate, and seals the result with an Ed25519-signed `ForensicReceipt` that gives enterprise auditors mathematical proof of un-tampered boundary transformation — all running on local silicon with no external service dependency.
+Sovereign Systems is a local-first AI Web Application Firewall (WAF) and compliance gate. It intercepts every inbound payload before it reaches a model or agentic loop, strips high-entropy boilerplate, and seals the result with an Ed25519-signed `ForensicReceipt` that gives enterprise auditors mathematical proof of un-tampered boundary transformation — all running on local silicon with no external service dependency.
 
 Every boundary crossing produces a non-repudiable chain of custody: the receipt binds the sieved payload hash and the full transformation accounting inside a single cryptographic envelope. No post-hoc mutation of the output or its metrics can go undetected.
 

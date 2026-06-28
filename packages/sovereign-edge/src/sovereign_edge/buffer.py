@@ -91,6 +91,7 @@ class OffGridBuffer:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._staging_path: Path = Path(str(path) + ".staging")
         self._quarantine_path: Path = Path(str(path) + ".quarantine")
+        self._quarantine_staging_path: Path = Path(str(path) + ".quarantine.staging")
         self._lock_path: Path = Path(str(path) + ".lock")
         self._write_queue: _queue.Queue[str | None] = _queue.Queue()
         self._pending: int = 0
@@ -357,26 +358,34 @@ class OffGridBuffer:
         cannot be read, this method returns without raising — the absence of recovered
         entries is safer than aborting construction for a non-critical recovery file.
 
+        If ``{path}.quarantine.staging`` also exists (a snapshot rotated by :meth:`drain`
+        during an interrupted drain cycle where :meth:`commit_drain` was never called),
+        its entries are loaded into ``_write_errors`` as well.  The staging snapshot's
+        content may already be present in the active buffer via :meth:`_recover_staging`,
+        but loading it here too is safe: any resulting duplicates are silently evicted by
+        the ``sqlite3.IntegrityError`` handler in :meth:`~sovereign_edge.pipeline.EdgePipeline.drain_buffer`.
+
         :return: None
         :rtype: None
         """
-        if not self._quarantine_path.exists():
-            return
-        try:
-            lines: list[str] = self._quarantine_path.read_text(encoding="utf-8").splitlines()
-        except (OSError, UnicodeDecodeError):
-            return
-        for line in lines:
-            stripped: str = line.strip()
-            if not stripped:
+        for _qpath in (self._quarantine_path, self._quarantine_staging_path):
+            if not _qpath.exists():
                 continue
             try:
-                _obj: dict[str, Any] = json.loads(stripped)
-                self._write_errors.append((_obj["receipt"], _obj["sieved_content"]))
-            except (json.JSONDecodeError, KeyError):
-                if len(self._dead_letter) >= _DEAD_LETTER_MAX:
-                    del self._dead_letter[0]
-                self._dead_letter.append(stripped)
+                _qlines: list[str] = _qpath.read_text(encoding="utf-8").splitlines()
+            except (OSError, UnicodeDecodeError):
+                continue
+            for _qline in _qlines:
+                _qs: str = _qline.strip()
+                if not _qs:
+                    continue
+                try:
+                    _obj: dict[str, Any] = json.loads(_qs)
+                    self._write_errors.append((_obj["receipt"], _obj["sieved_content"]))
+                except (json.JSONDecodeError, KeyError):
+                    if len(self._dead_letter) >= _DEAD_LETTER_MAX:
+                        del self._dead_letter[0]
+                    self._dead_letter.append(_qs)
 
     def _disk_writer(self) -> None:
         """Background daemon worker that serializes JSONL writes to disk.
@@ -630,19 +639,25 @@ class OffGridBuffer:
         pass.
 
         **Two-phase commit scope**: the active buffer file is atomically renamed to the
-        staging path (``{path}.staging``) via :func:`os.replace`.  Immediately after the
-        rename, the content of ``{path}.quarantine`` (if non-empty) is read and appended
-        to the staging file via a ``tempfile`` → :func:`os.replace` merge so that the
-        staging file is a self-contained recovery artefact containing both the active
-        buffer entries and any write-error entries that were durably logged to the
-        quarantine file.  This guarantees that a process exit at any point between
-        :meth:`drain` and :meth:`commit_drain` leaves all pending entries inside a
-        single staging file: :meth:`_recover_staging` on the next boot will merge
-        staging back into the active buffer without loss.
+        staging path (``{path}.staging``) via :func:`os.replace`.  Before that rename,
+        any existing ``{path}.quarantine`` file is atomically rotated to
+        ``{path}.quarantine.staging`` via :func:`os.replace`.  This rotation isolates
+        the pre-drain quarantine snapshot from concurrent write failures: after the
+        rotation, the background writer opens a fresh ``{path}.quarantine`` for any new
+        :exc:`OSError` that occurs during the caller's replay pass, leaving it completely
+        insulated from the current commit cycle.  The rotated snapshot
+        (``{path}.quarantine.staging``) is then merged into the staging file so that
+        staging is a self-contained recovery artefact containing the active buffer
+        entries and the pre-drain quarantine entries.  A process exit at any point
+        between :meth:`drain` and :meth:`commit_drain` leaves all pre-drain entries
+        inside ``{path}.staging``; :meth:`_recover_staging` on the next boot merges
+        them back without loss.  Any post-drain ``{path}.quarantine`` entries written by
+        concurrent background-write faults survive independently: :meth:`commit_drain`
+        deletes only ``{path}.quarantine.staging``, never the live
+        ``{path}.quarantine``.
 
-        Neither ``_write_errors`` nor ``{path}.quarantine`` are modified by this method.
-        Both are cleared exclusively by :meth:`commit_drain` after the caller confirms
-        that every drained entry has been committed to the ledger or re-queued.
+        ``_write_errors`` is not modified by this method; it is cleared exclusively by
+        :meth:`commit_drain` up to the snapshot boundary captured at flush time.
         ``_drain_write_error_snapshot`` is set (under ``_count_lock``) to the
         ``_write_errors`` length captured at flush time so that :meth:`commit_drain`
         knows precisely how many entries to evict from the front of the list.
@@ -685,9 +700,16 @@ class OffGridBuffer:
             _quarantine_text: str = ""
             if self._quarantine_path.exists():
                 try:
-                    _quarantine_text = self._quarantine_path.read_text(encoding="utf-8")
-                except (OSError, UnicodeDecodeError):
-                    _quarantine_text = ""
+                    os.replace(self._quarantine_path, self._quarantine_staging_path)
+                    try:
+                        _quarantine_text = self._quarantine_staging_path.read_text(encoding="utf-8")
+                    except (OSError, UnicodeDecodeError):
+                        _quarantine_text = ""
+                except OSError:
+                    try:
+                        _quarantine_text = self._quarantine_path.read_text(encoding="utf-8")
+                    except (OSError, UnicodeDecodeError):
+                        _quarantine_text = ""
 
             if not self._path.exists():
                 if _quarantine_text.strip():
@@ -791,10 +813,13 @@ class OffGridBuffer:
            (active buffer was empty when :meth:`drain` was called, or a prior call
            already deleted it), the unlink is silently skipped.
 
-        2. **Quarantine file**: unlinks ``{path}.quarantine``.  :meth:`drain` ensures
-           the quarantine content is merged into the staging file before returning, so
-           the quarantine file is redundant once staging is confirmed durable by this
-           method.
+        2. **Quarantine staging snapshot**: unlinks ``{path}.quarantine.staging`` — the
+           pre-drain quarantine snapshot rotated by :meth:`drain`.  Its content was merged
+           into the staging file by :meth:`drain`, making it redundant once the caller
+           confirms all entries are committed.  The live ``{path}.quarantine`` is
+           intentionally left untouched: any write failures that occurred during the
+           replay pass (between :meth:`drain` and this call) were appended to a fresh
+           ``{path}.quarantine`` and must not be discarded.
 
         3. **Write-error list**: removes the leading ``_drain_write_error_snapshot``
            entries from ``_write_errors`` under ``_count_lock``.  Only the entries
@@ -814,7 +839,7 @@ class OffGridBuffer:
         except FileNotFoundError:
             pass
         try:
-            self._quarantine_path.unlink()
+            self._quarantine_staging_path.unlink()
         except (FileNotFoundError, OSError):
             pass
         with self._count_lock:

@@ -1702,6 +1702,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   subclasses from `os.kill`.
   **Suite: 108 passed, 0 skipped (sovereign-edge); 397 passed, 1 skipped (workspace).**
 
+- **`OffGridBuffer.drain()` — atomic quarantine rotation to `.quarantine.staging`**
+  (`buffer.py`): Before reading the quarantine file's content, `drain()` now calls
+  `os.replace(self._quarantine_path, self._quarantine_staging_path)` to atomically rename
+  `{path}.quarantine` → `{path}.quarantine.staging`.  After the rename, the background
+  writer opens a fresh `{path}.quarantine` for any new :exc:`OSError` that occurs during
+  the caller's replay pass — entirely insulating concurrent write failures from the current
+  commit cycle.  If the rename itself raises :exc:`OSError` (e.g., cross-device or
+  permissions failure), `drain()` falls back to reading from the original `.quarantine`
+  path, preserving the pre-existing best-effort semantics.  The class-level
+  `_quarantine_staging_path: Path` attribute (`{path}.quarantine.staging`) is added to
+  `__init__` alongside the existing `_quarantine_path`.
+
+- **`OffGridBuffer.commit_drain()` — unlinks `.quarantine.staging` instead of `.quarantine`**
+  (`buffer.py`): The blind `self._quarantine_path.unlink()` is replaced with
+  `self._quarantine_staging_path.unlink()`.  The live `{path}.quarantine` is intentionally
+  left untouched: any write failure that occurred during the replay pass (between
+  `drain()` and `commit_drain()`) appended to a fresh `{path}.quarantine`, and deleting
+  that file would permanently discard receipts that have never been committed or recovered.
+
+- **`OffGridBuffer._load_quarantine()` — also loads from `.quarantine.staging`** (`buffer.py`):
+  The loading loop is refactored to iterate over both `_quarantine_path` and
+  `_quarantine_staging_path`.  This covers the crash-recovery scenario where `drain()`
+  rotated the snapshot but `commit_drain()` never ran: the `.quarantine.staging` content
+  may not have been merged into the staging file if the merge raised :exc:`OSError`, so
+  loading it into `_write_errors` at boot time ensures those receipts surface on the next
+  drain pass.  Any resulting duplicates (when the merge did succeed and those entries are
+  already in the active buffer via `_recover_staging()`) are silently evicted by the
+  ``sqlite3.IntegrityError`` handler in `drain_buffer()`.
+
+- **`test_new_quarantine_entry_survives_commit_drain`** (`TestOffGridBuffer`, `test_edge.py`):
+  Pushes one active entry, injects an old-quarantine entry, calls `drain()`, then writes a
+  new entry to `.quarantine` (simulating a concurrent background write failure during the
+  replay pass), and calls `commit_drain()`.  Asserts: `.quarantine.staging` is deleted by
+  `commit_drain()`; the fresh `.quarantine` file survives intact with the new payload hash
+  present.  The finally block drains the surviving quarantine entry and calls `close()`,
+  confirming the new entry is recoverable on the next drain pass.
+
+- **`test_quarantine_preserved_in_staging_block_on_crash_restart`** — updated assertions
+  (`test_edge.py`): Replaces `assert quarantine_path.exists()` (old invariant: quarantine
+  file must not be deleted by drain) with `assert quarantine_staging_path.exists()`
+  (new invariant: quarantine file must be ROTATED to `.quarantine.staging` by drain).
+  Updates `assert not quarantine_path.exists()` after `commit_drain()` to
+  `assert not quarantine_staging_path.exists()`.  Phase 2 crash-simulation now asserts
+  `quarantine_staging_path.exists()` instead of `quarantine_path.exists()`.
+  **Suite: 109 passed, 0 skipped (sovereign-edge); 398 passed, 1 skipped (workspace).**
+
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing
   sensor observations into versioned, tamper-evident, minified JSON transmission envelopes with

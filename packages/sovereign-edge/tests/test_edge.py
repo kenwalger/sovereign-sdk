@@ -492,15 +492,16 @@ class TestOffGridBuffer:
     def test_quarantine_preserved_in_staging_block_on_crash_restart(
         self, tmp_path: Path
     ) -> None:
-        """drain() must compile quarantine content into the staging file and must NOT
-        unlink the quarantine file.  A crash between drain() and commit_drain() must
-        leave a self-contained staging file from which all entries — including quarantine
-        entries — are recoverable on the next boot via _recover_staging().
+        """drain() must atomically rotate the quarantine file to .quarantine.staging and
+        compile its content into the staging file.  A crash between drain() and
+        commit_drain() must leave a self-contained staging file from which all entries —
+        including the rotated quarantine entries — are recoverable on the next boot via
+        _recover_staging() and _load_quarantine().
 
         Invariants verified:
         - staging exists after drain() and contains the quarantine payload hash.
-        - quarantine file is NOT deleted by drain().
-        - commit_drain() deletes the quarantine file.
+        - drain() renames .quarantine to .quarantine.staging (not deleted, not left in place).
+        - commit_drain() deletes .quarantine.staging (the rotated snapshot).
         - A simulated crash (drain called, commit_drain skipped) leaves the quarantine
           entry recoverable after OffGridBuffer is re-opened on the same path.
 
@@ -509,6 +510,7 @@ class TestOffGridBuffer:
         """
         buf_path: str = str(tmp_path / "buf.jsonl")
         quarantine_path: Path = Path(buf_path + ".quarantine")
+        quarantine_staging_path: Path = Path(buf_path + ".quarantine.staging")
         staging_path: Path = Path(buf_path + ".staging")
 
         buf: OffGridBuffer = OffGridBuffer(buf_path)
@@ -533,14 +535,18 @@ class TestOffGridBuffer:
                 "between drain() and commit_drain() the staging file is the sole "
                 "recovery artefact for those entries"
             )
-            assert quarantine_path.exists(), (
-                "drain() must NOT unlink the quarantine file; "
-                "commit_drain() is the sole authority to delete it after confirmed "
-                "ledger acceptance"
+            assert quarantine_staging_path.exists(), (
+                "drain() must rename .quarantine to .quarantine.staging to isolate "
+                "the pre-drain snapshot from concurrent write failures"
+            )
+            assert not quarantine_path.exists() or not quarantine_path.read_text(
+                encoding="utf-8"
+            ).strip(), (
+                "drain() must not leave the original .quarantine populated after rotation"
             )
             buf.commit_drain()
-            assert not quarantine_path.exists(), (
-                "commit_drain() must unlink the quarantine file"
+            assert not quarantine_staging_path.exists(), (
+                "commit_drain() must delete .quarantine.staging (the rotated snapshot)"
             )
         finally:
             buf.close()
@@ -563,9 +569,9 @@ class TestOffGridBuffer:
             )
 
             buf2.drain()
-            # Simulate crash: skip commit_drain() — staging and quarantine both survive
+            # Simulate crash: skip commit_drain() — staging and quarantine.staging both survive
             assert staging_path.exists()
-            assert quarantine_path.exists()
+            assert quarantine_staging_path.exists()
         finally:
             buf2.close()
 
@@ -611,6 +617,77 @@ class TestOffGridBuffer:
             )
         finally:
             buf_b.close()
+
+    def test_new_quarantine_entry_survives_commit_drain(self, tmp_path: Path) -> None:
+        """drain() must atomically rotate the quarantine file to an isolated staging
+        snapshot so that any concurrent write failure occurring during the caller's
+        replay pass writes to a fresh .quarantine file, and commit_drain() must
+        delete only the rotated snapshot without touching the fresh .quarantine file.
+
+        Invariants verified:
+        - After drain(), the original .quarantine is renamed to .quarantine.staging.
+        - A write to .quarantine after drain() is a fresh file, entirely separate from
+          the rotated snapshot.
+        - commit_drain() deletes .quarantine.staging but leaves .quarantine intact.
+        - The surviving .quarantine entry is visible (on disk) for subsequent recovery.
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        buf_path: str = str(tmp_path / "buf.jsonl")
+        quarantine_path: Path = Path(buf_path + ".quarantine")
+        quarantine_staging_path: Path = Path(buf_path + ".quarantine.staging")
+
+        buf: OffGridBuffer = OffGridBuffer(buf_path)
+        old_receipt: dict[str, Any] = self._make_receipt("old_quarantine")
+        new_receipt: dict[str, Any] = self._make_receipt("new_during_replay")
+        try:
+            buf.push(self._make_receipt("active"), "active content")
+            buf.flush()
+
+            quarantine_path.write_text(
+                json.dumps({"receipt": old_receipt, "sieved_content": "old quarantine"}) + "\n",
+                encoding="utf-8",
+            )
+
+            buf.drain()
+
+            assert quarantine_staging_path.exists(), (
+                "drain() must atomically rotate .quarantine to .quarantine.staging "
+                "to isolate pre-drain write errors from concurrent new faults"
+            )
+            assert not quarantine_path.exists() or not quarantine_path.read_text(
+                encoding="utf-8"
+            ).strip(), (
+                "the original .quarantine must be absent or empty after drain() rotates it"
+            )
+
+            # Simulate a concurrent write failure during the replay pass:
+            # a new entry lands in the fresh .quarantine file.
+            quarantine_path.write_text(
+                json.dumps({"receipt": new_receipt, "sieved_content": "new fault during replay"}) + "\n",
+                encoding="utf-8",
+            )
+
+            buf.commit_drain()
+
+            assert not quarantine_staging_path.exists(), (
+                "commit_drain() must delete .quarantine.staging (the rotated pre-drain snapshot)"
+            )
+            assert quarantine_path.exists(), (
+                "commit_drain() must NOT delete the fresh .quarantine — "
+                "it contains write failures from the replay pass that were never part "
+                "of the current drain cycle"
+            )
+            assert new_receipt["payload_hash"] in quarantine_path.read_text(encoding="utf-8"), (
+                "the new quarantine entry from the concurrent write failure must be "
+                "intact and recoverable after commit_drain()"
+            )
+        finally:
+            # Drain the surviving quarantine entry so close() does not see un-journaled write errors.
+            buf.drain()
+            buf.commit_drain()
+            buf.close()
 
     def test_lock_probe_permission_error_fails_closed(self, tmp_path: Path) -> None:
         """OffGridBuffer must raise SovereignStorageError and leave the lock file

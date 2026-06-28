@@ -1066,6 +1066,19 @@ committed = pipeline.drain_buffer()
   `TestOffGridBuffer` respectively.
   **108 passed, 0 skipped (edge); 397 passed, 1 skipped (workspace).**
 
+* [x] **Atomic quarantine rotation in `drain()`** (`buffer.py`): `drain()` calls
+  `os.replace(quarantine_path, quarantine_staging_path)` before reading quarantine
+  content, atomically isolating the pre-drain snapshot (`{path}.quarantine.staging`)
+  from concurrent write failures that land in a fresh `{path}.quarantine`.
+  `commit_drain()` targets `.quarantine.staging` instead of `.quarantine`, leaving
+  post-drain quarantine entries intact.  `_load_quarantine()` iterates over both
+  `_quarantine_path` and `_quarantine_staging_path` so crash-recovery covers the
+  rotated snapshot regardless of whether the staging merge succeeded.
+
+* [x] **`test_new_quarantine_entry_survives_commit_drain`** and updated assertions in
+  **`test_quarantine_preserved_in_staging_block_on_crash_restart`** in `TestOffGridBuffer`.
+  **109 passed, 0 skipped (edge); 398 passed, 1 skipped (workspace).**
+
 ---
 
 ## Phase 10 — Isolated Context Vault & Governance Server (`sovereign-vault`)
