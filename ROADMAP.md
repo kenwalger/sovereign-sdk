@@ -1047,6 +1047,25 @@ committed = pipeline.drain_buffer()
   `commit_drain()` after `drain()` to match the new two-phase protocol.
   **106 passed, 0 skipped (edge); 395 passed, 1 skipped (workspace).**
 
+* [x] **Non-negative sequence invariant** (`models.py`): `SensorFrame.from_bytes()` now
+  raises `ValueError` for `frame["q"] < 0` immediately after the protocol-version gate,
+  preventing negative sequence values from reaching the HMAC verifier, sieve, or ledger.
+
+* [x] **Generic `OSError` from `os.kill` fails closed** (`buffer.py`):
+  `_acquire_buffer_lock()` collapses the separate `PermissionError` + generic `OSError`
+  exception clauses into a single `except OSError as exc: raise SovereignStorageError(...)`;
+  `ProcessLookupError` is the sole exception that permits lock overtake.
+
+* [x] **Signing airlock: `generate_receipt()` moved inside the ingestion `try` block**
+  (`pipeline.py`): Signing faults now route a stub receipt (`signing-fault:{n}:{q}` as
+  `payload_hash`, `signing_fault: True` in metadata) to the off-grid buffer rather than
+  propagating unhandled to the caller.
+
+* [x] **`test_negative_sequence_rejected_at_parse_boundary`** and
+  **`test_lock_probe_permission_error_fails_closed`** added to `TestSensorFrame` and
+  `TestOffGridBuffer` respectively.
+  **108 passed, 0 skipped (edge); 397 passed, 1 skipped (workspace).**
+
 ---
 
 ## Phase 10 — Isolated Context Vault & Governance Server (`sovereign-vault`)

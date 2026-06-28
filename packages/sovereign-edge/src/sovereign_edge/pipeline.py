@@ -304,18 +304,27 @@ class EdgePipeline:
         }
         if sieve_fault:
             metadata["sieve_fault"] = True
-        receipt: ForensicReceipt = self._key_manager.generate_receipt(
-            payload=edge_payload,
-            metadata=metadata,
-        )
-        receipt_dict: dict[str, Any] = dict(receipt)
-
+        receipt_dict: dict[str, Any] = {}
         buffered: bool = False
+        payload_hash: str = ""
         try:
-            payload_hash: str = self._ledger.append_receipt(receipt_dict, sieve_result.text)
+            receipt: ForensicReceipt = self._key_manager.generate_receipt(
+                payload=edge_payload,
+                metadata=metadata,
+            )
+            receipt_dict = dict(receipt)
+            payload_hash = self._ledger.append_receipt(receipt_dict, sieve_result.text)
         except sqlite3.IntegrityError:
             payload_hash = receipt_dict["payload_hash"]
-        except Exception as ledger_err:
+        except Exception as fault_err:
+            if not receipt_dict:
+                receipt_dict = {
+                    "timestamp": frame.t,
+                    "payload_hash": f"signing-fault:{frame.n}:{frame.q}",
+                    "public_key": "",
+                    "signature": "",
+                    "metadata": {**metadata, "signing_fault": True},
+                }
             try:
                 self._buffer.push(receipt_dict, sieve_result.text)
                 payload_hash = receipt_dict["payload_hash"]
@@ -325,7 +334,7 @@ class EdgePipeline:
                     "Ledger unavailable and off-grid buffer rejected payload; "
                     "the signed receipt is attached to this exception for host-level recovery",
                     receipt=receipt_dict,
-                    ledger_error=ledger_err,
+                    ledger_error=fault_err,
                 ) from push_err
 
         return EdgeResult(

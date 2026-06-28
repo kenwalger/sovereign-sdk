@@ -213,15 +213,10 @@ class OffGridBuffer:
             with OffGridBuffer._instance_registry_lock:
                 OffGridBuffer._instance_registry.add(self._instance_id)
             return
-        except PermissionError as exc:
+        except OSError as exc:
             raise SovereignStorageError(
                 "Lock file acquisition failed due to permission or system boundaries"
             ) from exc
-        except OSError:
-            self._lock_path.write_text(_lock_payload, encoding="utf-8")
-            with OffGridBuffer._instance_registry_lock:
-                OffGridBuffer._instance_registry.add(self._instance_id)
-            return
         if held_pid == os.getpid():
             if held_uuid:
                 with OffGridBuffer._instance_registry_lock:

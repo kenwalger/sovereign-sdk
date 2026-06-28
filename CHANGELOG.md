@@ -1652,6 +1652,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   performs the final cleanup.
   **Suite: 106 edge tests, 395 workspace tests passed, 1 skipped (POSIX fchmod).**
 
+- **`SensorFrame.from_bytes()` — non-negative sequence invariant** (`models.py`): After
+  the existing protocol-version gate (`frame["v"] != 1`), a new `if frame["q"] < 0:` check
+  raises :exc:`ValueError` with the message
+  ``"SensorFrame field 'q' must be a non-negative integer, got {q!r}: negative sequence
+  values violate the monotonic custody timeline invariant"`` before the dataclass is
+  constructed.  A negative sequence value cannot occupy a valid position in the ledger's
+  linear hash chain; admitting it would allow an adversary to inject frames with
+  backwards-counting sequence numbers, breaking the append-only custody timeline.
+  Rejection at the parse boundary prevents the malformed frame from reaching the HMAC
+  verifier, sieve, or ledger.  The `from_bytes()` ``:raises ValueError:`` docstring entry
+  is updated to enumerate both the unsupported-version and negative-sequence conditions.
+
+- **`OffGridBuffer._acquire_buffer_lock()` — generic `OSError` from `os.kill` fails closed**
+  (`buffer.py`): The previous exception handling around `os.kill(held_pid, 0)` contained
+  three separate clauses: `except ProcessLookupError:` (overtake), `except PermissionError
+  as exc:` (raise `SovereignStorageError`), and `except OSError:` (overtake — a bug).  Any
+  `OSError` subclass that is not `ProcessLookupError` or `PermissionError` (e.g., `EPERM`
+  arriving on some POSIX kernels as a base `OSError`) silently overtook a lock whose holder
+  may well have been alive.  The two-clause `PermissionError` + generic `OSError` sequence
+  is collapsed into a single `except OSError as exc: raise SovereignStorageError(...)` with
+  only `ProcessLookupError` left as the sole overtake-allowed path.  Because `PermissionError`
+  is a subclass of `OSError`, the consolidated handler covers both cases.
+
+- **`EdgePipeline.process()` — signing airlock: `generate_receipt()` inside the ingestion
+  `try` block** (`pipeline.py`): `self._key_manager.generate_receipt(...)` was previously
+  called *outside* the `try/except` block that routes ledger failures to the off-grid
+  buffer.  Any exception from the signing path (key-file I/O, HSM fault, cryptographic
+  error) propagated directly to the caller with no receipt and no buffer fallback, silently
+  losing the observation.  The signing call is moved inside the `try` block as its first
+  action; `receipt_dict` and `payload_hash` are initialized to empty sentinel values before
+  the `try` block.  A signing fault with an empty `receipt_dict` triggers a stub-receipt
+  construction path: a dict with `"signing-fault:{node_id}:{sequence}"` as `payload_hash`,
+  empty `public_key` and `signature`, and `"signing_fault": True` in `metadata`, which is
+  then routed to the off-grid buffer so no observation is silently discarded.  The
+  `except` clause is renamed from `fault_err` (from the previous `ledger_err`) to match
+  the unified signing-or-ledger fault context.
+
+- **`test_negative_sequence_rejected_at_parse_boundary`** (`TestSensorFrame`, `test_edge.py`):
+  Constructs a wire dict with `"q": -1` and asserts that `SensorFrame.from_bytes()` raises
+  :exc:`ValueError` matching `"non-negative"`.  Verifies the parse-boundary rejection before
+  any HMAC verifier, sieve, or ledger interaction.
+
+- **`test_lock_probe_permission_error_fails_closed`** (`TestOffGridBuffer`, `test_edge.py`):
+  Writes a fabricated lock file with PID `99999` and a non-registry UUID, then patches
+  `os.kill` with `side_effect=PermissionError("Operation not permitted")`.  Asserts that
+  `OffGridBuffer.__init__()` raises `SovereignStorageError` and that the original lock file
+  is left intact (not overwritten), confirming the fail-closed invariant for all `OSError`
+  subclasses from `os.kill`.
+  **Suite: 108 passed, 0 skipped (sovereign-edge); 397 passed, 1 skipped (workspace).**
+
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing
   sensor observations into versioned, tamper-evident, minified JSON transmission envelopes with

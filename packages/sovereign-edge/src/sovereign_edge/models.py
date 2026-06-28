@@ -60,9 +60,11 @@ class SensorFrame:
         :raises TypeError: If any field carries a value whose runtime type is
             incompatible with its wire format contract (e.g., a string where an
             integer is required, or a boolean masquerading as an int).
-        :raises ValueError: If the ``v`` field is not ``1``; future or unknown
+        :raises ValueError: If the ``v`` field is not ``1`` (future or unknown
             wire format versions are rejected immediately to prevent silent
-            misinterpretation of structurally incompatible envelopes.
+            misinterpretation of structurally incompatible envelopes), or if
+            the ``q`` field is negative (negative sequence values violate the
+            monotonic custody timeline invariant).
         """
         frame: dict[str, Any] = json.loads(raw.decode("utf-8"))
         for _field, _expected_type in (
@@ -85,6 +87,11 @@ class SensorFrame:
             raise ValueError(
                 f"Unsupported wire format version {frame['v']!r}: "
                 "sovereign-edge requires protocol version 1"
+            )
+        if frame["q"] < 0:
+            raise ValueError(
+                f"SensorFrame field 'q' must be a non-negative integer, got {frame['q']!r}: "
+                "negative sequence values violate the monotonic custody timeline invariant"
             )
         return cls(
             v=frame["v"],

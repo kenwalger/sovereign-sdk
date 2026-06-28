@@ -235,6 +235,27 @@ class TestSensorFrame:
             "representations must produce distinct preimage strings"
         )
 
+    def test_negative_sequence_rejected_at_parse_boundary(self) -> None:
+        """from_bytes must raise ValueError when the 'q' field is negative.
+
+        A negative sequence value violates the monotonic custody timeline invariant:
+        sequence numbers must be non-negative so that the ledger's linear hash chain
+        cannot be forged by injecting frames with backwards-counting positions.
+        Rejection at the parse boundary prevents the malformed frame from reaching
+        the signing or ledger-commit path.
+
+        :return: None
+        :rtype: None
+        """
+        wire: dict[str, Any] = {
+            "v": 1, "n": _NODE_ID, "t": _TIMESTAMP,
+            "q": -1, "alg": "hmac-sha256",
+            "d": {"sensor": "temperature", "value": 23},
+            "s": "deadsig",
+        }
+        with pytest.raises(ValueError, match="non-negative"):
+            SensorFrame.from_bytes(json.dumps(wire).encode("utf-8"))
+
 
 # ---------------------------------------------------------------------------
 # TestOffGridBuffer
@@ -590,6 +611,34 @@ class TestOffGridBuffer:
             )
         finally:
             buf_b.close()
+
+    def test_lock_probe_permission_error_fails_closed(self, tmp_path: Path) -> None:
+        """OffGridBuffer must raise SovereignStorageError and leave the lock file
+        untouched when os.kill raises PermissionError during liveness probing.
+
+        A PermissionError from os.kill(pid, 0) indicates a system-level access
+        boundary — the lock holder is alive in another security context.  Overtaking
+        such a lock would allow two writers on the same JSONL file; fail-closed is
+        the only safe response.  The lock file must not be overwritten so that the
+        original owner's PID and UUID are preserved for forensic inspection.
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        buf_path: str = str(tmp_path / "buf.jsonl")
+        lock_path: Path = Path(buf_path + ".lock")
+        lock_path.write_text(
+            "99999\ncafebabe-0000-0000-0000-000000000002",
+            encoding="utf-8",
+        )
+        with patch("os.kill", side_effect=PermissionError("Operation not permitted")):
+            with pytest.raises(SovereignStorageError):
+                buf: OffGridBuffer = OffGridBuffer(buf_path)
+                buf.close()
+        assert lock_path.exists(), "lock file must not be wiped when os.kill raises PermissionError"
+        assert "99999" in lock_path.read_text(encoding="utf-8"), (
+            "original PID must be preserved in the lock file after a failed overtake"
+        )
 
 
 # ---------------------------------------------------------------------------
