@@ -1029,6 +1029,24 @@ committed = pipeline.drain_buffer()
   `TestOffGridBuffer` and `TestEdgePipelineDrainBuffer` respectively.
   **104 passed, 0 skipped (edge); 393 passed, 1 skipped (workspace).**
 
+* [x] **Correct lock ownership and liveness invariants** (`buffer.py`): alive-PID branch
+  now gates on `held_pid == os.getpid()` before applying UUID registry check; external
+  PIDs unconditionally raise `SovereignStorageError` rather than being misclassified as
+  stale-lock PID-reuse candidates.
+
+* [x] **Quarantine two-phase commit: merge into staging, defer deletion** (`buffer.py`):
+  `drain()` merges quarantine content into the staging file via `tempfile` → `os.replace`
+  before returning; neither the quarantine file nor `_write_errors` are cleared by
+  `drain()` — both are cleared exclusively by `commit_drain()` after the caller confirms
+  ledger acceptance.  `_drain_write_error_snapshot` tracks the precise write-error slice
+  index for safe deferred eviction.
+
+* [x] **`test_external_process_lock_blocks_instantiation`** and
+  **`test_quarantine_preserved_in_staging_block_on_crash_restart`** added to
+  `TestOffGridBuffer`; 8 `TestOffGridBufferWriteErrors` tests updated to call
+  `commit_drain()` after `drain()` to match the new two-phase protocol.
+  **106 passed, 0 skipped (edge); 395 passed, 1 skipped (workspace).**
+
 ---
 
 ## Phase 10 — Isolated Context Vault & Governance Server (`sovereign-vault`)

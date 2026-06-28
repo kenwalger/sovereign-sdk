@@ -1581,6 +1581,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   least one receipt dict, each of which is a `dict` instance.
   **Suite: 104 edge tests, 393 workspace tests passed, 1 skipped (POSIX fchmod).**
 
+- **`OffGridBuffer._acquire_buffer_lock()` — correct lock ownership and liveness invariants**
+  (`buffer.py`): Fixes a critical security invariant: when `os.kill(held_pid, 0)` succeeds
+  (the PID is alive), the method now branches strictly on whether the PID belongs to the
+  current process or an external one.  If `held_pid == os.getpid()`, the UUID registry
+  cross-check is applied: a UUID absent from `_instance_registry` identifies a dead
+  same-process instance (e.g., a prior `OffGridBuffer` that crashed without calling
+  `close()`), and the lock is safely overtaken.  If the UUID is present or no UUID is
+  available, `RuntimeError` is raised (live sibling instance within this process).  If
+  `held_pid != os.getpid()`, `SovereignStorageError` is raised unconditionally: the UUID
+  registry is process-local and cannot certify whether a UUID in another process's address
+  space belongs to a live or dead instance; overtaking an external lock would allow two
+  concurrent writers on the same JSONL file, producing interleaved lines and corrupting the
+  journal.  The previous implementation applied the UUID absent-from-registry heuristic to
+  any live PID regardless of process origin, producing a false-positive "stale lock"
+  classification for any external process whose UUID was not in this process's registry.
+
+- **`OffGridBuffer.drain()` — quarantine two-phase commit: merge into staging, defer deletion**
+  (`buffer.py`): Removes the `self._quarantine_path.unlink()` call and the
+  `del self._write_errors[:_error_snapshot_count]` slice from `drain()`.  Instead:
+
+  * If the quarantine file exists and is non-empty, its content is read before the
+    active-to-staging rename.  After `os.replace(active, staging)` succeeds, the quarantine
+    text is appended to the staging file via a `tempfile` → `os.replace` merge so that the
+    staging file becomes a single self-contained recovery artefact containing both the active
+    JSONL entries and any quarantine entries.  If the active buffer does not exist but the
+    quarantine file does, a staging file is created directly from the quarantine content.
+    If the merge raises `OSError`, the failure is silently swallowed — the staging file
+    retains the active content and the quarantine file survives intact on disk, preserving
+    both recovery paths for the next `_recover_staging` + `_load_quarantine` boot pass.
+
+  * `_drain_write_error_snapshot: int` is set (under `_count_lock`, alongside the
+    `_committed` decrement) to `len(_write_errors)` captured at flush time, providing
+    `commit_drain()` the precise slice index to evict once ledger acceptance is confirmed.
+
+- **`OffGridBuffer.commit_drain()` — complete two-phase drain by clearing all transient
+  artefacts** (`buffer.py`): Extended to perform three cleanup operations after the staging
+  file is deleted: unlinks `{path}.quarantine` (the write-error disk backup that was merged
+  into staging by `drain()`), and removes `_write_errors[:_drain_write_error_snapshot]`
+  under `_count_lock` (clearing exactly the entries snapshotted at `drain()` time, leaving
+  any entries appended after the snapshot boundary intact for the next drain cycle).
+  `_drain_write_error_snapshot` is reset to `0` after the clear.  The quarantine unlink is
+  best-effort (`except (FileNotFoundError, OSError): pass`).
+
+- **`test_external_process_lock_blocks_instantiation`** (`TestOffGridBuffer`, `test_edge.py`):
+  Spawns a real OS subprocess via `subprocess.Popen`, writes a lock file bearing its PID and
+  a fabricated UUID, and asserts that `OffGridBuffer.__init__()` raises `SovereignStorageError`
+  rather than overtaking the lock.  The subprocess is terminated in a `finally` block.
+  Verifies that the corrected `held_pid != os.getpid()` branch unconditionally raises
+  `SovereignStorageError` for external-process locks.
+
+- **`test_quarantine_preserved_in_staging_block_on_crash_restart`** (`TestOffGridBuffer`,
+  `test_edge.py`): Three-phase integration test verifying the quarantine two-phase commit:
+  Phase 1 injects a quarantine entry, calls `drain()`, asserts the staging file contains the
+  quarantine payload hash and the quarantine file survives, then calls `commit_drain()` and
+  asserts the quarantine file is unlinked.  Phase 2 injects a second quarantine entry, calls
+  `drain()` but skips `commit_drain()` (crash simulation), and asserts both staging and
+  quarantine survive.  Phase 3 opens a new `OffGridBuffer` on the same path
+  (`_recover_staging()` merges staging back into active), drains, and asserts the phase-2
+  quarantine entry's `payload_hash` is present in the recovered entry set.
+
+- **`TestOffGridBufferWriteErrors` — 7 tests updated to call `commit_drain()` after
+  `drain()`** (`test_edge.py`): `test_disk_write_error_increments_write_error_count`,
+  `test_size_includes_write_error_entries`, `test_drain_returns_write_error_entries`,
+  `test_worker_non_oserror_failure_does_not_hang`, `test_drain_concurrent_with_worker_crash_no_deadlock`,
+  `test_push_toctou_worker_crash_no_dangling_items`, `test_close_skips_sentinel_during_worker_os_exit_gap`,
+  and `test_double_write_fault_emits_to_stderr` — each updated to call `buf.commit_drain()` after
+  `buf.drain()` so that `_write_errors` is cleared before `close()`, matching the new
+  two-phase protocol where drain() returns entries without clearing state and commit_drain()
+  performs the final cleanup.
+  **Suite: 106 edge tests, 395 workspace tests passed, 1 skipped (POSIX fchmod).**
+
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing
   sensor observations into versioned, tamper-evident, minified JSON transmission envelopes with

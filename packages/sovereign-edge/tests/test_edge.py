@@ -437,6 +437,129 @@ class TestOffGridBuffer:
         finally:
             buf.close()
 
+    def test_external_process_lock_blocks_instantiation(self, tmp_path: Path) -> None:
+        """OffGridBuffer must raise SovereignStorageError when an external process holds
+        the buffer lock.  PID-reuse detection via the UUID registry is process-local and
+        must not be applied across process boundaries; overtaking an external lock would
+        allow two concurrent writers on the same JSONL file, producing interleaved lines
+        and corrupting the journal.
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        import subprocess
+        import sys as _sys
+
+        buf_path: str = str(tmp_path / "buf.jsonl")
+        lock_path: Path = Path(buf_path + ".lock")
+
+        proc: subprocess.Popen[bytes] = subprocess.Popen(
+            [_sys.executable, "-c", "import time; time.sleep(60)"]
+        )
+        try:
+            lock_path.write_text(
+                f"{proc.pid}\ncafebabe-0000-0000-0000-000000000001",
+                encoding="utf-8",
+            )
+            with pytest.raises(SovereignStorageError):
+                buf: OffGridBuffer = OffGridBuffer(buf_path)
+                buf.close()
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+    def test_quarantine_preserved_in_staging_block_on_crash_restart(
+        self, tmp_path: Path
+    ) -> None:
+        """drain() must compile quarantine content into the staging file and must NOT
+        unlink the quarantine file.  A crash between drain() and commit_drain() must
+        leave a self-contained staging file from which all entries — including quarantine
+        entries — are recoverable on the next boot via _recover_staging().
+
+        Invariants verified:
+        - staging exists after drain() and contains the quarantine payload hash.
+        - quarantine file is NOT deleted by drain().
+        - commit_drain() deletes the quarantine file.
+        - A simulated crash (drain called, commit_drain skipped) leaves the quarantine
+          entry recoverable after OffGridBuffer is re-opened on the same path.
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        buf_path: str = str(tmp_path / "buf.jsonl")
+        quarantine_path: Path = Path(buf_path + ".quarantine")
+        staging_path: Path = Path(buf_path + ".staging")
+
+        buf: OffGridBuffer = OffGridBuffer(buf_path)
+        q_receipt: dict[str, Any] = self._make_receipt("quarantined")
+        try:
+            buf.push(self._make_receipt("active"), "active content")
+            buf.flush()
+
+            quarantine_path.write_text(
+                json.dumps({
+                    "receipt": q_receipt,
+                    "sieved_content": "quarantine content",
+                }) + "\n",
+                encoding="utf-8",
+            )
+
+            buf.drain()
+
+            assert staging_path.exists(), "drain() must create a staging file"
+            assert "quarantined" in staging_path.read_text(encoding="utf-8"), (
+                "staging file must contain quarantine entries — if the process crashes "
+                "between drain() and commit_drain() the staging file is the sole "
+                "recovery artefact for those entries"
+            )
+            assert quarantine_path.exists(), (
+                "drain() must NOT unlink the quarantine file; "
+                "commit_drain() is the sole authority to delete it after confirmed "
+                "ledger acceptance"
+            )
+            buf.commit_drain()
+            assert not quarantine_path.exists(), (
+                "commit_drain() must unlink the quarantine file"
+            )
+        finally:
+            buf.close()
+
+        # Phase 2: simulate crash-restart — push new entries with injected quarantine,
+        # call drain() but NOT commit_drain() (crash point), then verify that a fresh
+        # OffGridBuffer on the same path recovers the quarantine entry from staging.
+        buf2: OffGridBuffer = OffGridBuffer(buf_path)
+        q2_receipt: dict[str, Any] = self._make_receipt("q2_quarantined")
+        try:
+            buf2.push(self._make_receipt("active2"), "active2 content")
+            buf2.flush()
+
+            quarantine_path.write_text(
+                json.dumps({
+                    "receipt": q2_receipt,
+                    "sieved_content": "q2 quarantine content",
+                }) + "\n",
+                encoding="utf-8",
+            )
+
+            buf2.drain()
+            # Simulate crash: skip commit_drain() — staging and quarantine both survive
+            assert staging_path.exists()
+            assert quarantine_path.exists()
+        finally:
+            buf2.close()
+
+        buf3: OffGridBuffer = OffGridBuffer(buf_path)
+        try:
+            recovered: list[tuple[dict[str, Any], str]] = buf3.drain()
+            recovered_hashes: set[str] = {r["payload_hash"] for r, _ in recovered}
+            assert q2_receipt["payload_hash"] in recovered_hashes, (
+                "quarantine entry must survive crash-restart and be recoverable via "
+                f"_recover_staging; recovered payload_hashes={recovered_hashes!r}"
+            )
+        finally:
+            buf3.commit_drain()
+            buf3.close()
+
     def test_buffer_depth_reflects_disk_entries_at_instantiation(
         self, tmp_path: Path
     ) -> None:
@@ -1990,7 +2113,8 @@ class TestOffGridBufferWriteErrors:
         buf.push(self._make_receipt("A"), "content A")
         buf.flush()
         assert buf.write_error_count == 1
-        buf.drain()  # clear write errors so close() does not raise
+        buf.drain()
+        buf.commit_drain()  # clear write errors so close() does not raise
         buf.close()
 
     def test_size_includes_write_error_entries(self, tmp_path: Path) -> None:
@@ -2003,13 +2127,14 @@ class TestOffGridBufferWriteErrors:
         buf.push(self._make_receipt("A"), "content A")
         buf.flush()
         assert buf.size == 1
-        buf.drain()  # clear write errors so close() does not raise
+        buf.drain()
+        buf.commit_drain()  # clear write errors so close() does not raise
         buf.close()
 
     def test_drain_returns_write_error_entries(self, tmp_path: Path) -> None:
         """drain() must include write-error entries in its return value so the pipeline
-        can commit them to the ledger; write_error_count must reach zero after a successful
-        drain pass."""
+        can commit them to the ledger; write_error_count must reach zero after
+        commit_drain() acknowledges ledger acceptance."""
         buf_dir: Path = tmp_path / "buf_dir"
         receipt = self._make_receipt("A")
         buf = OffGridBuffer(str(buf_dir / "buffer.jsonl"))
@@ -2021,6 +2146,7 @@ class TestOffGridBufferWriteErrors:
         assert len(entries) == 1
         assert entries[0][0] == receipt
         assert entries[0][1] == "content A"
+        buf.commit_drain()
         assert buf.write_error_count == 0
         buf.close()
 
@@ -2059,7 +2185,8 @@ class TestOffGridBufferWriteErrors:
         assert buf.worker_failed is True
         with pytest.raises(RuntimeError, match="background writer"):
             buf.push(self._make_receipt("B"), "content B")
-        buf.drain()  # recover write-error entries so close() succeeds
+        buf.drain()
+        buf.commit_drain()  # recover write-error entries so close() succeeds
         buf.close()  # must not hang
 
     def test_drain_concurrent_with_worker_crash_no_deadlock(self, tmp_path: Path) -> None:
@@ -2092,6 +2219,7 @@ class TestOffGridBufferWriteErrors:
             "while drain() holds it"
         )
         assert buf.worker_failed is True
+        buf.commit_drain()  # write errors were returned by drain(); clear before close
         buf.close()
 
     def test_push_toctou_worker_crash_no_dangling_items(self, tmp_path: Path) -> None:
@@ -2182,6 +2310,7 @@ class TestOffGridBufferWriteErrors:
         )
 
         buf.drain()
+        buf.commit_drain()  # write errors returned by drain(); clear before close
         buf.close()
 
     def test_close_skips_sentinel_during_worker_os_exit_gap(self, tmp_path: Path) -> None:
@@ -2223,7 +2352,8 @@ class TestOffGridBufferWriteErrors:
         assert not buf._worker_running, "_worker_running not cleared before thread return"
         assert buf._pending == 0, f"_pending={buf._pending} after crash+evacuation"
 
-        buf.drain()  # clear _write_errors so close() does not raise
+        buf.drain()
+        buf.commit_drain()  # clear _write_errors so close() does not raise
 
         # Patch is_alive() to return True, reproducing the OS-exit gap where the thread
         # function has returned but the OS has not yet unregistered the thread.
@@ -2448,6 +2578,7 @@ class TestOffGridBufferWriteErrors:
             "persisted to either the JSONL file or the quarantine file"
         )
         buf.drain()
+        buf.commit_drain()  # clear write errors (double-fault entry) so close() succeeds
         buf.close()
 
 

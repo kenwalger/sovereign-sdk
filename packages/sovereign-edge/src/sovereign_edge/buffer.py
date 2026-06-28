@@ -103,6 +103,7 @@ class OffGridBuffer:
         self._drain_read_failed: bool = False
         self._count_lock: threading.Lock = threading.Lock()
         self._drain_lock: threading.Lock = threading.Lock()
+        self._drain_write_error_snapshot: int = 0
         self._acquire_buffer_lock()
         try:
             self._recover_staging()
@@ -143,20 +144,34 @@ class OffGridBuffer:
         If the lock file already exists, the owning PID and UUID are read and the
         PID is tested for liveness via :func:`os.kill` with signal ``0``.  A stale
         lock whose owner process no longer exists is overwritten.  If the owner PID
-        is alive, the UUID is cross-verified against the class-level
-        ``_instance_registry``: if the UUID is absent from the registry the PID was
-        recycled by an unrelated process, the lock is treated as stale and safely
-        overtaken.  Old-format lock files that contain only a PID (no UUID field)
-        fall back to the original strict liveness check.  The lock is released by
-        :meth:`close`.
+        is alive, the action taken depends strictly on whether the PID belongs to this
+        process or an external one:
+
+        * **Same process** (``held_pid == os.getpid()``): the UUID is cross-verified
+          against ``_instance_registry``.  If the UUID is absent, the instance that
+          wrote the lock has already exited without calling :meth:`close`; the lock is
+          safely overtaken.  If the UUID is present (live sibling) or the lock file
+          contains no UUID field, :exc:`RuntimeError` is raised.
+
+        * **External process** (``held_pid != os.getpid()``): the lock is respected
+          unconditionally.  :exc:`SovereignStorageError` is raised regardless of
+          whether a UUID field is present, because the UUID registry is process-local
+          and cannot speak to the liveness of instances in another process.  Overtaking
+          an external process's lock would allow two writers on the same JSONL file,
+          producing interleaved lines and corrupting the journal.
+
+        Old-format lock files that contain only a PID (no ``\\n{uuid}`` second line)
+        follow the same PID-origin rule: same-process triggers :exc:`RuntimeError`;
+        external-process triggers :exc:`SovereignStorageError`.  The lock is released
+        by :meth:`close`.
 
         :return: None
         :rtype: None
         :raises RuntimeError: If the buffer path is already held by a live
-            :class:`OffGridBuffer` instance in this process whose UUID is present in
-            the class registry.
+            :class:`OffGridBuffer` instance within this process.
         :raises SovereignStorageError: If the lock file cannot be created or read due
-            to a :exc:`PermissionError` or unexpected :exc:`OSError`.
+            to a :exc:`PermissionError` or unexpected :exc:`OSError`, or if the lock
+            is held by a live external process.
         """
         _lock_payload: str = f"{os.getpid()}\n{self._instance_id}"
         try:
@@ -207,17 +222,23 @@ class OffGridBuffer:
             with OffGridBuffer._instance_registry_lock:
                 OffGridBuffer._instance_registry.add(self._instance_id)
             return
-        if held_uuid:
-            with OffGridBuffer._instance_registry_lock:
-                _uuid_is_ours: bool = held_uuid in OffGridBuffer._instance_registry
-            if not _uuid_is_ours:
-                self._lock_path.write_text(_lock_payload, encoding="utf-8")
+        if held_pid == os.getpid():
+            if held_uuid:
                 with OffGridBuffer._instance_registry_lock:
-                    OffGridBuffer._instance_registry.add(self._instance_id)
-                return
-        raise RuntimeError(
-            f"OffGridBuffer path '{self._path}' is already held by process {held_pid}; "
-            "each instance must use a distinct buffer_path"
+                    _uuid_is_ours: bool = held_uuid in OffGridBuffer._instance_registry
+                if not _uuid_is_ours:
+                    self._lock_path.write_text(_lock_payload, encoding="utf-8")
+                    with OffGridBuffer._instance_registry_lock:
+                        OffGridBuffer._instance_registry.add(self._instance_id)
+                    return
+            raise RuntimeError(
+                f"OffGridBuffer path '{self._path}' is already held by process {held_pid}; "
+                "each instance must use a distinct buffer_path"
+            )
+        raise SovereignStorageError(
+            f"Lock file acquisition failed: buffer path '{self._path}' is already "
+            f"held by external process {held_pid} and cannot be overtaken across "
+            "process boundaries"
         )
 
     def _recover_staging(self) -> None:
@@ -596,7 +617,7 @@ class OffGridBuffer:
         self._write_queue.join()
 
     def drain(self) -> list[tuple[dict[str, Any], str]]:
-        """Flush, read, sort, and atomically clear all buffered entries.
+        """Flush, read, sort, and atomically stage all buffered entries.
 
         Acquires ``_drain_lock`` for the entire critical section so that no concurrent
         :meth:`push` can enqueue to the background worker between :meth:`flush` and the
@@ -612,21 +633,31 @@ class OffGridBuffer:
         catches :exc:`TypeError` and :exc:`ValueError` so a non-numeric sequence value
         in a corrupted entry falls back to ``0`` rather than aborting the entire drain
         pass.
-        The active buffer file is then atomically renamed to the staging path
-        (``{path}.staging``) via :func:`os.replace`, preserving all entries in the
-        staging file until the caller invokes :meth:`commit_drain` to confirm ledger
-        acceptance.  This two-phase protocol ensures that a process exit between
-        :meth:`drain` and :meth:`commit_drain` — whether from a SIGKILL, power loss,
-        or an unhandled exception — leaves the staged entries intact for recovery on the
-        next :meth:`__init__` call via :meth:`_recover_staging`.  ``_committed`` is
-        decremented by the total count of non-blank disk lines (valid entries plus
-        dead-letter lines) so that every byte footprint removed from the active file is
-        reflected in the counter; only the entries present in ``_write_errors`` at the
-        moment the snapshot was taken are removed on success — any entries appended by
-        the background writer after the snapshot boundary are preserved for the next drain
-        pass.  If :func:`os.replace` raises :exc:`OSError`, the active file is unchanged,
-        the exception re-raises, no ``_write_errors`` entries are removed, and neither
+
+        **Two-phase commit scope**: the active buffer file is atomically renamed to the
+        staging path (``{path}.staging``) via :func:`os.replace`.  Immediately after the
+        rename, the content of ``{path}.quarantine`` (if non-empty) is read and appended
+        to the staging file via a ``tempfile`` → :func:`os.replace` merge so that the
+        staging file is a self-contained recovery artefact containing both the active
+        buffer entries and any write-error entries that were durably logged to the
+        quarantine file.  This guarantees that a process exit at any point between
+        :meth:`drain` and :meth:`commit_drain` leaves all pending entries inside a
+        single staging file: :meth:`_recover_staging` on the next boot will merge
+        staging back into the active buffer without loss.
+
+        Neither ``_write_errors`` nor ``{path}.quarantine`` are modified by this method.
+        Both are cleared exclusively by :meth:`commit_drain` after the caller confirms
+        that every drained entry has been committed to the ledger or re-queued.
+        ``_drain_write_error_snapshot`` is set (under ``_count_lock``) to the
+        ``_write_errors`` length captured at flush time so that :meth:`commit_drain`
+        knows precisely how many entries to evict from the front of the list.
+
+        ``_committed`` is decremented by the total count of non-blank disk lines (valid
+        entries plus dead-letter lines) so that every byte footprint removed from the
+        active file is reflected in the counter.  If :func:`os.replace` raises
+        :exc:`OSError`, the active file is unchanged, the exception re-raises, and no
         counter is modified.
+
         Disk lines that cannot be parsed as valid JSON or that are missing the
         ``receipt`` / ``sieved_content`` keys are quarantined in ``_dead_letter`` under
         the count lock rather than silently dropped; :attr:`dead_letter_count` reflects
@@ -656,14 +687,37 @@ class OffGridBuffer:
                 _error_snapshot_count: int = len(self._write_errors)
                 pending_error_entries: list[tuple[dict[str, Any], str]] = list(self._write_errors)
 
+            _quarantine_text: str = ""
+            if self._quarantine_path.exists():
+                try:
+                    _quarantine_text = self._quarantine_path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    _quarantine_text = ""
+
             if not self._path.exists():
+                if _quarantine_text.strip():
+                    _stg_tmp: str = ""
+                    try:
+                        with tempfile.NamedTemporaryFile(
+                            dir=self._path.parent,
+                            delete=False,
+                            suffix=".tmp",
+                            mode="w",
+                            encoding="utf-8",
+                        ) as _tmp_fh:
+                            _stg_tmp = _tmp_fh.name
+                            _tmp_fh.write(_quarantine_text)
+                        os.replace(_stg_tmp, self._staging_path)
+                        _stg_tmp = ""
+                    except OSError:
+                        if _stg_tmp:
+                            try:
+                                os.remove(_stg_tmp)
+                            except OSError:
+                                pass
                 with self._count_lock:
                     self._committed = 0
-                    del self._write_errors[:_error_snapshot_count]
-                try:
-                    self._quarantine_path.unlink()
-                except (FileNotFoundError, OSError):
-                    pass
+                    self._drain_write_error_snapshot = _error_snapshot_count
                 pending_error_entries.sort(key=_seq_key)
                 return pending_error_entries
 
@@ -700,34 +754,62 @@ class OffGridBuffer:
 
             os.replace(self._path, self._staging_path)
 
+            if _quarantine_text.strip():
+                _merge_tmp: str = ""
+                try:
+                    _stg_content: str = self._staging_path.read_text(encoding="utf-8")
+                    if _stg_content and not _stg_content.endswith("\n"):
+                        _stg_content += "\n"
+                    with tempfile.NamedTemporaryFile(
+                        dir=self._path.parent,
+                        delete=False,
+                        suffix=".tmp",
+                        mode="w",
+                        encoding="utf-8",
+                    ) as _mfh:
+                        _merge_tmp = _mfh.name
+                        _mfh.write(_stg_content + _quarantine_text)
+                    os.replace(_merge_tmp, self._staging_path)
+                    _merge_tmp = ""
+                except OSError:
+                    if _merge_tmp:
+                        try:
+                            os.remove(_merge_tmp)
+                        except OSError:
+                            pass
+
             with self._count_lock:
                 self._committed = max(0, self._committed - file_entry_count)
-                del self._write_errors[:_error_snapshot_count]
-            try:
-                self._quarantine_path.unlink()
-            except (FileNotFoundError, OSError):
-                pass
+                self._drain_write_error_snapshot = _error_snapshot_count
 
             return entries
 
     def commit_drain(self) -> None:
-        """Delete the staging file produced by a preceding :meth:`drain` call.
+        """Complete the two-phase drain protocol by deleting all transient artefacts.
 
-        Completes the two-phase drain protocol:
+        Must be called after every successful :meth:`drain` cycle — once the caller has
+        confirmed that every drained entry is either committed to the ledger or
+        re-queued to the buffer.  Performs three cleanup operations atomically from the
+        caller's perspective:
 
-        1. :meth:`drain` atomically renames the active buffer to ``{path}.staging``
-           and returns all entries.  The staging file preserves a byte-exact copy of
-           the drained entries so that a process exit before ledger acceptance is
-           confirmed leaves those entries intact for recovery on the next
-           :meth:`__init__` call.
+        1. **Staging file**: unlinks ``{path}.staging``.  If the file does not exist
+           (active buffer was empty when :meth:`drain` was called, or a prior call
+           already deleted it), the unlink is silently skipped.
 
-        2. Once the caller has confirmed every drained entry is either committed to
-           the ledger or re-queued to the buffer, it calls this method to delete the
-           staging file and complete the transaction.
+        2. **Quarantine file**: unlinks ``{path}.quarantine``.  :meth:`drain` ensures
+           the quarantine content is merged into the staging file before returning, so
+           the quarantine file is redundant once staging is confirmed durable by this
+           method.
 
-        If the staging file does not exist — either because the active buffer was
-        empty when :meth:`drain` was called (no rotation occurred) or because a prior
-        call already deleted it — this method returns silently.
+        3. **Write-error list**: removes the leading ``_drain_write_error_snapshot``
+           entries from ``_write_errors`` under ``_count_lock``.  Only the entries
+           captured at :meth:`drain` time are evicted; entries that arrived in
+           ``_write_errors`` after the snapshot boundary are left intact for the next
+           drain cycle.
+
+        Calling this method without a preceding :meth:`drain` call is safe but a no-op:
+        ``_drain_write_error_snapshot`` is ``0`` and the staging / quarantine files may
+        not exist.
 
         :return: None
         :rtype: None
@@ -736,6 +818,15 @@ class OffGridBuffer:
             self._staging_path.unlink()
         except FileNotFoundError:
             pass
+        try:
+            self._quarantine_path.unlink()
+        except (FileNotFoundError, OSError):
+            pass
+        with self._count_lock:
+            _snap: int = self._drain_write_error_snapshot
+            if _snap:
+                del self._write_errors[:_snap]
+                self._drain_write_error_snapshot = 0
 
     def close(self) -> None:
         """Flush all pending writes and terminate the background worker thread.
