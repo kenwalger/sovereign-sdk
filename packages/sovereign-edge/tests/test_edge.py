@@ -1377,24 +1377,25 @@ class TestEdgePipelineDrainBuffer:
             pipeline_b.close()
             recovery_ledger.close()
 
-    def test_drain_buffer_requeues_on_non_storage_exception(
+    def test_drain_buffer_quarantines_on_value_error(
         self, tmp_path: Path
     ) -> None:
-        """Per-entry non-storage exceptions in the replay loop are treated as retryable
-        faults and re-queued to the buffer rather than permanently evicted.  A ValueError
-        raised by append_receipt is caught by the inner
-        ``except (SovereignStorageError, sqlite3.Error, ValueError, TypeError):`` clause;
-        the entry is re-buffered so it can be retried on the next drain_buffer() pass.
+        """Per-entry ValueError and TypeError in the replay loop are permanent format faults
+        that must be written directly to the quarantine file rather than re-queued.
+        Re-queuing would create an infinite replay loop where the same malformed entry
+        raises ValueError on every drain_buffer() invocation.
 
         Setup: buffer 3 receipts.  On replay, entries 1 and 3 commit successfully; entry 2
         raises ValueError.  drain_buffer() must return without raising, committed must
-        contain exactly 2 hashes (entries 1 and 3), and buffer_depth must be 1 — entry 2
-        was re-queued, not permanently evicted.
+        contain exactly 2 hashes (entries 1 and 3), buffer_depth must be 0 — entry 2
+        was quarantined, not re-buffered — and the quarantine file must contain the
+        entry as a JSONL line.
 
         :param tmp_path: Pytest-provided isolated temporary directory.
         :type tmp_path: Path
         """
         buffer_path: str = str(tmp_path / ".edge_buffer.jsonl")
+        quarantine_path: Path = Path(buffer_path + ".quarantine")
         key_path: str = str(tmp_path / ".keys" / "edge_identity.pem")
 
         closed_ledger: SovereignLedger = SovereignLedger(":memory:")
@@ -1427,7 +1428,7 @@ class TestEdgePipelineDrainBuffer:
         def _fail_on_second(receipt: dict[str, Any], content: str) -> str:
             call_count[0] += 1
             if call_count[0] == 2:
-                raise ValueError("transient schema validation failure")
+                raise ValueError("permanent schema validation failure")
             return real_append(receipt, content)
 
         try:
@@ -1436,11 +1437,28 @@ class TestEdgePipelineDrainBuffer:
 
             assert len(committed) == 2, (
                 f"Expected 2 committed hashes (entries 1 and 3); got {len(committed)} — "
-                "entry 2 (ValueError) must be re-queued, not permanently evicted"
+                "entry 2 (ValueError) must be quarantined, not permanently evicted from replay"
             )
-            assert pipeline_b.buffer_depth == 1, (
-                f"buffer_depth={pipeline_b.buffer_depth} — ValueError must cause the "
-                "entry to be re-queued to the buffer for retry on the next drain pass"
+            assert pipeline_b.buffer_depth == 0, (
+                f"buffer_depth={pipeline_b.buffer_depth} — ValueError must quarantine the "
+                "entry rather than re-queuing it; re-queuing causes infinite replay loops"
+            )
+            assert quarantine_path.exists(), (
+                "quarantine file must exist after a ValueError during replay: "
+                "the offending entry must be written there rather than re-buffered"
+            )
+            quarantine_lines: list[str] = [
+                ln for ln in quarantine_path.read_text(encoding="utf-8").splitlines() if ln.strip()
+            ]
+            assert len(quarantine_lines) == 1, (
+                f"Expected exactly 1 quarantine entry; got {len(quarantine_lines)} — "
+                "only the ValueError entry (entry 2) must be quarantined"
+            )
+            import json as _json
+            quarantine_obj: dict[str, Any] = _json.loads(quarantine_lines[0])
+            assert "receipt" in quarantine_obj, "quarantine entry must carry a 'receipt' key"
+            assert "sieved_content" in quarantine_obj, (
+                "quarantine entry must carry a 'sieved_content' key"
             )
         finally:
             pipeline_b._buffer.close()
@@ -1950,6 +1968,118 @@ class TestEdgePipelineDrainBuffer:
                 assert isinstance(r, dict), (
                     "each element of uncommitted_receipts must be a receipt dict"
                 )
+        finally:
+            pipeline_b._buffer.close()
+            open_ledger.close()
+
+    def test_signing_fault_propagates_without_stub_receipt(self, tmp_path: Path) -> None:
+        """A signing fault from generate_receipt() must propagate directly to the caller
+        without placing any record — signed or unsigned — into the off-grid buffer.
+
+        The signing stage executes outside the ledger-commit try block; any exception it
+        raises must not be intercepted by the buffer-fallback path.  Allowing unsigned
+        skeleton receipts into the buffer would commit structurally invalid records to
+        the ledger chain during a subsequent drain pass.
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        ledger: SovereignLedger = SovereignLedger(":memory:")
+        pipeline: EdgePipeline = EdgePipeline(
+            ledger=ledger,
+            signing_key=str(tmp_path / ".keys" / "edge_identity.pem"),
+            buffer_path=str(tmp_path / ".edge_buffer.jsonl"),
+            sensor_secret=_SENSOR_SECRET,
+        )
+        try:
+            _seal_frame(tmp_path)  # warm up key manager and sequence file before patching
+            with patch.object(
+                pipeline._key_manager,
+                "generate_receipt",
+                side_effect=RuntimeError("HSM unavailable"),
+            ):
+                with pytest.raises(RuntimeError, match="HSM unavailable"):
+                    pipeline.process(_seal_frame(tmp_path))
+            assert pipeline.buffer_depth == 0, (
+                f"buffer_depth={pipeline.buffer_depth} — signing fault must not place "
+                "any receipt into the off-grid buffer; unsigned skeleton records must "
+                "never reach the ledger chain"
+            )
+        finally:
+            pipeline.close()
+        ledger.close()
+
+    def test_drain_buffer_quarantines_permanent_fault_receipt(self, tmp_path: Path) -> None:
+        """drain_buffer() must write entries that raise ValueError during replay directly
+        to the quarantine file and must not re-buffer them.
+
+        A ValueError from append_receipt signals a permanent format fault — the entry
+        cannot be committed to the ledger regardless of retry count.  Re-queuing it to
+        the buffer would trigger the same ValueError on every subsequent drain_buffer()
+        call, creating an infinite replay loop.  Writing it to the quarantine file
+        isolates it from the retry cycle while preserving it for out-of-band inspection.
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        buffer_path: str = str(tmp_path / ".edge_buffer.jsonl")
+        quarantine_path: Path = Path(buffer_path + ".quarantine")
+        key_path: str = str(tmp_path / ".keys" / "edge_identity.pem")
+
+        closed_ledger: SovereignLedger = SovereignLedger(":memory:")
+        pipeline_a: EdgePipeline = EdgePipeline(
+            ledger=closed_ledger,
+            signing_key=key_path,
+            buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
+        )
+        closed_ledger.close()
+        try:
+            pipeline_a.process(_seal_frame(tmp_path))
+            pipeline_a._buffer.flush()
+            assert pipeline_a._buffer.size == 1
+        finally:
+            pipeline_a._buffer.close()
+
+        open_ledger: SovereignLedger = SovereignLedger(str(tmp_path / "recovery.db"))
+        pipeline_b: EdgePipeline = EdgePipeline(
+            ledger=open_ledger,
+            signing_key=key_path,
+            buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
+        )
+        try:
+            with patch.object(
+                open_ledger,
+                "append_receipt",
+                side_effect=ValueError("permanent ledger schema rejection"),
+            ):
+                committed: list[str] = pipeline_b.drain_buffer()
+
+            assert committed == [], (
+                f"Expected empty committed list; got {committed} — "
+                "a ValueError entry must not appear in committed hashes"
+            )
+            assert pipeline_b.buffer_depth == 0, (
+                f"buffer_depth={pipeline_b.buffer_depth} — ValueError must quarantine "
+                "the entry, not re-queue it to the buffer"
+            )
+            assert quarantine_path.exists(), (
+                "quarantine file must exist after ValueError during drain_buffer() replay: "
+                "the permanent-fault entry must be written there rather than re-buffered"
+            )
+            quarantine_lines: list[str] = [
+                ln for ln in quarantine_path.read_text(encoding="utf-8").splitlines() if ln.strip()
+            ]
+            assert len(quarantine_lines) == 1, (
+                f"Expected exactly 1 quarantine entry; got {len(quarantine_lines)}"
+            )
+            import json as _json
+            quarantine_obj: dict[str, Any] = _json.loads(quarantine_lines[0])
+            assert "receipt" in quarantine_obj, "quarantine entry must carry a 'receipt' key"
+            assert "sieved_content" in quarantine_obj, (
+                "quarantine entry must carry a 'sieved_content' key"
+            )
         finally:
             pipeline_b._buffer.close()
             open_ledger.close()

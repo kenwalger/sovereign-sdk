@@ -202,13 +202,15 @@ class EdgePipeline:
            can distinguish fault-path entries from normally minimized payloads.
         3. **Sign** — :meth:`~sovereign_core.crypto.SovereignKeyManager.generate_receipt`
            mints a :class:`~sovereign_core.crypto.ForensicReceipt` whose ``metadata``
-           embeds the originating node identifier and the full Prose Tax summary.
+           embeds the originating node identifier and the full Prose Tax summary.  Any
+           exception raised during signing propagates directly to the caller; no unsigned
+           skeleton record is placed into the off-grid buffer.
         4. **Commit** — the receipt is submitted to the ledger via
            :meth:`~sovereign_ledger.SovereignLedger.append_receipt`.  On any
            :exc:`Exception` (including :exc:`~sovereign_ledger.SovereignStorageError`,
            ``sqlite3.Error``, and application-level validation faults such as
-           :exc:`ValueError`), the receipt is written to the off-grid buffer and
-           ``buffered=True`` is set in the returned :class:`EdgeResult`.  The only
+           :exc:`ValueError`), the fully signed receipt is written to the off-grid buffer
+           and ``buffered=True`` is set in the returned :class:`EdgeResult`.  The only
            exception not routed to the buffer is ``sqlite3.IntegrityError``, which
            signals a duplicate ``payload_hash`` and is silently evicted (see below).
 
@@ -233,6 +235,9 @@ class EdgePipeline:
             ``"hmac-sha256"`` (unsupported or unauthenticated algorithm), or if the
             frame's HMAC-SHA256 digest does not match the locally recomputed expected
             signature.
+        :raises Exception: Any exception raised by
+            :meth:`~sovereign_core.crypto.SovereignKeyManager.generate_receipt` propagates
+            directly — no unsigned skeleton receipt is placed into the buffer on a signing fault.
         :raises SovereignDoubleFaultError: If ``append_receipt`` raises any
             :exc:`Exception` other than ``sqlite3.IntegrityError`` *and* the subsequent
             :meth:`~sovereign_edge.buffer.OffGridBuffer.push` also raises.  The signed
@@ -304,27 +309,18 @@ class EdgePipeline:
         }
         if sieve_fault:
             metadata["sieve_fault"] = True
-        receipt_dict: dict[str, Any] = {}
+        receipt: ForensicReceipt = self._key_manager.generate_receipt(
+            payload=edge_payload,
+            metadata=metadata,
+        )
+        receipt_dict: dict[str, Any] = dict(receipt)
         buffered: bool = False
         payload_hash: str = ""
         try:
-            receipt: ForensicReceipt = self._key_manager.generate_receipt(
-                payload=edge_payload,
-                metadata=metadata,
-            )
-            receipt_dict = dict(receipt)
             payload_hash = self._ledger.append_receipt(receipt_dict, sieve_result.text)
         except sqlite3.IntegrityError:
             payload_hash = receipt_dict["payload_hash"]
         except Exception as fault_err:
-            if not receipt_dict:
-                receipt_dict = {
-                    "timestamp": frame.t,
-                    "payload_hash": f"signing-fault:{frame.n}:{frame.q}",
-                    "public_key": "",
-                    "signature": "",
-                    "metadata": {**metadata, "signing_fault": True},
-                }
             try:
                 self._buffer.push(receipt_dict, sieve_result.text)
                 payload_hash = receipt_dict["payload_hash"]
@@ -352,20 +348,18 @@ class EdgePipeline:
 
         Eagerly materialises the drained entry list before the replay loop so
         that a ``processed`` index can track how far through the list the loop
-        advanced.  Each entry is dispatched through a three-tier inner exception
+        advanced.  Each entry is dispatched through a four-tier inner exception
         hierarchy: ``sqlite3.IntegrityError`` → silent duplicate eviction;
-        :exc:`~sovereign_ledger.SovereignStorageError` / ``sqlite3.Error`` /
-        :exc:`ValueError` / :exc:`TypeError` → transient or format fault, entry
-        re-queued to match the direct ingestion buffering profile; all other
+        :exc:`ValueError` / :exc:`TypeError` → permanent format fault, entry
+        appended directly to the quarantine file at
+        :attr:`~sovereign_edge.buffer.OffGridBuffer.quarantine_path` without re-queuing
+        (bypassing the replay cycle entirely to prevent infinite requeue loops);
+        :exc:`~sovereign_ledger.SovereignStorageError` / ``sqlite3.Error`` → transient
+        storage fault, entry re-queued for retry on the next drain pass; all other
         :exc:`Exception` subclasses → unhandled, propagate to the outer
-        ``except`` block which aborts the replay loop.  Treating
-        :exc:`ValueError` and :exc:`TypeError` as retryable prevents accidental
-        permanent eviction when transient processing faults overlap with generic
-        exception types, while still allowing operational failures such as
-        :exc:`RuntimeError` to abort the replay and preserve the staging file for
-        manual recovery.  If an unexpected exception escapes the per-entry
-        handlers entirely and aborts the replay loop mid-iteration, the outer
-        ``except`` branch appends every un-processed entry
+        ``except`` block which aborts the replay loop.  If an unexpected exception
+        escapes the per-entry handlers entirely and aborts the replay loop mid-iteration,
+        the outer ``except`` branch appends every un-processed entry
         (``drained[processed:]``) to the requeue list before the exception is
         re-raised, closing the data-loss window where those entries would
         otherwise be held only in local scope.
@@ -458,7 +452,20 @@ class EdgePipeline:
                     committed.append(payload_hash)
                 except sqlite3.IntegrityError:
                     pass
-                except (SovereignStorageError, sqlite3.Error, ValueError, TypeError):
+                except (ValueError, TypeError):
+                    try:
+                        with open(self._buffer.quarantine_path, "a", encoding="utf-8") as _qf:
+                            _qf.write(
+                                json.dumps(
+                                    {"receipt": receipt_dict, "sieved_content": sieved_content},
+                                    ensure_ascii=False,
+                                )
+                                + "\n"
+                            )
+                            _qf.flush()
+                    except OSError:
+                        pass
+                except (SovereignStorageError, sqlite3.Error):
                     requeue.append((receipt_dict, sieved_content))
                 processed += 1
         except Exception as exc:

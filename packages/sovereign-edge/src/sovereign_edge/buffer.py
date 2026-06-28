@@ -1018,3 +1018,19 @@ class OffGridBuffer:
         """
         with self._count_lock:
             return self._drain_read_failed
+
+    @property
+    def quarantine_path(self) -> Path:
+        """Absolute path to the durable write-error quarantine file adjacent to the JSONL buffer.
+
+        The file at this path (``{path}.quarantine``) accumulates entries that raised
+        :exc:`OSError` during background disk writes and entries that triggered
+        permanent format faults (:exc:`ValueError` / :exc:`TypeError`) during a
+        :meth:`~sovereign_edge.pipeline.EdgePipeline.drain_buffer` replay pass.
+        :meth:`_load_quarantine` reads it at boot time to restore any write-error
+        entries from a prior run into ``_write_errors``.
+
+        :return: Absolute path to ``{path}.quarantine``.
+        :rtype: Path
+        """
+        return self._quarantine_path

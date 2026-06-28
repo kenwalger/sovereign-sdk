@@ -1748,6 +1748,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `quarantine_staging_path.exists()` instead of `quarantine_path.exists()`.
   **Suite: 109 passed, 0 skipped (sovereign-edge); 398 passed, 1 skipped (workspace).**
 
+- **`EdgePipeline.process()` — signing airlock removed; `generate_receipt()` propagates directly**
+  (`pipeline.py`): `self._key_manager.generate_receipt(...)` is moved OUTSIDE the
+  `try/except Exception` block that routes ledger failures to the off-grid buffer.  The
+  prior implementation caught all exceptions from the signing call inside the unified `try`
+  block and routed them to the buffer via a stub receipt dict
+  (`{"signing-fault:{n}:{q}", public_key: "", signature: "", signing_fault: True}`).  This
+  produced structurally invalid records carrying an empty `public_key` and empty `signature`
+  that the drain-buffer replay loop would attempt to commit to the ledger, where they would
+  either fail schema validation or persist permanently corrupt chain links.  The fix moves
+  the signing call to bare scope — no `try` wrapping — so any exception from key-file I/O,
+  HSM faults, or cryptographic errors propagates directly to the caller with no receipt and
+  no buffer entry.  The `receipt_dict` sentinel initialization and the `if not receipt_dict:`
+  stub construction block are both removed.  The inner `try` block now wraps only
+  `self._ledger.append_receipt(...)`: ledger-commit failures still route the fully signed
+  receipt to the buffer via the unchanged `except Exception as fault_err:` path.  The
+  `process()` docstring step 3 (Sign) and step 4 (Commit) and the ``:raises Exception:``
+  entry are updated to document the new propagation contract.
+
+- **`EdgePipeline.drain_buffer()` — permanent format faults quarantined; `ValueError`/`TypeError`
+  removed from requeue path** (`pipeline.py`): Removes `ValueError` and `TypeError` from
+  the ``except (SovereignStorageError, sqlite3.Error, ValueError, TypeError):`` requeue
+  clause.  A new sibling ``except (ValueError, TypeError):`` clause placed immediately
+  before the requeue handler writes the offending ``(receipt_dict, sieved_content)`` pair
+  directly to ``self._buffer.quarantine_path`` as a JSONL line (``json.dumps`` +
+  ``_qf.flush()``); an inner ``except OSError: pass`` swallows any quarantine-write fault
+  so a secondary disk error does not mask the primary replay failure signal.  The requeue
+  clause is narrowed to ``except (SovereignStorageError, sqlite3.Error):``.  A
+  ``ValueError`` or ``TypeError`` from ``append_receipt`` signals a permanent data-format
+  fault specific to the entry; re-queuing such an entry causes an infinite replay loop
+  where the same malformed receipt fails on every subsequent ``drain_buffer()`` invocation
+  and is perpetually re-buffered.  Writing to the quarantine file isolates it from the
+  retry cycle while preserving it for out-of-band inspection; ``_load_quarantine()`` will
+  load it at the next boot, and the ``IntegrityError`` eviction handler in the replay loop
+  closes any duplicate submission that may result.  The ``drain_buffer()`` docstring is
+  updated from a three-tier to a four-tier per-entry exception hierarchy.
+
+- **`OffGridBuffer.quarantine_path` — public property** (`buffer.py`): A new read-only
+  ``quarantine_path: Path`` property is added, returning ``self._quarantine_path``.  The
+  property allows ``EdgePipeline.drain_buffer()`` to write permanent-fault entries directly
+  to the quarantine file without accessing a private attribute across the module boundary.
+  The property docstring documents both write-error and format-fault quarantine consumers.
+
+- **`test_signing_fault_propagates_without_stub_receipt`** (`TestEdgePipelineDrainBuffer`,
+  `test_edge.py`): Patches ``pipeline._key_manager.generate_receipt`` to raise
+  ``RuntimeError("HSM unavailable")``; asserts ``pytest.raises(RuntimeError, match="HSM
+  unavailable")`` propagates from ``pipeline.process()``; asserts ``buffer_depth == 0``
+  — no unsigned skeleton receipt was placed in the off-grid buffer.  Without the fix,
+  the exception was caught by the unified ``except Exception`` handler and a stub receipt
+  with empty signature was buffered silently.
+
+- **`test_drain_buffer_quarantines_permanent_fault_receipt`** (`TestEdgePipelineDrainBuffer`,
+  `test_edge.py`): Buffers 1 receipt via a closed ledger; patches ``append_receipt`` to
+  raise ``ValueError("permanent ledger schema rejection")``; calls ``drain_buffer()``;
+  asserts ``committed == []``, ``buffer_depth == 0``, quarantine file exists, and
+  contains exactly 1 JSONL line with ``"receipt"`` and ``"sieved_content"`` keys.  With
+  the previous requeue behaviour, ``buffer_depth == 1`` and the quarantine file did not
+  exist; this test is the authoritative regression guard for the quarantine-on-ValueError
+  path.
+
+- **`test_drain_buffer_requeues_on_non_storage_exception`** renamed to
+  **`test_drain_buffer_quarantines_on_value_error`** (`TestEdgePipelineDrainBuffer`,
+  `test_edge.py`): Docstring, assertion on ``buffer_depth``, and quarantine-file content
+  check updated to reflect the new quarantine semantics.  The test now asserts
+  ``buffer_depth == 0`` (entry quarantined, not re-buffered) and verifies the quarantine
+  file contains exactly 1 JSONL line with the offending entry.  Rename-in-place: test case
+  count is unchanged.
+  **Suite: 111 passed, 0 skipped (sovereign-edge); 400 passed, 1 skipped (workspace).**
+
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing
   sensor observations into versioned, tamper-evident, minified JSON transmission envelopes with

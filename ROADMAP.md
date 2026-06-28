@@ -1056,10 +1056,11 @@ committed = pipeline.drain_buffer()
   exception clauses into a single `except OSError as exc: raise SovereignStorageError(...)`;
   `ProcessLookupError` is the sole exception that permits lock overtake.
 
-* [x] **Signing airlock: `generate_receipt()` moved inside the ingestion `try` block**
-  (`pipeline.py`): Signing faults now route a stub receipt (`signing-fault:{n}:{q}` as
-  `payload_hash`, `signing_fault: True` in metadata) to the off-grid buffer rather than
-  propagating unhandled to the caller.
+* [x] **Signing airlock corrected: `generate_receipt()` moved OUTSIDE the ingestion `try`
+  block** (`pipeline.py`): Signing exceptions propagate directly; unsigned skeleton receipts
+  are never placed into the off-grid buffer.  Only ledger-commit failures (`append_receipt`)
+  route the fully signed receipt to the buffer via the unchanged `except Exception as fault_err:`
+  path.
 
 * [x] **`test_negative_sequence_rejected_at_parse_boundary`** and
   **`test_lock_probe_permission_error_fails_closed`** added to `TestSensorFrame` and
@@ -1078,6 +1079,26 @@ committed = pipeline.drain_buffer()
 * [x] **`test_new_quarantine_entry_survives_commit_drain`** and updated assertions in
   **`test_quarantine_preserved_in_staging_block_on_crash_restart`** in `TestOffGridBuffer`.
   **109 passed, 0 skipped (edge); 398 passed, 1 skipped (workspace).**
+
+* [x] **Eliminate fabricated unsigned receipts: signing fault propagates directly**
+  (`pipeline.py`): `generate_receipt()` executes bare (outside the `try` block); any
+  exception from key I/O, HSM faults, or cryptographic errors propagates to the caller
+  with no buffer entry.  The stub receipt construction block (`signing-fault:{n}:{q}`
+  payload_hash, empty public_key/signature, signing_fault metadata) is removed entirely.
+  New test `test_signing_fault_propagates_without_stub_receipt` patches
+  `generate_receipt` to raise `RuntimeError("HSM unavailable")` and asserts the exception
+  propagates with `buffer_depth == 0`.
+
+* [x] **Quarantine permanent replay rejections: `ValueError`/`TypeError` rerouted from requeue
+  to quarantine file** (`pipeline.py`): A new `except (ValueError, TypeError):` clause in
+  `drain_buffer()` writes permanent-fault entries directly to `self._buffer.quarantine_path`
+  rather than appending them to the requeue list.  The requeue clause is narrowed to
+  `except (SovereignStorageError, sqlite3.Error):`.  `OffGridBuffer.quarantine_path: Path`
+  public property added to `buffer.py`.  `test_drain_buffer_quarantines_on_value_error`
+  (renamed from `test_drain_buffer_requeues_on_non_storage_exception`) updated to assert
+  `buffer_depth == 0` and quarantine file exists.  New test
+  `test_drain_buffer_quarantines_permanent_fault_receipt` guards single-entry quarantine path.
+  **111 passed, 0 skipped (edge); 400 passed, 1 skipped (workspace).**
 
 ---
 
