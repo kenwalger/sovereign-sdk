@@ -47,11 +47,26 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-packages
 
-      - name: Build sovereign-core
-        run: uv build --package sovereign-core
+      - name: Build sovereign-sdk-core
+        run: uv build --package sovereign-sdk-core
 
-      - name: Build sovereign-fastapi
-        run: uv build --package sovereign-fastapi
+      - name: Build sovereign-sdk-sieve
+        run: uv build --package sovereign-sdk-sieve
+
+      - name: Build sovereign-sdk-ledger
+        run: uv build --package sovereign-sdk-ledger
+
+      - name: Build sovereign-sdk-sensor
+        run: uv build --package sovereign-sdk-sensor
+
+      - name: Build sovereign-sdk-edge
+        run: uv build --package sovereign-sdk-edge
+
+      - name: Build sovereign-sdk-fastapi
+        run: uv build --package sovereign-sdk-fastapi
+
+      - name: Build sovereign-sdk-runtime
+        run: uv build --package sovereign-sdk-runtime
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

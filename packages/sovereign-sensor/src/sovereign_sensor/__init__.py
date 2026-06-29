@@ -12,7 +12,7 @@ import sys
 from .envelope import SovereignEnvelope
 from .interface import SovereignCryptoDriver
 
-__version__ = "0.1.0"
+__version__ = "1.3.0"
 
 __all__ = [
     "SovereignCryptoDriver",
