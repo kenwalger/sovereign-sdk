@@ -1068,6 +1068,32 @@ class OffGridBuffer:
         with self._count_lock:
             return self._worker_failed
 
+    def has_write_errors(self) -> bool:
+        """Return ``True`` if the buffer is in a volatile write-failure state.
+
+        Atomically inspects both ``_write_errors`` and ``_worker_failed`` under a
+        single ``_count_lock`` acquisition so the combined check is race-free.
+        Returns ``True`` when either of the following conditions holds:
+
+        - **``_write_errors`` non-empty**: at least one receipt entry failed to
+          reach disk (:exc:`OSError` during the background write or ``fsync``) and is
+          held in memory awaiting recovery via :meth:`drain`.
+        - **``_worker_failed``**: the background writer thread terminated due to a
+          non-:exc:`OSError` exception; future :meth:`push` calls raise immediately
+          and no further writes will reach disk.
+
+        When this method returns ``True`` after a re-queue :meth:`flush`, the caller
+        must not invoke :meth:`commit_drain` — doing so would delete the staging file
+        while failed re-queued entries remain only in memory, making them permanently
+        irrecoverable on a subsequent process crash.
+
+        :return: ``True`` if ``_write_errors`` is non-empty or the background writer
+            thread has failed; ``False`` if the buffer is in a clean durable state.
+        :rtype: bool
+        """
+        with self._count_lock:
+            return bool(self._write_errors) or self._worker_failed
+
     @property
     def drain_read_failed(self) -> bool:
         """True if :meth:`drain` encountered an :exc:`OSError` while reading the JSONL file.

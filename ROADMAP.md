@@ -1131,6 +1131,24 @@ committed = pipeline.drain_buffer()
   added to `TestOffGridBuffer`.
   **114 passed, 0 skipped (edge); 403 passed, 1 skipped (workspace).**
 
+* [x] **`has_write_errors()` guard before `commit_drain()` in `drain_buffer()`** (`buffer.py`,
+  `pipeline.py`): New `has_write_errors(self) -> bool` method on `OffGridBuffer` atomically
+  inspects both `_write_errors` and `_worker_failed` under a single `_count_lock` acquisition,
+  returning `True` if either indicates a volatile write-failure state.  `drain_buffer()`
+  calls this method after the post-requeue `flush()` and before `commit_drain()`; if it
+  returns `True`, `SovereignStorageError` is raised without deleting the staging file —
+  closing the race where a re-queued entry's worker write fails silently between `push()`
+  and `commit_drain()`, leaving the entry only in in-memory `_write_errors` with the staging
+  file deleted.  `drain_buffer()` docstring updated: two-phase commit paragraph extended;
+  `:raises SovereignStorageError:` entry added.
+  `test_drain_buffer_preserves_staging_on_requeue_write_failure` added to
+  `TestEdgePipelineDrainBuffer`: patches `append_receipt` (SovereignStorageError) and
+  `builtins.open` selectively to fail buffer-append mode; asserts `SovereignStorageError`
+  matching ``"write errors"``; asserts staging exists; asserts `has_write_errors()` True;
+  cleanup drains and commits before close().  `TestEdgePipelineDrainBuffer` grows from
+  13 to 14 cases.
+  **115 passed, 0 skipped (edge); 404 passed, 1 skipped (workspace).**
+
 ---
 
 ## Phase 10 — Isolated Context Vault & Governance Server (`sovereign-vault`)

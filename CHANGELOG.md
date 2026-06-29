@@ -1902,6 +1902,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   absent.  `TestOffGridBuffer` grows from 13 to 14 cases.
   **Suite: 114 passed, 0 skipped (sovereign-edge); 403 passed, 1 skipped (workspace).**
 
+- **`OffGridBuffer.has_write_errors()` method and `drain_buffer()` pre-commit guard**
+  (`buffer.py`, `pipeline.py`): Closes the staging-deletion race condition where a
+  re-queued receipt's background disk write fails between the re-queue ``push()`` call
+  and the ``commit_drain()`` call.  When this race occurs, the entry exists only in
+  in-memory ``_write_errors``; if ``commit_drain()`` proceeds it deletes the staging
+  file, making the entry permanently irrecoverable on a subsequent process crash.
+
+  New ``has_write_errors(self) -> bool`` public method on ``OffGridBuffer`` atomically
+  inspects both ``_write_errors`` and ``_worker_failed`` under a single ``_count_lock``
+  acquisition, returning ``True`` if either condition indicates the buffer is in a
+  volatile state.  The method is deliberately atomic so a concurrent worker failure
+  between separate ``write_error_count`` and ``worker_failed`` checks cannot produce a
+  false-negative result.
+
+  ``drain_buffer()`` (``pipeline.py``) calls ``has_write_errors()`` after the
+  post-requeue ``self._buffer.flush()`` and before ``self._buffer.commit_drain()``.
+  If it returns ``True``, ``SovereignStorageError`` is raised immediately with a message
+  directing the operator to resolve the filesystem fault and retry; ``commit_drain()``
+  is not reached and the staging file is preserved intact.  The ``drain_buffer()``
+  docstring two-phase-commit paragraph is extended to document the guard; a new
+  ``:raises SovereignStorageError:`` entry is added.
+
+- **`test_drain_buffer_preserves_staging_on_requeue_write_failure`**
+  (``TestEdgePipelineDrainBuffer``, ``test_edge.py``): Buffers one receipt via a closed
+  ledger, opens a recovery pipeline, patches ``append_receipt`` to raise
+  ``SovereignStorageError`` (entry enters re-queue), and patches ``builtins.open``
+  selectively to raise ``OSError("simulated disk full")`` only when opening the buffer
+  path in append mode (``"a"``).  Asserts ``pytest.raises(SovereignStorageError,
+  match="write errors")``; asserts ``staging_path.exists()`` (``commit_drain()`` not
+  called); asserts ``pipeline_b._buffer.has_write_errors()`` is ``True``.  Cleanup
+  ``finally`` block calls ``drain()`` then ``commit_drain()`` on the buffer instance
+  (outside any patch context) to absorb the in-memory write-error entry and remove the
+  staging artefact so ``close()`` does not raise on un-journaled entries.
+  ``TestEdgePipelineDrainBuffer`` grows from 13 to 14 cases.
+  **Suite: 115 passed, 0 skipped (sovereign-edge); 404 passed, 1 skipped (workspace).**
+
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing
   sensor observations into versioned, tamper-evident, minified JSON transmission envelopes with

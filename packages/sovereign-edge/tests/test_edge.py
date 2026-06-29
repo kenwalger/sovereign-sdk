@@ -2297,6 +2297,88 @@ class TestEdgePipelineDrainBuffer:
             pipeline_b._buffer.close()
             open_ledger.close()
 
+    def test_drain_buffer_preserves_staging_on_requeue_write_failure(
+        self, tmp_path: Path
+    ) -> None:
+        """drain_buffer() must raise SovereignStorageError and preserve the staging file
+        when the background writer fails to fsync a re-queued receipt after flush().
+
+        The race being guarded: drain() creates a staging file and returns all entries;
+        the replay loop re-queues an entry back to the buffer (push() succeeds); flush()
+        blocks until the worker processes the enqueued item; but the worker's disk write
+        raises OSError, leaving the entry in _write_errors rather than on disk.  If
+        commit_drain() were called at this point it would delete the staging file while
+        the re-queued entry exists only in in-memory _write_errors — permanently lost
+        on process crash.  has_write_errors() detects this state and drain_buffer() must
+        raise SovereignStorageError without calling commit_drain().
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        import builtins
+
+        buffer_path: str = str(tmp_path / ".edge_buffer.jsonl")
+        staging_path: Path = Path(buffer_path + ".staging")
+        key_path: str = str(tmp_path / ".keys" / "edge_identity.pem")
+
+        closed_ledger: SovereignLedger = SovereignLedger(":memory:")
+        pipeline_a: EdgePipeline = EdgePipeline(
+            ledger=closed_ledger,
+            signing_key=key_path,
+            buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
+        )
+        closed_ledger.close()
+        try:
+            pipeline_a.process(_seal_frame(tmp_path))
+            pipeline_a._buffer.flush()
+            assert pipeline_a._buffer.size == 1
+        finally:
+            pipeline_a._buffer.close()
+
+        open_ledger: SovereignLedger = SovereignLedger(str(tmp_path / "recovery.db"))
+        pipeline_b: EdgePipeline = EdgePipeline(
+            ledger=open_ledger,
+            signing_key=key_path,
+            buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
+        )
+        _real_open = builtins.open
+
+        def _fail_buffer_append(file: Any, *args: Any, **kwargs: Any) -> Any:
+            mode: str = args[0] if args else kwargs.get("mode", "r")
+            if str(file) == buffer_path and "a" in mode:
+                raise OSError("simulated disk full on re-queue write")
+            return _real_open(file, *args, **kwargs)
+
+        try:
+            with patch.object(
+                open_ledger,
+                "append_receipt",
+                side_effect=SovereignStorageError("ledger unavailable"),
+            ):
+                with patch("builtins.open", side_effect=_fail_buffer_append):
+                    with pytest.raises(SovereignStorageError, match="write errors"):
+                        pipeline_b.drain_buffer()
+            assert staging_path.exists(), (
+                "staging file must remain on disk after SovereignStorageError — "
+                "commit_drain() must not have been called when has_write_errors() is True"
+            )
+            assert pipeline_b._buffer.has_write_errors(), (
+                "buffer must report volatile write-error state after the re-queue "
+                "flush failed to persist the entry"
+            )
+        finally:
+            # _write_errors is non-empty; drain() absorbs it and commit_drain() clears
+            # it and removes the staging artefact so close() does not raise.
+            try:
+                pipeline_b._buffer.drain()
+                pipeline_b._buffer.commit_drain()
+            except Exception:
+                pass
+            pipeline_b._buffer.close()
+            open_ledger.close()
+
 
 # ---------------------------------------------------------------------------
 # TestOffGridBufferAsync

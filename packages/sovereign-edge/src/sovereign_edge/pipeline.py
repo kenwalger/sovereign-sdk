@@ -409,21 +409,30 @@ class EdgePipeline:
         committed to the ledger or re-queued.  After the re-queue pass completes,
         :meth:`~sovereign_edge.buffer.OffGridBuffer.flush` is called to block until every
         re-queued entry has been fsync'd to the active buffer file by the background
-        writer thread.  This guarantees that no re-queued receipt exists only in the
-        in-memory queue at the point when :meth:`~sovereign_edge.buffer.OffGridBuffer.commit_drain`
-        deletes the staging file — the staging file is never removed while its counterpart
-        re-queued entries are still pending a durable write.  Only when neither the replay
-        loop nor the re-queue pass raises does this method invoke
+        writer thread.  After :meth:`~sovereign_edge.buffer.OffGridBuffer.flush` returns,
+        :meth:`~sovereign_edge.buffer.OffGridBuffer.has_write_errors` is inspected: if
+        any re-queued entry failed to reach disk (``_write_errors`` non-empty or the
+        background writer thread has crashed), :exc:`~sovereign_ledger.SovereignStorageError`
+        is raised before :meth:`~sovereign_edge.buffer.OffGridBuffer.commit_drain` is
+        called, preserving the staging file as a recovery artefact.  Only when the flush
+        reports a clean durable state does this method invoke
         :meth:`~sovereign_edge.buffer.OffGridBuffer.commit_drain` to delete the staging
-        file.  If any exception is raised (crash, push failure, OSError) the staging file
-        survives, providing a byte-exact recovery artefact for the next
-        :meth:`drain_buffer` pass or the next process boot via
-        :meth:`~sovereign_edge.buffer.OffGridBuffer._recover_staging`.
+        file.  If any exception is raised (crash, push failure, OSError, or write-error
+        state detected after flush) the staging file survives, providing a byte-exact
+        recovery artefact for the next :meth:`drain_buffer` pass or the next process boot
+        via :meth:`~sovereign_edge.buffer.OffGridBuffer._recover_staging`.
 
         :return: ``payload_hash`` strings for every receipt successfully committed to
             the ledger on this drain pass.  Entries that could not be committed are
             re-queued and excluded from the returned list.
         :rtype: list[str]
+        :raises SovereignStorageError: If
+            :meth:`~sovereign_edge.buffer.OffGridBuffer.has_write_errors` returns ``True``
+            after the post-requeue :meth:`~sovereign_edge.buffer.OffGridBuffer.flush` —
+            indicating that at least one re-queued receipt failed to reach disk (worker
+            ``OSError`` or thread crash) and would be permanently lost if the staging
+            file were deleted.  :meth:`~sovereign_edge.buffer.OffGridBuffer.commit_drain`
+            is not called; the staging file is preserved intact for the next drain pass.
         :raises RuntimeError: If the off-grid buffer file raises :exc:`OSError` on its
             read or atomic rotation (chained from the :exc:`OSError`); if a quarantine
             write for a permanent-fault entry raises :exc:`OSError` (chained from the
@@ -537,6 +546,14 @@ class EdgePipeline:
             )
 
         self._buffer.flush()
+        if self._buffer.has_write_errors():
+            raise SovereignStorageError(
+                "drain_buffer() aborted before commit_drain(): write errors or worker "
+                "failure detected after the re-queue flush — at least one re-queued "
+                "receipt did not reach disk and would be permanently lost if the staging "
+                "file were deleted.  The staging file is preserved intact; resolve the "
+                "filesystem fault and call drain_buffer() again to complete the cycle."
+            )
         self._buffer.commit_drain()
         return committed
 
