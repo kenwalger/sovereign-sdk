@@ -2426,6 +2426,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Total test count: **120 tests pass**.
 
+- **`EdgePipeline.process()` — permanent structural faults quarantined, not buffered**
+  (`pipeline.py`): A new `except (ValueError, TypeError) as perm_err:` clause is inserted
+  between the `sqlite3.IntegrityError` duplicate-eviction handler and the broad
+  `except Exception` buffer-routing handler.  When the ledger's `append_receipt()` raises
+  `ValueError` or `TypeError` — indicating a permanent schema or type boundary violation
+  that will never succeed on replay — the signed receipt is written directly to
+  `self._buffer.quarantine_path` as a JSONL entry containing `"receipt"` and
+  `"sieved_content"` keys.  A `SOVEREIGN-EDGE CRITICAL` line is emitted to `sys.stderr`
+  with the `payload_hash` and exception repr to surface the isolation event to operators.
+  If the quarantine write itself raises `OSError`, a secondary stderr emission records the
+  raw JSONL for out-of-band recovery.  `buffered` remains `False`; the entry never enters
+  the active off-grid buffer and will not be retried, preventing infinite replay loops.
+  `import sys` added to `pipeline.py`.  `process()` docstring step 4 updated to enumerate
+  all three failure paths; `:raises SovereignDoubleFaultError:` updated to exclude
+  `ValueError` / `TypeError` from the trigger condition.
+  `test_process_buffers_on_application_level_ledger_exception` updated to use
+  `RuntimeError` as the `side_effect` (general transient buffer-routing coverage).  New
+  test `test_process_quarantines_permanent_ledger_fault_receipt` asserts `buffered is False`,
+  `buffer_depth == 0`, quarantine file present, and single JSONL entry containing both
+  `"receipt"` and `"sieved_content"` keys.
+
+  Total test count: **121 tests pass**.
+
 ## [1.1.0] - 2026-06-01
 
 ### Added

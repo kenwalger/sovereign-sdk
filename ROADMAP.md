@@ -1174,6 +1174,55 @@ committed = pipeline.drain_buffer()
   cases.
   **117 passed, 0 skipped (edge); 406 passed, 1 skipped (workspace).**
 
+* [x] **Compound payload schema on all double-fault and requeue-allocation exceptions**
+  (`pipeline.py`): Every `SovereignDoubleFaultError` and `SovereignRequeueAllocationError`
+  instantiation now attaches a compound `{"receipt": <ForensicReceipt dict>, "content":
+  <sieved text string>}` dict rather than a bare receipt dict, so host-level recovery
+  handlers retain both the receipt metadata and the sieved text without re-fetching from
+  the sieve layer.  `drain_buffer()` requeue comprehensions updated to
+  `[{"receipt": r, "content": c} for r, c in ...]` form.
+  `test_process_raises_sovereign_double_fault_error_on_double_failure`,
+  `test_double_fault_uncommitted_receipts_includes_full_requeue`, and
+  `test_requeue_allocation_error_exposes_uncommitted_receipts` updated to verify compound
+  keys `"receipt"` and `"content"`.  New test
+  `test_concurrent_commit_drain_no_staging_race` (`TestOffGridBufferAsync`) asserts that
+  100-thread concurrent `commit_drain()` calls after a successful drain leave the buffer
+  clean with no staging-file remnant.
+  **118 passed, 0 skipped (edge).**
+
+* [x] **Loud quarantine-staging read failure and `_drain_lock` alignment on `commit_drain()`**
+  (`buffer.py`): `drain()`'s inner `except (OSError, UnicodeDecodeError)` block that
+  previously silently set `_quarantine_text = ""` after a successful quarantine rotation
+  now raises `SovereignStorageError("Catastrophic failure reading rotated quarantine staging
+  log; aborting transaction to preserve disk integrity")`, preserving the active buffer for
+  retry.  `commit_drain()` now acquires `_drain_lock` as the outermost lock (wrapping the
+  existing `_count_lock`) so any concurrent `drain()` → `commit_drain()` overlaps are
+  fully serialized.  `test_drain_raises_sovereign_storage_error_on_quarantine_staging_read_failure`
+  (`TestOffGridBuffer`) writes invalid UTF-8 bytes to the quarantine file, triggers
+  `UnicodeDecodeError` naturally, and asserts `SovereignStorageError` propagates.
+  `test_commit_drain_serialized_with_drain` (`TestOffGridBufferAsync`) patches
+  `sovereign_edge.buffer.os.replace` to gate `drain()` mid-execution and asserts
+  `commit_drain()` blocks until `drain()` releases `_drain_lock`.
+  **120 passed, 0 skipped (edge).**
+
+* [x] **Permanent-fault quarantine in `process()`** (`pipeline.py`): A new
+  `except (ValueError, TypeError) as perm_err:` clause inserted between
+  `except sqlite3.IntegrityError:` and `except Exception as fault_err:` routes permanent
+  structural rejections directly to `self._buffer.quarantine_path` rather than the active
+  off-grid buffer, preventing infinite replay loops.  The entry is serialised as a JSONL
+  dict with `"receipt"` and `"sieved_content"` keys.  A `SOVEREIGN-EDGE CRITICAL` line is
+  emitted to `sys.stderr` with `payload_hash` and exception repr; a secondary stderr
+  emission fires if the quarantine write itself raises `OSError`.  `buffered` is left
+  `False`; the payload is permanently isolated, never retried.  `import sys` added to
+  `pipeline.py`.  `process()` docstring step 4 and `:raises:` block updated.
+  `test_process_buffers_on_application_level_ledger_exception` updated to use
+  `RuntimeError` (general transient fault) as the `side_effect`, preserving coverage of
+  the `except Exception` buffer-routing path.  New test
+  `test_process_quarantines_permanent_ledger_fault_receipt` (`TestEdgePipelineProcess`)
+  asserts `buffered is False`, `buffer_depth == 0`, quarantine file exists, and the single
+  JSONL entry contains both `"receipt"` and `"sieved_content"` keys.
+  **121 passed, 0 skipped (edge).**
+
 ---
 
 ## Phase 10 — Isolated Context Vault & Governance Server (`sovereign-vault`)

@@ -5,6 +5,7 @@ import hashlib
 import hmac as _hmac
 import json
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -214,13 +215,21 @@ class EdgePipeline:
            exception raised during signing propagates directly to the caller; no unsigned
            skeleton record is placed into the off-grid buffer.
         4. **Commit** — the receipt is submitted to the ledger via
-           :meth:`~sovereign_ledger.SovereignLedger.append_receipt`.  On any
-           :exc:`Exception` (including :exc:`~sovereign_ledger.SovereignStorageError`,
-           ``sqlite3.Error``, and application-level validation faults such as
-           :exc:`ValueError`), the fully signed receipt is written to the off-grid buffer
-           and ``buffered=True`` is set in the returned :class:`EdgeResult`.  The only
-           exception not routed to the buffer is ``sqlite3.IntegrityError``, which
-           signals a duplicate ``payload_hash`` and is silently evicted (see below).
+           :meth:`~sovereign_ledger.SovereignLedger.append_receipt`.  Three distinct
+           failure paths are handled in priority order:
+
+           * ``sqlite3.IntegrityError`` — duplicate ``payload_hash``; silently evicted,
+             ``buffered=False`` (see below).
+           * :exc:`ValueError` / :exc:`TypeError` — permanent structural or schema
+             rejection; the receipt is routed immediately to the quarantine file at
+             :attr:`~sovereign_edge.buffer.OffGridBuffer.quarantine_path`, a critical
+             message is emitted to ``stderr``, and ``buffered=False`` is set.  The
+             entry is never placed into the active off-grid buffer to prevent infinite
+             replay loops.
+           * Any other :exc:`Exception` (including
+             :exc:`~sovereign_ledger.SovereignStorageError` and ``sqlite3.Error``) —
+             transient storage fault; the signed receipt is written to the off-grid
+             buffer and ``buffered=True`` is set.
 
         HMAC-SHA256 preimage canonicalization: the ``d``-payload segment of the
         preimage is produced via :meth:`SensorFrame.text_content`, which applies
@@ -247,7 +256,8 @@ class EdgePipeline:
             :meth:`~sovereign_core.crypto.SovereignKeyManager.generate_receipt` propagates
             directly — no unsigned skeleton receipt is placed into the buffer on a signing fault.
         :raises SovereignDoubleFaultError: If ``append_receipt`` raises any
-            :exc:`Exception` other than ``sqlite3.IntegrityError`` *and* the subsequent
+            :exc:`Exception` other than ``sqlite3.IntegrityError``, ``ValueError``, or
+            ``TypeError``, *and* the subsequent
             :meth:`~sovereign_edge.buffer.OffGridBuffer.push` also raises.  The signed
             receipt dict is attached to the exception via :attr:`~SovereignDoubleFaultError.receipt`.
 
@@ -327,6 +337,29 @@ class EdgePipeline:
         try:
             payload_hash = self._ledger.append_receipt(receipt_dict, sieve_result.text)
         except sqlite3.IntegrityError:
+            payload_hash = receipt_dict["payload_hash"]
+        except (ValueError, TypeError) as perm_err:
+            _qf_entry: str = json.dumps(
+                {"receipt": receipt_dict, "sieved_content": sieve_result.text},
+                ensure_ascii=False,
+            )
+            sys.stderr.write(
+                f"SOVEREIGN-EDGE CRITICAL: permanent ledger schema rejection in process(); "
+                f"isolating receipt to quarantine — "
+                f"payload_hash={receipt_dict.get('payload_hash', 'unknown')!r}: "
+                f"{perm_err!r}\n"
+            )
+            sys.stderr.flush()
+            try:
+                with open(self._buffer.quarantine_path, "a", encoding="utf-8") as _qf:
+                    _qf.write(_qf_entry + "\n")
+                    _qf.flush()
+            except OSError:
+                sys.stderr.write(
+                    f"SOVEREIGN-EDGE CRITICAL: quarantine write also failed; "
+                    f"receipt emitted to stderr for recovery: {_qf_entry}\n"
+                )
+                sys.stderr.flush()
             payload_hash = receipt_dict["payload_hash"]
         except Exception as fault_err:
             try:

@@ -1335,13 +1335,14 @@ class TestEdgePipelineBuffering:
         ledger.close()
 
     def test_process_buffers_on_application_level_ledger_exception(self, tmp_path: Path) -> None:
-        """Any non-IntegrityError exception from append_receipt — including application-level
-        validation failures such as ValueError — must route the ForensicReceipt to the
-        off-grid buffer rather than propagating to the caller.
+        """Transient non-IntegrityError exceptions from append_receipt must route the
+        ForensicReceipt to the off-grid buffer rather than propagating to the caller.
 
         The catch handler in process() must match Exception (not just SovereignStorageError
-        or sqlite3.Error) so that unforeseen ledger-layer faults trigger the same
-        buffer-fallback path as recognised storage errors, eliminating silent drops.
+        or sqlite3.Error) so that unforeseen ledger-layer faults trigger the buffer-fallback
+        path.  This test exercises the general RuntimeError branch; permanent structural
+        faults (ValueError, TypeError) are covered by
+        test_process_quarantines_permanent_ledger_fault_receipt.
 
         :param tmp_path: Pytest-provided isolated temporary directory.
         :type tmp_path: Path
@@ -1358,17 +1359,75 @@ class TestEdgePipelineBuffering:
             with patch.object(
                 ledger,
                 "append_receipt",
-                side_effect=ValueError("ledger schema validation failed"),
+                side_effect=RuntimeError("ledger transient storage fault"),
             ):
                 result: EdgeResult = pipeline.process(_seal_frame(tmp_path))
             assert result.buffered is True, (
                 "process() must route the receipt to the off-grid buffer when "
-                "append_receipt raises a non-storage application-level exception; "
-                "ValueError must not propagate to the caller"
+                "append_receipt raises a transient non-storage exception; "
+                "RuntimeError must not propagate to the caller"
             )
             assert pipeline.buffer_depth > 0, (
                 "buffer_depth must be non-zero after the receipt was diverted "
-                "to the off-grid buffer on an application-level ledger fault"
+                "to the off-grid buffer on a transient ledger fault"
+            )
+        finally:
+            pipeline.close()
+        ledger.close()
+
+    def test_process_quarantines_permanent_ledger_fault_receipt(self, tmp_path: Path) -> None:
+        """A permanent structural rejection (ValueError or TypeError) from append_receipt
+        must isolate the receipt to the quarantine file, bypass the active off-grid buffer,
+        and return buffered=False — preventing infinite replay loops.
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        import json as _json
+
+        ledger: SovereignLedger = SovereignLedger(":memory:")
+        pipeline: EdgePipeline = EdgePipeline(
+            ledger=ledger,
+            signing_key=str(tmp_path / ".keys" / "edge_identity.pem"),
+            buffer_path=str(tmp_path / ".edge_buffer.jsonl"),
+            sensor_secret=_SENSOR_SECRET,
+        )
+        try:
+            _seal_frame(tmp_path)  # warm up sequence file before patching
+            with patch.object(
+                ledger,
+                "append_receipt",
+                side_effect=ValueError("permanent schema constraint violation"),
+            ):
+                result: EdgeResult = pipeline.process(_seal_frame(tmp_path))
+
+            assert result.buffered is False, (
+                "process() must not buffer a receipt that triggered a permanent "
+                "ValueError from append_receipt; buffered must be False"
+            )
+            assert pipeline.buffer_depth == 0, (
+                "buffer_depth must remain zero after a permanently-rejected receipt "
+                "is routed to quarantine rather than the active off-grid buffer"
+            )
+
+            quarantine_path: Path = Path(pipeline._buffer.quarantine_path)
+            assert quarantine_path.exists(), (
+                "quarantine file must exist after process() isolates a permanently "
+                "rejected receipt from the ledger commit stage"
+            )
+            quarantine_lines: list[str] = [
+                ln for ln in quarantine_path.read_text(encoding="utf-8").splitlines() if ln.strip()
+            ]
+            assert len(quarantine_lines) == 1, (
+                "exactly one JSONL entry must be written to the quarantine file "
+                "for the permanently-rejected receipt"
+            )
+            entry: dict = _json.loads(quarantine_lines[0])
+            assert "receipt" in entry, (
+                "quarantine JSONL entry must contain a 'receipt' key with the ForensicReceipt dict"
+            )
+            assert "sieved_content" in entry, (
+                "quarantine JSONL entry must contain a 'sieved_content' key with the sieved text"
             )
         finally:
             pipeline.close()
