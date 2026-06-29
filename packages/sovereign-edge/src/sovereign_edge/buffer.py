@@ -674,17 +674,30 @@ class OffGridBuffer:
         :exc:`OSError`, the active file is unchanged, the exception re-raises, and no
         counter is modified.
 
-        Disk lines and quarantine lines that cannot be parsed as valid JSON or that are
-        missing the ``receipt`` / ``sieved_content`` keys are quarantined in
-        ``_dead_letter`` under the count lock rather than silently dropped;
-        :attr:`dead_letter_count` reflects the accumulated quarantine count.  Returns an
-        empty list when the buffer file does not exist, no write-error entries are
-        pending, and no quarantine entries were recovered.
+        Disk lines that cannot be parsed as valid JSON are handled contextually: if the
+        failing line is the final non-blank line of the file AND the file lacks a trailing
+        newline, it is treated as a partial write from an OS crash that truncated the line
+        mid-character — the fragment is written to ``{path}.panic`` and
+        :exc:`~sovereign_ledger.SovereignStorageError` is raised immediately so the active
+        buffer file is preserved intact for operator inspection.  All other malformed disk
+        lines (structurally complete but unparseable, or missing ``receipt`` /
+        ``sieved_content`` keys) and malformed quarantine lines are quarantined in
+        ``_dead_letter`` under the count lock; :attr:`dead_letter_count` reflects the
+        accumulated count.  Returns an empty list when the buffer file does not exist, no
+        write-error entries are pending, and no quarantine entries were recovered.
 
         :return: List of ``(receipt_dict, sieved_content)`` tuples sorted by sequence,
             combining on-disk JSONL entries, ``_write_errors`` entries, and pre-drain
             quarantine snapshot entries.
         :rtype: list[tuple[dict[str, Any], str]]
+        :raises SovereignStorageError: If the final non-blank line of the buffer file fails
+            to parse as valid JSON and the file lacks a trailing newline — the signature of
+            an OS crash that truncated the last JSONL write mid-line.  The partial fragment
+            is written to ``{path}.panic`` before raising; the active buffer file is left
+            intact so the operator can inspect, truncate, or repair it before retrying
+            :meth:`drain`.  This exception is deliberately distinct from the dead-letter
+            path (which handles complete-but-corrupt lines such as ``{bad_json}\\n``) to
+            ensure a crash-truncation is never silently absorbed.
         :raises OSError: If the buffer file exists but :meth:`pathlib.Path.read_text`
             raises :exc:`OSError` (e.g., permissions change, device removal, filesystem
             error after existence was confirmed) — :attr:`drain_read_failed` is set to
@@ -767,15 +780,23 @@ class OffGridBuffer:
             with self._count_lock:
                 self._drain_read_failed = False
             try:
-                raw_lines: list[str] = self._path.read_text(encoding="utf-8").splitlines()
+                _raw_text: str = self._path.read_text(encoding="utf-8")
+                raw_lines: list[str] = _raw_text.splitlines()
             except OSError:
                 with self._count_lock:
                     self._drain_read_failed = True
                 raise
 
+            _file_lacks_trailing_newline: bool = bool(_raw_text) and not _raw_text.endswith("\n")
+            _last_nonempty_idx: int = -1
+            for _ri in range(len(raw_lines) - 1, -1, -1):
+                if raw_lines[_ri].strip():
+                    _last_nonempty_idx = _ri
+                    break
+
             entries: list[tuple[dict[str, Any], str]] = []
             disk_line_count: int = 0
-            for line in raw_lines:
+            for _li, line in enumerate(raw_lines):
                 stripped: str = line.strip()
                 if not stripped:
                     continue
@@ -783,12 +804,33 @@ class OffGridBuffer:
                 try:
                     obj: dict[str, Any] = json.loads(stripped)
                     entries.append((obj["receipt"], obj["sieved_content"]))
-                except (json.JSONDecodeError, KeyError):
+                except json.JSONDecodeError:
+                    if _li == _last_nonempty_idx and _file_lacks_trailing_newline:
+                        _panic_path: Path = Path(str(self._path) + ".panic")
+                        try:
+                            with open(_panic_path, "w", encoding="utf-8") as _pf:
+                                _pf.write(stripped + "\n")
+                                _pf.flush()
+                        except OSError:
+                            pass
+                        raise SovereignStorageError(
+                            f"Partial write detected in buffer file '{self._path}': "
+                            "the final line is a truncated JSON fragment (no trailing "
+                            "newline), consistent with an OS crash mid-write.  "
+                            f"The fragment has been written to '{_panic_path}' for "
+                            "forensic recovery; the active buffer file is preserved "
+                            "intact — repair or remove the partial tail line before "
+                            "retrying drain()."
+                        )
                     with self._count_lock:
                         if len(self._dead_letter) >= _DEAD_LETTER_MAX:
                             del self._dead_letter[0]
                         self._dead_letter.append(stripped)
-                    continue
+                except KeyError:
+                    with self._count_lock:
+                        if len(self._dead_letter) >= _DEAD_LETTER_MAX:
+                            del self._dead_letter[0]
+                        self._dead_letter.append(stripped)
 
             entries.extend(pending_error_entries)
             entries.extend(quarantine_entries)

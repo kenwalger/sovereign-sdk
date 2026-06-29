@@ -810,6 +810,55 @@ class TestOffGridBuffer:
             "original PID must be preserved in the lock file after a failed overtake"
         )
 
+    def test_drain_detects_partial_write_tail_fragment(self, tmp_path: Path) -> None:
+        """drain() must raise SovereignStorageError and write a panic file when the
+        buffer ends with a truncated JSON fragment lacking a trailing newline.
+
+        A buffer file whose final line is incomplete JSON with no trailing ``\\n``
+        is the canonical signature of an OS crash that interrupted a JSONL append
+        mid-write.  Silently quarantining this fragment in ``_dead_letter`` would mask
+        data-loss and allow the drain to proceed as though the entry never existed.
+        Instead, ``drain()`` must: isolate the fragment to ``{path}.panic`` for
+        forensic recovery; raise ``SovereignStorageError`` so the caller aborts the
+        current transaction; and leave the active buffer file intact (the atomic
+        ``os.replace`` to the staging path must not occur) so the operator can repair
+        or truncate the partial line and retry.
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        buf_path: Path = tmp_path / "buf.jsonl"
+        panic_path: Path = Path(str(buf_path) + ".panic")
+        buf: OffGridBuffer = OffGridBuffer(str(buf_path))
+        try:
+            buf.push(self._make_receipt("good"), "good content")
+            buf.flush()
+            # Append a truncated JSON fragment with no trailing newline — simulating an
+            # OS crash that interrupted the write syscall before the line terminator.
+            with open(str(buf_path), "ab") as _fh:
+                _fh.write(b'{"receipt":{"payload_hash":"partial-trunc')
+            with pytest.raises(SovereignStorageError, match="Partial write"):
+                buf.drain()
+            assert panic_path.exists(), (
+                "panic file must exist after partial-write detection: "
+                "the truncated fragment must be isolated for forensic recovery"
+            )
+            panic_content: str = panic_path.read_text(encoding="utf-8")
+            assert "partial-trunc" in panic_content, (
+                "panic file must contain the truncated fragment text"
+            )
+            assert buf_path.exists(), (
+                "active buffer file must remain intact after SovereignStorageError: "
+                "os.replace must not have been called before the exception was raised"
+            )
+            staging_path: Path = Path(str(buf_path) + ".staging")
+            assert not staging_path.exists(), (
+                "staging file must not exist — drain() must have raised before the "
+                "active-to-staging atomic rename"
+            )
+        finally:
+            buf.close()
+
 
 # ---------------------------------------------------------------------------
 # Fixtures

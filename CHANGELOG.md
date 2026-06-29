@@ -1871,6 +1871,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``TestEdgePipelineDrainBuffer`` grows from 12 to 13 cases.
   **Suite: 113 passed, 0 skipped (sovereign-edge); 402 passed, 1 skipped (workspace).**
 
+- **`OffGridBuffer.drain()` — partial-write tail detection with panic file and
+  `SovereignStorageError`** (`buffer.py`): The JSONL parsing loop in `drain()` previously
+  caught `(json.JSONDecodeError, KeyError)` uniformly and quarantined all malformed lines
+  in `_dead_letter`.  This silently absorbed the class of OS crash where the buffer writer
+  was killed mid-append, leaving a truncated JSON fragment at the end of the file with no
+  trailing newline — indistinguishable from an intentionally corrupt-but-complete line.
+  The parsing block is refactored to handle `json.JSONDecodeError` and `KeyError`
+  separately.  On `json.JSONDecodeError`, if the failing line is the final non-blank line
+  in the file AND the file lacks a trailing newline character, the line is classified as a
+  partial write from an OS crash.  The truncated fragment is written to ``{path}.panic``
+  (best-effort; a write failure on the panic path is silently swallowed so it cannot mask
+  the primary error) and `SovereignStorageError` is raised immediately.  The active buffer
+  file is preserved intact because the raise occurs before the `os.replace` rename to the
+  staging path.  All other `json.JSONDecodeError` cases and all `KeyError` cases continue
+  to be quarantined in `_dead_letter` as before.  The `raw_text` string is now captured
+  separately from `splitlines()` to allow `endswith("\\n")` inspection; the loop is
+  converted from `for line in raw_lines` to `for _li, line in enumerate(raw_lines)` to
+  track which index is the last non-empty line.  The `drain()` docstring updated to
+  document the partial-write detection path, the `{path}.panic` artefact, and the new
+  `:raises SovereignStorageError:` entry.
+
+- **`test_drain_detects_partial_write_tail_fragment`** (`TestOffGridBuffer`,
+  `test_edge.py`): Pushes one valid receipt and flushes, then appends a raw binary
+  fragment ``b'{"receipt":{"payload_hash":"partial-trunc'`` (no trailing newline) to the
+  buffer file in binary append mode to simulate an OS crash mid-write.  Asserts that
+  `drain()` raises `SovereignStorageError` matching ``"Partial write"``; asserts the panic
+  file exists and contains the fragment text ``"partial-trunc"``; asserts the active buffer
+  file is still present (``os.replace`` was not reached); asserts the staging file is
+  absent.  `TestOffGridBuffer` grows from 13 to 14 cases.
+  **Suite: 114 passed, 0 skipped (sovereign-edge); 403 passed, 1 skipped (workspace).**
+
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing
   sensor observations into versioned, tamper-evident, minified JSON transmission envelopes with

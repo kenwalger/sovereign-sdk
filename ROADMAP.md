@@ -1121,6 +1121,16 @@ committed = pipeline.drain_buffer()
   quarantine file absent.  `TestEdgePipelineDrainBuffer` grows from 12 to 13 cases.
   **113 passed, 0 skipped (edge); 402 passed, 1 skipped (workspace).**
 
+* [x] **Partial-write tail detection in `drain()`** (`buffer.py`): `json.JSONDecodeError`
+  and `KeyError` split into separate `except` clauses in the JSONL parsing loop; when a
+  `JSONDecodeError` fires on the final non-blank line of a file that lacks a trailing
+  newline, the line is classified as an OS-crash partial write — the fragment is written
+  to `{path}.panic` and `SovereignStorageError` is raised before the `os.replace` rename,
+  preserving the active buffer file intact.  All other `JSONDecodeError` and `KeyError`
+  cases continue to route to `_dead_letter`.  `test_drain_detects_partial_write_tail_fragment`
+  added to `TestOffGridBuffer`.
+  **114 passed, 0 skipped (edge); 403 passed, 1 skipped (workspace).**
+
 ---
 
 ## Phase 10 — Isolated Context Vault & Governance Server (`sovereign-vault`)
