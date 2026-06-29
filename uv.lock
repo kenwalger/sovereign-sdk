@@ -5,6 +5,7 @@ requires-python = ">=3.12"
 [manifest]
 members = [
     "sovereign-core",
+    "sovereign-edge",
     "sovereign-fastapi",
     "sovereign-ledger",
     "sovereign-runtime",
@@ -435,6 +436,30 @@ requires-dist = [
 ]
 
 [[package]]
+name = "sovereign-edge"
+version = "0.1.0"
+source = { editable = "packages/sovereign-edge" }
+dependencies = [
+    { name = "sovereign-core" },
+    { name = "sovereign-ledger" },
+    { name = "sovereign-sieve" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "sovereign-sensor" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "sovereign-core", editable = "packages/sovereign-core" },
+    { name = "sovereign-ledger", editable = "packages/sovereign-ledger" },
+    { name = "sovereign-sensor", marker = "extra == 'dev'", editable = "packages/sovereign-sensor" },
+    { name = "sovereign-sieve", editable = "packages/sovereign-sieve" },
+]
+provides-extras = ["dev"]
+
+[[package]]
 name = "sovereign-fastapi"
 version = "1.1.0"
 source = { editable = "packages/sovereign-fastapi" }
@@ -483,6 +508,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "sovereign-core" },
+    { name = "sovereign-edge" },
     { name = "sovereign-fastapi" },
     { name = "sovereign-ledger" },
     { name = "sovereign-runtime" },
@@ -499,6 +525,7 @@ dev = [
     { name = "pytest", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", specifier = ">=1.0.0" },
     { name = "sovereign-core", editable = "packages/sovereign-core" },
+    { name = "sovereign-edge", editable = "packages/sovereign-edge" },
     { name = "sovereign-fastapi", editable = "packages/sovereign-fastapi" },
     { name = "sovereign-ledger", editable = "packages/sovereign-ledger" },
     { name = "sovereign-runtime", editable = "packages/sovereign-runtime" },

@@ -456,6 +456,775 @@ wire_bytes = envelope.seal("2026-06-16T00:00:00Z", {"sensor": "temp", "value": 2
 
 ---
 
+## Phase 9.5 — Sensor Ingestion Bridge (`sovereign-edge`) — Shipped ✓
+
+**Target:** Introduce a local-first middleware pipeline that intercepts sealed sensor
+wire frames from `sovereign-sensor`, applies the `sovereign-sieve` Prose Tax
+transformation, and commits a signed `ForensicReceipt` to `sovereign-ledger`.  An
+off-grid JSONL buffer absorbs receipts when the ledger is temporarily unreachable, with
+background-threaded persistence so the ingestion loop is never blocked on disk I/O.
+
+```python
+from sovereign_edge import EdgePipeline
+from sovereign_ledger import SovereignLedger
+
+ledger = SovereignLedger(".keys/sovereign_audit.db")
+pipeline = EdgePipeline(
+    ledger=ledger,
+    signing_key=".keys/edge_identity.pem",
+    sensor_secret=b"<shared-hmac-secret>",
+    # allow_unauthenticated=True  # required if sensor_secret is omitted
+)
+
+# Intercept a sealed wire frame from sovereign-sensor
+result = pipeline.process(wire_bytes)
+# result.payload_hash  — hex SHA-256 receipt identifier
+# result.sieved_content — Prose-Tax-minimized observation payload
+# result.buffered       — True when ledger was unreachable; receipt queued off-grid
+
+# Replay buffered receipts when the ledger recovers
+committed = pipeline.drain_buffer()
+```
+
+**Delivered:**
+
+* [x] `SensorFrame` dataclass: deserializes all seven sovereign-sensor wire envelope keys
+  (`v`, `n`, `t`, `q`, `alg`, `d`, `s`) from UTF-8 JSON bytes; `text_content()` produces
+  deterministic, sort-keyed JSON for canonical sieve input.
+* [x] `OffGridBuffer`: durable JSONL-backed queue with background daemon writer thread —
+  `__init__` invokes `self._path.parent.mkdir(parents=True, exist_ok=True)` immediately
+  after resolving the buffer path, guaranteeing that both the background append and the
+  `tempfile` staging directory are available at construction rather than at first write;
+  `push()` returns immediately (non-blocking); `flush()` blocks via `Queue.join()` until all
+  pending writes are committed to disk; disk write failures (`OSError` during `open` /
+  `fsync`) are preserved in a `_write_errors` list under `_count_lock` so no receipt is
+  silently discarded on a full disk or read-only filesystem; `size` returns
+  `_pending + _committed + len(_write_errors)` under a single lock acquisition with no file
+  read, keeping `buffer_depth` accurate across normal writes, write failures, and in-flight
+  entries simultaneously; `write_error_count: int` property surfaces the failure indicator
+  explicitly; `_drain_lock` provides mutual exclusion between the `push()` enqueue window
+  and the entire `drain()` critical section (flush → read → `os.replace` → counter decrement),
+  preventing concurrent `push()` calls from writing to a file inode that is being atomically
+  replaced and losing the write; `drain()` flushes, merges `_write_errors` entries with
+  on-disk entries, sorts the combined list by ascending `metadata["sequence"]` through a
+  `_seq_key` helper guarded by `try/except (TypeError, ValueError)` so a non-numeric
+  sequence value falls back to `0` rather than aborting the drain (stable sort for FIFO at
+  equal keys), atomically clears via `tempfile` → `os.replace`, returns the combined entries
+  only when the atomic promotion succeeds (returns `[]` on `OSError` so no downstream ledger
+  commits are made against an uncleared buffer; write-error entries are preserved in
+  `_write_errors` for the next pass), and decrements `_committed` by the file-entry count
+  only so write-error entries — which never accumulated in `_committed` — require no counter
+  adjustment; `close()` joins the worker thread then inspects `_write_errors` and raises
+  `RuntimeError` if any un-journaled entries remain, forcing the host application to
+  acknowledge data loss instead of shutting down silently.
+* [x] `EdgePipeline.__init__()` — key directory created with `mode=0o700` at first use and
+  explicitly re-enforced via `chmod(0o700)` on every construction, correcting a pre-existing
+  directory whose permissions may have been set with a lax umask.
+* [x] `EdgePipeline`: four-stage orchestrator (deserialize → sieve → sign → commit);
+  sieve stage guarded by `try/except Exception` — on failure falls back to raw
+  `text_content()`, sets `tax_savings_percentage=0.0`, and stamps `sieve_fault=True`
+  in receipt metadata; receipt metadata carries `"sequence": frame.q` as the drain
+  sort key; routes `SovereignStorageError` and `sqlite3.Error` to the off-grid buffer;
+  `drain_buffer()` re-queues entries that still cannot reach the ledger.
+* [x] `EdgeResult` dataclass: structured return type from `process()` with `payload_hash`,
+  `receipt`, `sieved_content`, Prose Tax telemetry fields, and `buffered` flag.
+* [x] `EdgePipeline.close()`: best-effort `drain_buffer()` then `OffGridBuffer.close()`;
+  pipeline owns buffer lifecycle; `RuntimeError` from un-journaled write errors propagates
+  unmodified to enforce clean teardown invariant; `drain_buffer()` wrapped in `try/finally`
+  so `OffGridBuffer.close()` is reached even if the drain pass raises unexpectedly.
+* [x] `edge_pipeline` fixture refactored to `yield` + `pipeline.close()` teardown:
+  background writer thread joined after every test; pytest dependency order ensures
+  ledger remains open during the teardown drain pass.
+* [x] Ad-hoc pipeline teardown hardened: `TestEdgePipelineBuffering` local instances
+  closed in `try/finally`; `TestEdgePipelineDrainBuffer` adds `_buffer.flush()` after
+  each `process()` call and closes both `pipeline_a` and `pipeline_b` in `try/finally`
+  with recovery ledger closed after `pipeline_b.close()`.
+* [x] `process()` sieve-fault fallback: `frame.text_content()` called once before the
+  `try` block; both happy and fault paths consume the single `raw_text` reference.
+* [x] `OffGridBuffer.close()` shutdown race eliminated: sentinel `queue.put(None)` moved
+  inside `_drain_lock` so `push()` and `close()` are fully serialized; no payload can
+  be enqueued behind the sentinel; `_worker_thread.join()` remains outside the lock.
+* [x] `EdgePipeline.__init__()` — `sensor_secret: str | bytes = b""` parameter: when
+  non-empty, `process()` reconstructs the HMAC-SHA256 preimage from the deserialized
+  frame fields (matching `SovereignEnvelope.seal()` format exactly) and compares the
+  digest against `frame.s` via `hmac.compare_digest`; mismatch raises `ValueError` before
+  the sieve or ledger is reached; empty secret disables verification for backwards
+  compatibility with unauthenticated deployments.
+* [x] `SensorFrame.from_bytes()` — protocol version gate: `if frame["v"] != 1` raises
+  `ValueError("Unsupported wire format version …")` immediately after JSON decode,
+  before dataclass construction, HMAC verification, or ledger interaction.
+  `test_from_bytes_raises_on_unsupported_version` covers the `v=2` rejection path.
+  `TestSensorFrame` grows from 11 to 12 cases.
+* [x] `OffGridBuffer._dead_letter` — 100-entry eviction cap: `_DEAD_LETTER_MAX = 100`
+  constant; both append sites (worker OSError path and `drain()` malformed-line path)
+  evict the oldest entry under `_count_lock` when the ceiling is reached, bounding
+  heap growth under sustained malformed-payload injection.
+* [x] `OffGridBuffer._disk_writer` — non-OSError exception catch and `_worker_failed` flag:
+  `except Exception:` added after `except OSError:` to prevent silent thread death;
+  affected entry preserved in `_write_errors` / `_dead_letter`; `_worker_failed = True`
+  set as the first statement inside the `finally`-block's `_count_lock` section so
+  concurrent `push()` callers see the flag before counter updates complete;
+  lock-free evacuation loop (`get_nowait()` under `_count_lock` per item, no
+  `_drain_lock`) calls `task_done()` for each orphan, eliminating the circular-wait
+  deadlock where `drain()` held `_drain_lock` and waited on `queue.join()` while the
+  evacuation loop waited for `_drain_lock`; `worker_failed: bool` read-only property
+  exposes the flag; `push()` raises `RuntimeError` immediately when the flag is set.
+* [x] `SensorFrame.from_bytes()` — strict runtime type validation: `isinstance` checks
+  for all seven fields immediately after JSON decode; boolean masquerading as int blocked
+  via `and not isinstance(_val, bool)` guard on `v` and `q`; type mismatch raises
+  `TypeError` before the version gate, HMAC verifier, sieve, or ledger.
+  `test_from_bytes_raises_on_wrong_field_type` covers the `q="not-an-int"` rejection path.
+  `TestSensorFrame` grows from 12 to 13 cases.
+* [x] `test_worker_non_oserror_failure_does_not_hang` (`TestOffGridBufferWriteErrors`):
+  patches `builtins.open` with `RuntimeError`; asserts `flush()` returns, `worker_failed`
+  is `True`, `push()` raises, `drain()` recovers entries, `close()` completes cleanly.
+  `TestOffGridBufferWriteErrors` grows from 5 to 6 cases.
+* [x] `test_drain_concurrent_with_worker_crash_no_deadlock` (`TestOffGridBufferWriteErrors`):
+  pushes two items under a `builtins.open` mock that fails on append-mode writes; starts
+  `drain()` in a daemon thread; asserts the thread joins within 5 seconds (timeout =
+  deadlock); asserts `worker_failed is True`; `close()` completes cleanly.  Guards the
+  lock-free evacuation path against future regressions that re-introduce `_drain_lock`.
+  `TestOffGridBufferWriteErrors` grows from 6 to 7 cases.
+* [x] `OffGridBuffer.close()` — idempotent guard: `if self._worker_thread.is_alive()`
+  skips sentinel placement and join on repeated calls, preventing counter corruption
+  and indefinite `Queue.join()` block from overlapping teardown paths.
+* [x] `EdgePipeline.process()` — HMAC hex case normalisation: `frame.s.lower()` passed
+  to `hmac.compare_digest` so uppercase hex from bare-metal hardware drivers is accepted
+  without a spurious signature mismatch.
+* [x] `EdgePipeline.process()` — sieve-fault fallback guard: ``except Exception:`` catches
+  all anomalous sieve plugin faults; ``SystemExit`` and ``KeyboardInterrupt`` inherit from
+  ``BaseException`` not ``Exception`` and propagate naturally without an explicit re-raise.
+* [x] `test_close_is_idempotent` (`TestEdgePipelineBuffering`): two explicit calls plus
+  the fixture teardown third call all complete without deadlock or state corruption.
+* [x] `EdgePipeline.process()` — algorithm-gate hard-block: when `sensor_secret` is
+  provisioned, `frame.alg != "hmac-sha256"` immediately raises `ValueError`
+  (`"Unsupported or unauthenticated algorithm …"`) before the HMAC digest is even
+  computed; no frame can bypass verification by spoofing the `alg` field.
+* [x] Test suite — private attribute access eliminated: three `_conn.execute()` calls
+  replaced with `SovereignLedger.verify_ledger_integrity(expected_tip_hash=...)`;
+  `_closed` guard in `mem_ledger` fixture simplified to unconditional `ledger.close()`
+  (idempotent); all 13 `EdgePipeline` constructions pass `sensor_secret=_SENSOR_SECRET`.
+* [x] `TestOffGridBuffer` and `TestOffGridBufferAsync` — all 16 test methods that
+  construct an `OffGridBuffer` directly now close it in `try/finally` teardown, joining
+  the background daemon writer thread before the next test begins.
+* [x] `README.md` — `sovereign-edge` example extended with `sensor_secret` parameter and
+  `try/finally` teardown calling `pipeline.close()` and `ledger.close()`.
+* [x] `EdgePipeline.drain_buffer()` — requeue loop hardened: each `push()` call in the
+  requeue pass is wrapped in `except RuntimeError:` so all items are iterated before
+  raising; `push_failure_count` is accumulated and surfaced in a single
+  `RuntimeError("could not re-queue N receipts...")` after the loop; no item is orphaned
+  mid-iteration regardless of buffer state.
+* [x] `OffGridBuffer.close()` — concurrent-teardown sentinel race eliminated: `is_alive()`
+  check moved inside `_drain_lock → _count_lock` and gated on `not self._closed`;
+  first caller sets `_closed = True` and places one sentinel; every subsequent caller
+  observes `_closed = True` and skips; `_pending` is incremented exactly once regardless
+  of concurrent teardown fan-out; `sentinel_placed: bool` flag controls the `join()` call
+  so `join()` is only called by the thread that placed the sentinel.
+* [x] `test_drain_buffer_survives_push_failure_on_requeue` (`TestEdgePipelineDrainBuffer`):
+  patches `append_receipt` (SovereignStorageError) and `_buffer.push` (RuntimeError +
+  counter); asserts `push_call_count == 2` and `pytest.raises(RuntimeError, match="could
+  not re-queue")`; authoritative guard that both items are attempted, not just the first.
+  `TestEdgePipelineDrainBuffer` grows from 5 to 6 cases.
+* [x] `test_concurrent_close_no_counter_drift` (`TestOffGridBufferAsync`): 8 threads call
+  `buf.close()` simultaneously after push/flush/drain; asserts all threads join within
+  5 s (timeout = deadlock) and `buf.size() == 0` (no counter drift from duplicate
+  sentinels). `TestOffGridBufferAsync` grows from 7 to 8 cases.
+* [x] `EdgePipeline.close()` — dual-failure exception chaining: captured-exception model
+  replaces `try/finally`; `drain_buffer()` exception stored in `drain_exc`; if `buffer.close()`
+  also raises, the buffer `RuntimeError` is chained via `raise buf_exc from drain_exc` so the
+  drain root cause is visible in the traceback; only one raises → normal propagation.
+* [x] `OffGridBuffer.drain()` — `drain_read_failed: bool` observable flag: `OSError` on
+  `Path.read_text()` sets the flag under `_count_lock` before returning `[]`; caller can
+  distinguish filesystem-blocked drain from genuine empty drain; `drain_read_failed` property
+  with Sphinx docstring; on-disk entries preserved.
+* [x] `SensorFrame` — `@dataclass(frozen=True)`: post-construction field assignment raises
+  `dataclasses.FrozenInstanceError`; `d: dict[str, Any]` reference is immutable (contents not
+  deep-frozen); no change required in pipeline code because no stage rebinds a frame field.
+* [x] `SovereignDoubleFaultError(RuntimeError)` — total-persistence failure sentinel with
+  ``receipt: dict[str, Any]`` attribute; raised from `process()` when ledger commit fails
+  and the subsequent buffer push also fails; exported from `sovereign_edge.__all__`.
+* [x] `OffGridBuffer.drain()` — OSError re-raised (not silently swallowed with `return []`)
+  after setting `_drain_read_failed = True` under `_count_lock`; callers receive an explicit
+  exception rather than an empty list indistinguishable from a genuine empty drain.
+* [x] `EdgePipeline.drain_buffer()` — `list(self._buffer.drain())` wrapped in
+  `try/except OSError`; raises descriptive `RuntimeError` chained from the `OSError` so
+  operators see the storage-tier failure before any replay is attempted.
+* [x] `OffGridBuffer.close()` — OS-exit-gap sentinel guard: ``_worker_running`` flag (set
+  ``False`` under ``_count_lock`` before the thread's final return) replaces the
+  ``is_alive()`` check in the liveness gate, closing the window where the Python thread
+  function has returned but the OS has not yet unregistered the thread; ``close()`` now
+  reads ``False`` before the OS marks the thread dead and skips sentinel injection.
+  ``test_close_skips_sentinel_during_worker_os_exit_gap`` validates the fix by patching
+  ``is_alive()`` to return ``True`` after worker exit.
+  ``TestOffGridBufferWriteErrors`` grows from 8 to 9 cases.
+* [x] `OffGridBuffer.push()` — TOCTOU liveness-gate fix: ``_worker_failed`` check and
+  ``queue.put()`` share a single ``_count_lock`` acquisition so a racer that passes the
+  check before a crash cannot enqueue into an abandoned queue after the evacuation loop
+  completes; ``test_push_toctou_worker_crash_no_dangling_items`` (16-thread
+  ``threading.Barrier`` stress test) asserts ``_pending == 0`` after all threads resolve.
+  ``TestOffGridBufferWriteErrors`` grows from 9 to 10 cases.
+* [x] `EdgePipeline.process()` — sieve-fault fallback guard broadened to
+  ``except Exception:``; ``SystemExit`` and ``KeyboardInterrupt`` inherit from
+  ``BaseException`` not ``Exception``, so the broader guard naturally excludes host-level
+  abort signals while trapping all anomalous sieve plugin faults (``ArithmeticError``,
+  ``LookupError``, etc.) that the prior narrow tuple propagated unhandled.
+* [x] `SensorFrame.d` docstring corrected: ``MappingProxyType`` "enforces shallow
+  read-only protection on the top-level envelope dictionary keys; nested mutable values
+  are not frozen" — removes the implication of deep immutability.
+* [x] `test_close_is_idempotent` docstring corrected: references ``_worker_running``
+  state flag instead of ``is_alive()``, matching the OS-exit-gap implementation.
+* [x] `EdgePipeline.__init__()` — secure-by-default initialization: new
+  ``SovereignConfigurationError(ValueError)`` raised when ``sensor_secret`` is empty or
+  ``None`` and ``allow_unauthenticated=False`` (the default); new
+  ``allow_unauthenticated: bool = False`` keyword parameter allows deliberate opt-out;
+  ``SovereignConfigurationError`` exported from ``sovereign_edge.__all__``.
+* [x] `OffGridBuffer.drain()` — stale read-failure flag reset: ``self._drain_read_failed``
+  set to ``False`` under ``_count_lock`` immediately before each ``Path.read_text()``
+  attempt so a prior transient ``OSError`` does not persist as a false-positive after
+  filesystem recovery.
+* [x] `TestEdgePipelineSecureInit` — four new tests: construction without secret raises
+  ``SovereignConfigurationError`` matching ``"allow_unauthenticated=True"``; empty-string
+  secret also raises; ``allow_unauthenticated=True`` permits construction; error is
+  catchable as ``ValueError`` (inheritance invariant).  New class
+  ``TestEdgePipelineSecureInit``: 4 cases.
+* [x] `test_drain_read_failed_flag_resets_on_successful_drain`
+  (``TestOffGridBufferWriteErrors``): simulates transient ``OSError``
+  (``drain_read_failed → True``), then successful drain asserts ``drain_read_failed is
+  False``; guards the reset path against future regression.
+  ``TestOffGridBufferWriteErrors`` grows from 10 to 11 cases.
+* [x] `OffGridBuffer.drain()` — rotation failure raises ``OSError`` (not returns ``[]``):
+  bare ``raise`` added at the end of the ``except OSError:`` block so a failed
+  ``os.replace`` propagates to the caller after temp-file cleanup; callers can no longer
+  confuse a filesystem-blocked rotation with a genuinely empty drain; on-disk entries and
+  ``_write_errors`` are preserved for retry.
+* [x] `SovereignDoubleFaultError` — ``uncommitted_receipts: list[dict[str, Any]] | None``
+  attribute: new optional constructor parameter; ``receipt`` made optional (default
+  ``None``); two fault contexts documented: single-receipt (from ``process()``) and
+  batch-drain (from ``drain_buffer()``).
+* [x] `EdgePipeline.drain_buffer()` — ``try/finally`` for guaranteed unprocessed-entry
+  capture; tracked ``failed_requeue_entries`` list (not just count); cascading double fault
+  (replay loop crash + buffer push failures) raises ``SovereignDoubleFaultError`` with
+  ``uncommitted_receipts`` attached; OSError handler message generalised to "operation
+  failed" to cover both read and rotation failures.
+* [x] `test_drain_buffer_raises_on_rotation_failure` (``TestEdgePipelineDrainBuffer``):
+  patches ``sovereign_edge.buffer.os.replace`` with ``OSError``; asserts ``RuntimeError``
+  with ``__cause__ is OSError`` and message matching ``"operation failed"``; then asserts
+  a second ``drain_buffer()`` commits exactly 1 receipt (entries survived the failed
+  rotation).  ``TestEdgePipelineDrainBuffer`` grows from 8 to 9 cases.
+* [x] `SensorFrame.text_content()` — float literal preservation; `_canonicalize_payload` removed:
+  the ``_canonicalize_payload`` helper (which coerced every ``float`` whose ``is_integer()``
+  returned ``True`` to its ``int`` equivalent) is removed in its entirety; ``text_content()``
+  now calls ``json.dumps(dict(self.d), sort_keys=True, separators=(",", ":"), ensure_ascii=False)``
+  directly, without any numeric type coercion, so ``float(1.0)`` is serialized as ``"1.0"``
+  rather than ``"1"``; the edge-side HMAC preimage is byte-identical to the canonical string
+  the sensor passed to its own HMAC-SHA256 digest function, eliminating the class of signature
+  verification failures caused by cross-runtime float normalization.
+  ``test_text_content_normalizes_integer_valued_floats`` is renamed
+  ``test_text_content_preserves_float_literal_format`` (``TestSensorFrame``) and its
+  assertion is inverted: asserts ``"1.0" in frame_float.text_content()`` and
+  ``frame_float.text_content() != frame_int.text_content()`` — confirming float and int wire
+  representations produce distinct preimage strings.
+* [x] `EdgePipeline.drain_buffer()` — duplicate eviction on `sqlite3.IntegrityError`:
+  ``except sqlite3.IntegrityError: pass`` inserted before the broader
+  ``except (SovereignStorageError, sqlite3.Error): requeue.append(...)`` guard; a receipt
+  already committed in a prior drain pass is evicted silently (neither counted in
+  ``committed`` nor re-queued), preventing the infinite replay loop where duplicates grow
+  ``buffer_depth`` without bound on every subsequent ``drain_buffer()`` call;
+  ``test_drain_buffer_evicts_duplicate_receipt_on_integrity_error``
+  (``TestEdgePipelineDrainBuffer``) asserts ``committed == []`` and
+  ``pipeline_b.buffer_depth == 0`` after a patched ``append_receipt`` raises
+  ``sqlite3.IntegrityError``.  ``TestEdgePipelineDrainBuffer`` grows from 9 to 10 cases.
+* [x] `OffGridBuffer._disk_writer` — close-phase evacuation wrapped in ``try/finally``:
+  the ``if worker_failed:`` evacuation loop's ``with self._count_lock:`` block is now the
+  body of a ``try`` clause; the outer ``finally`` acquires ``_count_lock`` independently,
+  drains any sentinel injected by a racing ``close()`` (checks ``self._closed`` and calls
+  ``get_nowait()`` / ``task_done()`` until ``_queue.Empty``), and unconditionally sets
+  ``self._worker_running = False``; previously the flag was cleared only as the last
+  statement inside the evacuation loop — an exception in that loop left
+  ``_worker_running = True``, causing a subsequent ``close()`` to inject a ``None``
+  sentinel into the abandoned queue with no consumer, stalling any future
+  ``queue.join()``.
+* [x] `OffGridBuffer` — two-phase drain with non-destructive staging rotation:
+  ``drain()`` renames the active buffer to ``{path}.staging`` via ``os.replace`` instead
+  of atomically clearing it with an empty temp file; new ``commit_drain()`` method deletes
+  staging only after the caller confirms all entries are committed or re-queued;
+  ``_recover_staging()`` in ``__init__`` restores a leftover staging file (rename-back if
+  only staging exists; temp-file merge if both exist) before the worker thread starts;
+  ``drain_buffer()`` calls ``commit_drain()`` only on the success path, so any exception
+  leaves staging intact for recovery.  ``test_drain_buffer_preserves_staging_file_on_mid_replay_crash``
+  (``TestEdgePipelineDrainBuffer``) buffers 2 receipts, crashes the replay loop on entry 2,
+  asserts ``.staging`` exists with both JSONL lines, then asserts a second ``drain_buffer()``
+  commits entry 2 and deletes staging.  ``TestEdgePipelineDrainBuffer`` grows from 10 to 11 cases.
+* [x] `OffGridBuffer` — exclusive instance lock prevents concurrent path collisions:
+  ``_acquire_buffer_lock()`` in ``__init__`` creates ``{path}.lock`` containing the
+  current PID via exclusive ``open(..., 'x')``; stale locks (dead PID via ``os.kill``)
+  are stolen; live locks raise ``RuntimeError`` at construction time; lock is released by
+  ``close()`` on clean shutdown; write-error tests updated to unlink the lock file before
+  ``buf_dir.rmdir()``.
+* [x] `OffGridBuffer._recover_staging()` — corrupt-staging quarantine: always reads the
+  staging file first (even in the promote-only branch) so that ``OSError`` or
+  ``UnicodeDecodeError`` is detected at boot time before the worker thread starts; on any
+  read or operation failure the staging file is renamed to ``{path}.staging.corrupt`` and
+  ``SovereignStorageError`` is raised immediately, preventing a corrupt staging file from
+  being silently skipped and its entries permanently lost; ``SovereignStorageError``
+  imported into ``buffer.py`` from ``sovereign_ledger`` (no new workspace dependency —
+  the package already depends on ``sovereign_ledger`` via ``pipeline.py``).
+  ``test_recover_staging_quarantines_corrupt_file`` (``TestOffGridBuffer``) writes invalid
+  UTF-8 bytes to the staging path and asserts ``SovereignStorageError`` from
+  ``OffGridBuffer.__init__`` and the presence of the ``.staging.corrupt`` quarantine file.
+  ``TestOffGridBuffer`` grows from 10 to 11 cases.
+* [x] `EdgePipeline.drain_buffer()` docstring — crash-recovery deduplication explicitly
+  documented: a new paragraph specifies that ``sqlite3.IntegrityError`` eviction (the
+  existing ``except sqlite3.IntegrityError: pass`` clause) is the crash-recovery
+  deduplication mechanism; after a crash-restart cycle where ``_recover_staging()`` merges
+  a staging file back into the active buffer, re-submitted entries already in the ledger
+  raise ``IntegrityError`` and are silently evicted — not re-queued — guaranteeing each
+  receipt is persisted exactly once across a crash-restart boundary.  No code change.
+* [x] `test_drain_buffer_deduplicates_on_post_crash_restart` (``TestEdgePipelineDrainBuffer``):
+  three-phase integration test: Phase 1 buffers 2 receipts via a closed ledger; Phase 2
+  crashes ``drain_buffer()`` after entry 1 is committed (entry 2 re-queued, staging intact);
+  Phase 3 constructs a new pipeline triggering ``_recover_staging()`` merge → 3 active lines;
+  ``drain_buffer()`` deduplicates via ``IntegrityError`` → exactly 1 new commit.
+  ``TestEdgePipelineDrainBuffer`` grows from 11 to 12 cases.
+* [x] `OffGridBuffer.__init__()` — lock file cleanup on staging recovery failure:
+  ``_recover_staging()`` is now called inside ``try/except BaseException:`` whose handler
+  unlinks the ``.lock`` file before re-raising; previously a ``SovereignStorageError`` from
+  the staging quarantine path left the lock on disk, causing every subsequent construction
+  attempt on the same path to raise ``RuntimeError("already held by process …")`` for the
+  lifetime of the process.  ``test_init_cleans_up_lock_on_staging_recovery_failure``
+  (``TestOffGridBuffer``) triggers the failure, asserts the lock is gone, then confirms a
+  second construction on the same path succeeds and returns ``size == 0``.
+  ``TestOffGridBuffer`` grows from 11 to 12 cases.
+* [x] `OffGridBuffer._disk_writer` — evacuation ``finally`` block ``_pending`` decrement for
+  racing-close sentinel: the ``with self._count_lock: if self._closed:`` drain loop consumed
+  sentinels placed by a concurrent ``close()`` via ``get_nowait()`` / ``task_done()`` but
+  omitted ``self._pending -= 1``, leaving the counter inflated after the thread exited and
+  stalling any subsequent ``flush()`` → ``queue.join()`` call indefinitely.  ``_pending -= 1``
+  added before ``task_done()`` in the sentinel drain loop, matching the decrement semantics
+  of the main evacuation loop.
+* [x] `EdgePipeline.process()` — ``sqlite3.IntegrityError`` duplicate eviction: a new
+  ``except sqlite3.IntegrityError:`` clause before ``except (SovereignStorageError,
+  sqlite3.Error):`` extracts ``payload_hash`` from the receipt dict and leaves
+  ``buffered = False``; previously ``IntegrityError`` fell through to the broader guard and
+  routed the duplicate to the off-grid buffer with ``buffered=True``, diverging from the
+  ``drain_buffer()`` silent-eviction contract.  ``process()`` docstring updated.
+* [x] ``test_process_evicts_duplicate_submission_without_buffering``
+  (``TestEdgePipelineProcess``): patches ``mem_ledger.append_receipt`` with
+  ``sqlite3.IntegrityError``; asserts ``result.buffered is False`` and
+  ``buffer_depth == 0``.  ``TestEdgePipelineProcess`` grows from 18 to 19 cases.
+* [x] ``test_crash_evacuation_racing_close_leaves_pending_at_zero``
+  (``TestOffGridBufferWriteErrors``): non-OSError worker crash + 8 concurrent ``close()``
+  threads; asserts all threads join within 5 s (deadlock sentinel) and
+  ``buf._pending == 0`` after completion, directly validating the sentinel-decrement fix.
+  ``TestOffGridBufferWriteErrors`` grows from 11 to 12 cases.
+* [x] `EdgePipeline.__init__()` — secret validation before buffer construction:
+  ``_sensor_secret`` computed and ``SovereignConfigurationError`` guard fired at the very
+  top of ``__init__`` before ``OffGridBuffer(buffer_path)`` is invoked; previously the
+  buffer was constructed first, leaving an orphaned ``.lock`` file on validation failure.
+  ``test_configuration_error_does_not_create_buffer_lock_file``
+  (``TestEdgePipelineSecureInit``): asserts lock absent after ``SovereignConfigurationError``.
+  ``TestEdgePipelineSecureInit`` grows from 4 to 5 cases.
+* [x] `EdgePipeline.drain_buffer()` — ``flush()`` before ``commit_drain()``:
+  after the re-queue pass, ``self._buffer.flush()`` blocks until all re-queued entries
+  are fsync'd to the active JSONL file before ``commit_drain()`` deletes the staging
+  backup; closes the window where a process exit between successful ``push()`` calls
+  and ``commit_drain()`` left re-queued entries only in the in-memory queue.
+* [x] `SensorFrame.text_content()` — compact separator; HMAC canonical unified:
+  ``text_content()`` now uses ``separators=(",", ":")`` (compact, no spaces), matching
+  ``SovereignEnvelope.seal()``'s preimage canonical form; ``pipeline.process()`` replaces
+  the inline ``json.dumps(dict(frame.d), ...)`` with ``frame.text_content()`` so the HMAC
+  preimage and sieve input share a single normalized, compact canonical; unused
+  ``import json`` removed from ``pipeline.py``.
+* [x] `OffGridBuffer._disk_writer` — write errors persisted to disk-backed quarantine log:
+  on ``OSError`` in the disk writer, the failed JSONL entry is appended to
+  ``{path}.quarantine`` via ``open(..., "a")`` + ``flush()`` + ``os.fsync()`` before being
+  recorded in the in-memory ``_write_errors`` list; ``_load_quarantine()`` is called during
+  ``__init__`` (after ``_recover_staging()``, before the worker thread starts) and repopulates
+  ``_write_errors`` from a prior run's quarantine file so the next ``drain()`` surfaces all
+  failed entries across crash-restart boundaries; ``drain()`` unlinks the quarantine file on
+  both the early-return path and the normal completion path after ``_write_errors`` is cleared;
+  quarantine write failures are caught with ``except OSError: pass`` so a missing or
+  unwritable quarantine directory degrades silently without masking the primary write error.
+* [x] `OffGridBuffer._acquire_buffer_lock()` — atomic OS-level lock creation via `os.open`:
+  ``open(self._lock_path, "x", encoding="utf-8")`` replaced with
+  ``os.open(str(self._lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)``; the single
+  atomic kernel syscall prevents two concurrent ``OffGridBuffer`` constructions on the same
+  path from both receiving a successful lock creation (the previous ``open(..., "x")`` could
+  race on some platforms between the existence check and file creation); the fd is closed
+  immediately after writing the PID via ``os.write`` + ``os.close`` in ``try/finally`` so
+  that external callers on Windows (which disallows ``unlink`` of open files without
+  ``FILE_SHARE_DELETE``) can unlink the lock file without contention during test teardown.
+* [x] `EdgePipeline.__init__()` — buffer closed on post-buffer construction failure:
+  all initialization steps after ``OffGridBuffer(buffer_path)`` (key path resolution,
+  ``mkdir``, ``chmod``, ``SovereignKeyManager`` construction) are wrapped in
+  ``try/except BaseException``; the handler calls ``self._buffer.close()`` — with
+  ``except Exception: pass`` suppressing any close error so it cannot mask the constructor
+  exception — then re-raises; previously a failure in any of those steps left the daemon
+  thread running and the ``.lock`` file on disk, permanently blocking every subsequent
+  construction attempt on the same path for the lifetime of the process.
+  ``test_init_failure_after_buffer_creation_closes_worker_thread``
+  (``TestEdgePipelineSecureInit``) patches ``SovereignKeyManager`` to raise and asserts
+  the ``.lock`` file is absent, confirming the thread was joined and lock released.
+  ``TestEdgePipelineSecureInit`` grows from 5 to 6 cases.
+* [x] `OffGridBuffer._acquire_buffer_lock()` — `PermissionError` and unexpected `OSError` raise `SovereignStorageError`:
+  three permission-boundary guards added: (1) ``except OSError`` after ``except FileExistsError``
+  in the initial ``os.open`` block converts any non-file-exists OS rejection to
+  ``SovereignStorageError``; (2) ``except PermissionError`` before ``except (OSError, ValueError)``
+  in the held-PID read block prevents a permission-denied read from being misclassified as a
+  stale lock; (3) ``except PermissionError`` before ``except OSError`` in the
+  ``os.kill(held_pid, 0)`` block prevents a permission-denied kill — meaning the owner IS alive
+  under a different user — from triggering a lock steal.  All three cases raise
+  ``SovereignStorageError("Lock file acquisition failed due to permission or system boundaries")``
+  with the original OS exception chained as ``__cause__``.
+* [x] `OffGridBuffer.drain()` — write-error clear bounded to snapshot count:
+  ``_error_snapshot_count = len(self._write_errors)`` is recorded atomically with the
+  ``pending_error_entries`` snapshot under ``_count_lock``; the former
+  ``self._write_errors.clear()`` on both the file-absent early-return path and the normal
+  ``os.replace`` completion path is replaced with
+  ``del self._write_errors[:_error_snapshot_count]``, so any entry appended to
+  ``_write_errors`` after the snapshot boundary survives into the next drain pass;
+  if ``os.replace`` raises ``OSError``, the code exits before any ``del`` executes,
+  guaranteeing no write-error entry is cleared or orphaned by a failed file swap.
+* [x] `OffGridBuffer.close()` — lock file unlinked unconditionally in `finally` block:
+  ``self._lock_path.unlink()`` moved from after the write-error check into a ``finally``
+  block that wraps the entire check-and-raise sequence; previously a non-empty
+  ``_write_errors`` caused ``RuntimeError`` to propagate before ``unlink()`` was reached,
+  leaving the ``.lock`` file on disk after the worker thread had exited and permanently
+  blocking every subsequent construction attempt on the same path; the ``finally`` guarantee
+  ensures the lock is always released regardless of whether ``close()`` returns normally or
+  raises, so a faulted shutdown never creates a permanent construction barrier.
+* [x] `packages/sovereign-edge/README.md` and root `README.md` — `EdgePipeline` examples aligned with secure-by-default contract:
+  the Quick Start snippet in ``packages/sovereign-edge/README.md`` previously omitted
+  ``sensor_secret``, which raises ``SovereignConfigurationError`` under the secure-by-default
+  policy; ``sensor_secret=b"<shared-hmac-secret>"`` added and a preceding comment explains
+  ``allow_unauthenticated=True`` as the explicit opt-out; the root ``README.md``
+  ``sensor_secret`` inline comment ``"omit to disable inbound verification"`` replaced with
+  ``"required; pass allow_unauthenticated=True to opt out"`` to accurately reflect the
+  constructor contract.
+* [x] 97-case desktop validation test suite across nine classes (`TestSensorFrame`: 16;
+  `TestOffGridBuffer`: 12; `TestEdgePipelineProcess`: 19; `TestEdgePipelineBuffering`: 8;
+  `TestEdgePipelineDrainBuffer`: 12; `TestOffGridBufferAsync`: 8;
+  `TestEdgePipelineSieveFault`: 4; `TestOffGridBufferWriteErrors`: 12;
+  `TestEdgePipelineSecureInit`: 6) covering all
+  fortification scenarios: non-blocking `push()` with immediate `size` reporting,
+  chronological `drain()` sort by sequence, non-integer sequence value tolerance,
+  `_committed` counter accuracy after drain, sieve fault fallback with raw text and
+  `sieve_fault=True` metadata, disk write error tracking, full `drain()` recovery, `close()`
+  raising on un-journaled entries, `EdgePipeline.close()` propagating RuntimeError, 20-thread
+  push-vs-close stress test, HMAC-SHA256 inbound signature rejection, algorithm-gate, HMAC
+  hex normalisation, broadened sieve-fault exception scope to `except Exception:`, idempotent
+  close triple-call, protocol version gate, dead-letter eviction cap, non-OSError worker
+  failure, strict field type validation, lock-free evacuation deadlock regression,
+  drain_buffer requeue-loop survivability, concurrent close counter-drift, dual-failure
+  exception chaining, drain read-failure OSError propagation, frozen dataclass mutation
+  guard, exhaustive replay-crash re-queue, deep MappingProxyType immutability on
+  ``SensorFrame.d``, ``SovereignDoubleFaultError`` double-fault receipt recovery,
+  drain_buffer OSError halt-and-alert, 16-thread TOCTOU push-vs-crash stress test with
+  zero ``_pending`` drift, OS-exit-gap ``_worker_running`` sentinel guard,
+  secure-by-default init with ``SovereignConfigurationError``, stale
+  ``drain_read_failed`` flag reset after filesystem recovery, atomic rotation
+  ``OSError`` propagation, drain_buffer cascading double-fault with
+  ``uncommitted_receipts`` preservation, float literal preservation in
+  ``text_content()`` for byte-identical HMAC preimage fidelity, duplicate
+  ledger-entry eviction on ``sqlite3.IntegrityError``,
+  close-phase evacuation ``try/finally`` sentinel guard, two-phase non-destructive
+  drain with ``.staging`` crash recovery, exclusive instance-lock collision guard,
+  corrupt-staging quarantine with ``SovereignStorageError`` boot-time alert,
+  crash-restart ``IntegrityError`` deduplication end-to-end integration,
+  lock-file cleanup on staging recovery failure enabling immediate retry,
+  evacuation-finally ``_pending`` decrement for racing-close sentinel,
+  direct duplicate eviction in ``process()`` matching drain-buffer eviction contract,
+  no lock-file orphan on ``SovereignConfigurationError`` constructor failure,
+  re-queue durability flush before staging commit, unified compact HMAC
+  canonical via ``text_content()`` with separator alignment,
+  disk-backed quarantine file for crash-durable write-error recovery across
+  restart boundaries, atomic ``os.open(O_CREAT | O_EXCL)`` lock creation
+  eliminating TOCTOU races in concurrent ``OffGridBuffer`` construction,
+  buffer worker thread termination on post-buffer constructor failure with lock
+  release verified via ``SovereignKeyManager`` injection, ``SovereignStorageError``
+  on ``PermissionError`` lock-file access preventing silent lock theft,
+  snapshot-bounded ``_write_errors`` drain clearing preserving post-snapshot entries,
+  and unconditional ``.lock`` unlink in ``close()`` ``finally`` block guaranteeing
+  lock release even when ``RuntimeError`` propagates from the write-error check,
+  ledger exception handler in ``process()`` broadened to ``except Exception`` so
+  custom adapter faults that inherit from neither ``SovereignStorageError`` nor
+  ``sqlite3.Error`` route to the off-grid buffer instead of propagating unhandled,
+  quarantine double-fault detector: ``sys.stderr`` emission + ``worker_failed``
+  flag on secondary quarantine write failure so no entry is silently lost even
+  when both the primary buffer and the quarantine disk path are unwritable,
+  and selective open() mock in ``test_close_propagates_buffer_write_error_as_runtime_error``
+  isolating primary-buffer failures from quarantine writes.
+
+- Stale-sentinel elimination: outer ``try/finally`` belt-and-suspenders sweep in
+  ``_disk_writer`` drains any sentinel stranded in the queue after the main loop exits;
+  re-indented ``while True:`` from 10-space to canonical 12-space nesting with
+  consistent 4-space body indentation throughout.
+
+- Atomic sentinel placement in ``close()``: ``_write_queue.put(None)`` moved inside
+  ``_count_lock`` acquisition so the sentinel is always in the queue when ``_closed =
+  True`` becomes visible to the evacuation ``finally`` block, closing the race window
+  where the evacuation could drain an empty queue before ``put(None)`` fires.
+
+- Permanent data-format fault eviction in ``drain_buffer()``: inner
+  ``except (ValueError, TypeError) as permanent_err:`` clause in the per-entry replay
+  loop emits a ``SOVEREIGN-EDGE CRITICAL`` line to ``sys.stderr`` and skips re-queuing
+  for entries that will never succeed (bad schema, type mismatch), preventing infinite
+  replay loops while still allowing operational ``RuntimeError`` to abort the loop and
+  preserve the staging file; ``import sys`` added to ``pipeline.py``.
+
+- Three new/updated tests: ``test_drain_buffer_evicts_permanently_on_non_storage_exception``
+  (renamed from ``test_drain_buffer_requeues_all_items_on_unexpected_exception``, verifies
+  ``ValueError`` → permanent eviction, no re-queue, ``drain_buffer()`` returns normally),
+  ``test_drain_buffer_permanent_fault_emits_critical_log`` (guards stderr format: CRITICAL
+  prefix, exception type, exception message), and
+  ``test_racing_close_sentinel_drained_by_evacuation`` (verifies close() does not hang
+  when racing with an in-progress crash, ``_pending == 0`` after resolution).
+
+- Postponed annotation evaluation in ``models.py``: ``from __future__ import
+  annotations`` added as the first line of code; eliminates the Python 3.12
+  class-definition-time subscripting hazard on ``MappingProxyType[str, Any]`` without
+  changing the public API or the runtime ``MappingProxyType`` type of the ``d`` field.
+
+- Module import smoke test: new ``TestModuleImport`` class with
+  ``test_sovereign_edge_top_level_import`` asserts ``EdgePipeline`` and ``SensorFrame``
+  are importable and non-None; any future annotation evaluation regression breaks this
+  test immediately at collection time.
+
+- Exception-paradox resolution and staging-tracking hardening: ``ValueError`` and
+  ``TypeError`` removed from the per-entry eviction clause and merged into the re-queue
+  except tuple ``(SovereignStorageError, sqlite3.Error, ValueError, TypeError)`` so that
+  generic runtime exceptions are treated as retryable anomalies, matching the direct
+  ingestion buffering profile in ``process()``; ``sqlite3.IntegrityError`` remains the
+  sole permanent eviction criterion.  ``import sys`` removed from ``pipeline.py``;
+  ``import json`` added for the new retry-file path.  ``self._retry_path`` attribute added
+  to ``EdgePipeline.__init__`` pointing to ``{buffer_path}.retry``.  Push-failure retry
+  log: when ``push()`` raises ``RuntimeError`` in the re-queue pass, the failed entry is
+  appended as a JSONL line to ``{buffer_path}.retry`` (best-effort, ``except OSError:
+  pass``) so the receipt is durable even when the buffer worker has terminated.
+  ``test_drain_buffer_evicts_permanently_on_non_storage_exception`` renamed to
+  ``test_drain_buffer_requeues_on_non_storage_exception`` with assertion updated to
+  ``buffer_depth == 1``; ``test_drain_buffer_permanent_fault_emits_critical_log`` renamed
+  to ``test_drain_buffer_requeue_failure_writes_retry_log`` with assertions updated to
+  verify retry-file existence, line count, and ``receipt``/``sieved_content`` key presence.
+  **102 passed, 0 skipped (edge); 391 passed, 1 skipped (workspace).**
+
+* [x] **PID-reuse false-positive elimination via two-line lock metadata** (`buffer.py`):
+  `.lock` payload changed to `{pid}\n{instance_uuid}`; class-level `_instance_registry`
+  and `_instance_registry_lock` cross-verify the UUID against all live instances in this
+  process before deciding whether an alive-PID lock is a genuine conflict or a recycled
+  PID.  UUID deregistration in `close()` and on `_recover_staging()` exception.
+
+* [x] **Boot-time `_committed` seeded from on-disk line count** (`buffer.py`):
+  Non-blank lines in the active JSONL file are counted in `__init__` after
+  `_recover_staging()` + `_load_quarantine()` complete and before the background thread
+  starts; `_committed` is initialized to that count so `size` is accurate at first call.
+
+* [x] **`SovereignRequeueAllocationError`** (`pipeline.py`): New `RuntimeError` subclass
+  with `uncommitted_receipts: list[dict[str, Any]]` attribute raised when the retry-file
+  write fails inside the re-queue push-failure handler; uses `enumerate(requeue)` to
+  compute remaining un-attempted entries.  Exported from `sovereign_edge/__init__.py`.
+
+* [x] **`test_buffer_depth_reflects_disk_entries_at_instantiation`** and
+  **`test_requeue_allocation_error_exposes_uncommitted_receipts`** added to
+  `TestOffGridBuffer` and `TestEdgePipelineDrainBuffer` respectively.
+  **104 passed, 0 skipped (edge); 393 passed, 1 skipped (workspace).**
+
+* [x] **Correct lock ownership and liveness invariants** (`buffer.py`): alive-PID branch
+  now gates on `held_pid == os.getpid()` before applying UUID registry check; external
+  PIDs unconditionally raise `SovereignStorageError` rather than being misclassified as
+  stale-lock PID-reuse candidates.
+
+* [x] **Quarantine two-phase commit: merge into staging, defer deletion** (`buffer.py`):
+  `drain()` merges quarantine content into the staging file via `tempfile` → `os.replace`
+  before returning; neither the quarantine file nor `_write_errors` are cleared by
+  `drain()` — both are cleared exclusively by `commit_drain()` after the caller confirms
+  ledger acceptance.  `_drain_write_error_snapshot` tracks the precise write-error slice
+  index for safe deferred eviction.
+
+* [x] **`test_external_process_lock_blocks_instantiation`** and
+  **`test_quarantine_preserved_in_staging_block_on_crash_restart`** added to
+  `TestOffGridBuffer`; 8 `TestOffGridBufferWriteErrors` tests updated to call
+  `commit_drain()` after `drain()` to match the new two-phase protocol.
+  **106 passed, 0 skipped (edge); 395 passed, 1 skipped (workspace).**
+
+* [x] **Non-negative sequence invariant** (`models.py`): `SensorFrame.from_bytes()` now
+  raises `ValueError` for `frame["q"] < 0` immediately after the protocol-version gate,
+  preventing negative sequence values from reaching the HMAC verifier, sieve, or ledger.
+
+* [x] **Generic `OSError` from `os.kill` fails closed** (`buffer.py`):
+  `_acquire_buffer_lock()` collapses the separate `PermissionError` + generic `OSError`
+  exception clauses into a single `except OSError as exc: raise SovereignStorageError(...)`;
+  `ProcessLookupError` is the sole exception that permits lock overtake.
+
+* [x] **Signing airlock corrected: `generate_receipt()` moved OUTSIDE the ingestion `try`
+  block** (`pipeline.py`): Signing exceptions propagate directly; unsigned skeleton receipts
+  are never placed into the off-grid buffer.  Only ledger-commit failures (`append_receipt`)
+  route the fully signed receipt to the buffer via the unchanged `except Exception as fault_err:`
+  path.
+
+* [x] **`test_negative_sequence_rejected_at_parse_boundary`** and
+  **`test_lock_probe_permission_error_fails_closed`** added to `TestSensorFrame` and
+  `TestOffGridBuffer` respectively.
+  **108 passed, 0 skipped (edge); 397 passed, 1 skipped (workspace).**
+
+* [x] **Atomic quarantine rotation in `drain()`** (`buffer.py`): `drain()` calls
+  `os.replace(quarantine_path, quarantine_staging_path)` before reading quarantine
+  content, atomically isolating the pre-drain snapshot (`{path}.quarantine.staging`)
+  from concurrent write failures that land in a fresh `{path}.quarantine`.
+  `commit_drain()` targets `.quarantine.staging` instead of `.quarantine`, leaving
+  post-drain quarantine entries intact.  `_load_quarantine()` iterates over both
+  `_quarantine_path` and `_quarantine_staging_path` so crash-recovery covers the
+  rotated snapshot regardless of whether the staging merge succeeded.
+
+* [x] **`test_new_quarantine_entry_survives_commit_drain`** and updated assertions in
+  **`test_quarantine_preserved_in_staging_block_on_crash_restart`** in `TestOffGridBuffer`.
+  **109 passed, 0 skipped (edge); 398 passed, 1 skipped (workspace).**
+
+* [x] **Eliminate fabricated unsigned receipts: signing fault propagates directly**
+  (`pipeline.py`): `generate_receipt()` executes bare (outside the `try` block); any
+  exception from key I/O, HSM faults, or cryptographic errors propagates to the caller
+  with no buffer entry.  The stub receipt construction block (`signing-fault:{n}:{q}`
+  payload_hash, empty public_key/signature, signing_fault metadata) is removed entirely.
+  New test `test_signing_fault_propagates_without_stub_receipt` patches
+  `generate_receipt` to raise `RuntimeError("HSM unavailable")` and asserts the exception
+  propagates with `buffer_depth == 0`.
+
+* [x] **Quarantine permanent replay rejections: `ValueError`/`TypeError` rerouted from requeue
+  to quarantine file** (`pipeline.py`): A new `except (ValueError, TypeError):` clause in
+  `drain_buffer()` writes permanent-fault entries directly to `self._buffer.quarantine_path`
+  rather than appending them to the requeue list.  The requeue clause is narrowed to
+  `except (SovereignStorageError, sqlite3.Error):`.  `OffGridBuffer.quarantine_path: Path`
+  public property added to `buffer.py`.  `test_drain_buffer_quarantines_on_value_error`
+  (renamed from `test_drain_buffer_requeues_on_non_storage_exception`) updated to assert
+  `buffer_depth == 0` and quarantine file exists.  New test
+  `test_drain_buffer_quarantines_permanent_fault_receipt` guards single-entry quarantine path.
+  **111 passed, 0 skipped (edge); 400 passed, 1 skipped (workspace).**
+
+* [x] **`drain()` quarantine return leak closed** (`buffer.py`): pre-drain quarantine
+  snapshot entries are parsed and appended to the returned ``entries`` list in both the
+  "active buffer absent" and "active buffer present" branches, so ``drain_buffer()`` replays
+  them in the same pass rather than deferring them to the next boot cycle via
+  ``_recover_staging()``.  ``test_drain_returns_quarantine_entries_alongside_active_entries``
+  added to ``TestOffGridBuffer``.
+  **112 passed, 0 skipped (edge); 401 passed, 1 skipped (workspace).**
+
+* [x] **Quarantine write failure raises `RuntimeError` and preserves staging file**
+  (`pipeline.py`): The `except OSError: pass` on the quarantine append inside
+  `drain_buffer()`'s `except (ValueError, TypeError):` clause is replaced with
+  `except OSError as _qf_err: raise RuntimeError(...)` so that a filesystem fault
+  on the quarantine path immediately halts the drain pass; the staging file is not
+  deleted because `commit_drain()` is never reached.  The `drain_buffer()` docstring
+  four-tier exception hierarchy updated.  `test_drain_buffer_quarantine_write_failure_preserves_staging`
+  added to `TestEdgePipelineDrainBuffer`: patches `append_receipt` to raise `ValueError`
+  and `builtins.open` selectively for the quarantine path to raise `OSError`; asserts
+  `RuntimeError` with ``__cause__`` being `OSError`; asserts staging file exists; asserts
+  quarantine file absent.  `TestEdgePipelineDrainBuffer` grows from 12 to 13 cases.
+  **113 passed, 0 skipped (edge); 402 passed, 1 skipped (workspace).**
+
+* [x] **Partial-write tail detection in `drain()`** (`buffer.py`): `json.JSONDecodeError`
+  and `KeyError` split into separate `except` clauses in the JSONL parsing loop; when a
+  `JSONDecodeError` fires on the final non-blank line of a file that lacks a trailing
+  newline, the line is classified as an OS-crash partial write — the fragment is written
+  to `{path}.panic` and `SovereignStorageError` is raised before the `os.replace` rename,
+  preserving the active buffer file intact.  All other `JSONDecodeError` and `KeyError`
+  cases continue to route to `_dead_letter`.  `test_drain_detects_partial_write_tail_fragment`
+  added to `TestOffGridBuffer`.
+  **114 passed, 0 skipped (edge); 403 passed, 1 skipped (workspace).**
+
+* [x] **`has_write_errors()` guard before `commit_drain()` in `drain_buffer()`** (`buffer.py`,
+  `pipeline.py`): New `has_write_errors(self) -> bool` method on `OffGridBuffer` atomically
+  inspects both `_write_errors` and `_worker_failed` under a single `_count_lock` acquisition,
+  returning `True` if either indicates a volatile write-failure state.  `drain_buffer()`
+  calls this method after the post-requeue `flush()` and before `commit_drain()`; if it
+  returns `True`, `SovereignStorageError` is raised without deleting the staging file —
+  closing the race where a re-queued entry's worker write fails silently between `push()`
+  and `commit_drain()`, leaving the entry only in in-memory `_write_errors` with the staging
+  file deleted.  `drain_buffer()` docstring updated: two-phase commit paragraph extended;
+  `:raises SovereignStorageError:` entry added.
+  `test_drain_buffer_preserves_staging_on_requeue_write_failure` added to
+  `TestEdgePipelineDrainBuffer`: patches `append_receipt` (SovereignStorageError) and
+  `builtins.open` selectively to fail buffer-append mode; asserts `SovereignStorageError`
+  matching ``"write errors"``; asserts staging exists; asserts `has_write_errors()` True;
+  cleanup drains and commits before close().  `TestEdgePipelineDrainBuffer` grows from
+  13 to 14 cases.
+  **115 passed, 0 skipped (edge); 404 passed, 1 skipped (workspace).**
+
+* [x] **Durable staging of in-memory write-error entries when the active buffer is absent**
+  (`buffer.py`): Closes the crash-recovery gap in `drain()`'s buffer-absent branch where
+  entries held only in `_write_errors` (due to all pushes failing with `OSError`) were
+  returned to the caller but never persisted to the staging file.  A process crash between
+  `drain()` and `commit_drain()` would permanently lose them.  The branch now serialises
+  all `pending_error_entries` as JSONL lines and appends them to the staging file alongside
+  any existing quarantine text.  The condition for writing staging is updated from
+  `if _quarantine_text.strip():` to `if _absent_stg_content.strip():`.
+  `test_write_errors_durably_staged_when_buffer_absent` added to
+  `TestOffGridBufferWriteErrors`: patches `builtins.open` to raise `OSError`; asserts
+  staging file exists after `drain()`, contains correct JSONL entry, and is removed after
+  `commit_drain()`.  `TestOffGridBufferWriteErrors` grows from 13 to 14 cases.
+
+* [x] **`SovereignDoubleFaultError.uncommitted_receipts` includes all requeue entries**
+  (`pipeline.py`): Corrects the truncated cascade-error manifest in `drain_buffer()`.
+  Changes `uncommitted_receipts=[r for r, _ in failed_requeue_entries]` to
+  `uncommitted_receipts=[r for r, _ in requeue]` so every receipt that could not complete
+  ledger acceptance is included — not only those whose subsequent `push()` call raised
+  `RuntimeError`.  `test_double_fault_uncommitted_receipts_includes_full_requeue` added to
+  `TestEdgePipelineDrainBuffer`: buffers two receipts, replays through a pipeline with a
+  crashing ledger and a selective `push()` failure; asserts
+  `len(uncommitted_receipts) == 2`.  `TestEdgePipelineDrainBuffer` grows from 14 to 15
+  cases.
+  **117 passed, 0 skipped (edge); 406 passed, 1 skipped (workspace).**
+
+* [x] **Compound payload schema on all double-fault and requeue-allocation exceptions**
+  (`pipeline.py`): Every `SovereignDoubleFaultError` and `SovereignRequeueAllocationError`
+  instantiation now attaches a compound `{"receipt": <ForensicReceipt dict>, "content":
+  <sieved text string>}` dict rather than a bare receipt dict, so host-level recovery
+  handlers retain both the receipt metadata and the sieved text without re-fetching from
+  the sieve layer.  `drain_buffer()` requeue comprehensions updated to
+  `[{"receipt": r, "content": c} for r, c in ...]` form.
+  `test_process_raises_sovereign_double_fault_error_on_double_failure`,
+  `test_double_fault_uncommitted_receipts_includes_full_requeue`, and
+  `test_requeue_allocation_error_exposes_uncommitted_receipts` updated to verify compound
+  keys `"receipt"` and `"content"`.  New test
+  `test_concurrent_commit_drain_no_staging_race` (`TestOffGridBufferAsync`) asserts that
+  100-thread concurrent `commit_drain()` calls after a successful drain leave the buffer
+  clean with no staging-file remnant.
+  **118 passed, 0 skipped (edge).**
+
+* [x] **Loud quarantine-staging read failure and `_drain_lock` alignment on `commit_drain()`**
+  (`buffer.py`): `drain()`'s inner `except (OSError, UnicodeDecodeError)` block that
+  previously silently set `_quarantine_text = ""` after a successful quarantine rotation
+  now raises `SovereignStorageError("Catastrophic failure reading rotated quarantine staging
+  log; aborting transaction to preserve disk integrity")`, preserving the active buffer for
+  retry.  `commit_drain()` now acquires `_drain_lock` as the outermost lock (wrapping the
+  existing `_count_lock`) so any concurrent `drain()` → `commit_drain()` overlaps are
+  fully serialized.  `test_drain_raises_sovereign_storage_error_on_quarantine_staging_read_failure`
+  (`TestOffGridBuffer`) writes invalid UTF-8 bytes to the quarantine file, triggers
+  `UnicodeDecodeError` naturally, and asserts `SovereignStorageError` propagates.
+  `test_commit_drain_serialized_with_drain` (`TestOffGridBufferAsync`) patches
+  `sovereign_edge.buffer.os.replace` to gate `drain()` mid-execution and asserts
+  `commit_drain()` blocks until `drain()` releases `_drain_lock`.
+  **120 passed, 0 skipped (edge).**
+
+* [x] **Permanent-fault quarantine in `process()`** (`pipeline.py`): A new
+  `except (ValueError, TypeError) as perm_err:` clause inserted between
+  `except sqlite3.IntegrityError:` and `except Exception as fault_err:` routes permanent
+  structural rejections directly to `self._buffer.quarantine_path` rather than the active
+  off-grid buffer, preventing infinite replay loops.  The entry is serialised as a JSONL
+  dict with `"receipt"` and `"sieved_content"` keys.  A `SOVEREIGN-EDGE CRITICAL` line is
+  emitted to `sys.stderr` with `payload_hash` and exception repr; a secondary stderr
+  emission fires if the quarantine write itself raises `OSError`.  `buffered` is left
+  `False`; the payload is permanently isolated, never retried.  `import sys` added to
+  `pipeline.py`.  `process()` docstring step 4 and `:raises:` block updated.
+  `test_process_buffers_on_application_level_ledger_exception` updated to use
+  `RuntimeError` (general transient fault) as the `side_effect`, preserving coverage of
+  the `except Exception` buffer-routing path.  New test
+  `test_process_quarantines_permanent_ledger_fault_receipt` (`TestEdgePipelineProcess`)
+  asserts `buffered is False`, `buffer_depth == 0`, quarantine file exists, and the single
+  JSONL entry contains both `"receipt"` and `"sieved_content"` keys.
+  **121 passed, 0 skipped (edge).**
+
+---
+
 ## Phase 10 — Isolated Context Vault & Governance Server (`sovereign-vault`)
 
 **Target:** Implement the "Sovereign Vault" architecture as an isolated local orchestration
