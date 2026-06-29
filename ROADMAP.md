@@ -1100,6 +1100,14 @@ committed = pipeline.drain_buffer()
   `test_drain_buffer_quarantines_permanent_fault_receipt` guards single-entry quarantine path.
   **111 passed, 0 skipped (edge); 400 passed, 1 skipped (workspace).**
 
+* [x] **`drain()` quarantine return leak closed** (`buffer.py`): pre-drain quarantine
+  snapshot entries are parsed and appended to the returned ``entries`` list in both the
+  "active buffer absent" and "active buffer present" branches, so ``drain_buffer()`` replays
+  them in the same pass rather than deferring them to the next boot cycle via
+  ``_recover_staging()``.  ``test_drain_returns_quarantine_entries_alongside_active_entries``
+  added to ``TestOffGridBuffer``.
+  **112 passed, 0 skipped (edge); 401 passed, 1 skipped (workspace).**
+
 ---
 
 ## Phase 10 — Isolated Context Vault & Governance Server (`sovereign-vault`)

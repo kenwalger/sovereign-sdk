@@ -1816,6 +1816,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   count is unchanged.
   **Suite: 111 passed, 0 skipped (sovereign-edge); 400 passed, 1 skipped (workspace).**
 
+- **`OffGridBuffer.drain()` — quarantine entries parsed and included in return value**
+  (`buffer.py`): The pre-drain quarantine snapshot text (``{path}.quarantine`` rotated to
+  ``{path}.quarantine.staging``) was already merged into the staging file for crash
+  recovery, but was never parsed and appended to the list of ``(receipt_dict,
+  sieved_content)`` tuples returned to the caller.  Quarantine entries were therefore
+  silently deferred: they survived a drain cycle without ever being submitted to the
+  ledger, accumulating inside the staging file until the next process restart triggered
+  ``_recover_staging()``.  A new ``quarantine_entries`` list is built from
+  ``_quarantine_text.splitlines()`` immediately after the rotation/read block, using the
+  same ``json.loads`` / ``(receipt, sieved_content)`` deserialization as the active JSONL
+  path; malformed lines go to ``_dead_letter``.  In the "active buffer absent" branch,
+  ``quarantine_entries`` is concatenated with ``pending_error_entries`` before the
+  ascending-sequence sort and the combined list is returned.  In the "active buffer
+  present" branch, ``entries.extend(quarantine_entries)`` is added alongside the existing
+  ``entries.extend(pending_error_entries)`` before the sort.  The ``drain()`` docstring is
+  updated to document the three-source merge contract and the updated return description.
+
+- **`test_drain_returns_quarantine_entries_alongside_active_entries`**
+  (`TestOffGridBuffer`, `test_edge.py`): Pushes one active receipt (sequence=2) into the
+  buffer and flushes, then writes one quarantine receipt (sequence=1) directly to
+  ``{path}.quarantine``.  After ``drain()``, asserts the returned list has length 2, both
+  ``payload_hash`` values are present, and the sequence order is ascending
+  (quarantine entry first).  After ``commit_drain()``, asserts ``{path}.staging`` and
+  ``{path}.quarantine.staging`` are both absent, confirming a clean two-phase drain cycle
+  with no data loss.
+  **Suite: 112 passed, 0 skipped (sovereign-edge); 401 passed, 1 skipped (workspace).**
+
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing
   sensor observations into versioned, tamper-evident, minified JSON transmission envelopes with

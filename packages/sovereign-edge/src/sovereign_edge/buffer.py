@@ -630,13 +630,19 @@ class OffGridBuffer:
 
         Calls :meth:`flush` to ensure all in-flight background writes are committed
         before reading the file.  Any entries preserved in ``_write_errors`` from prior
-        background write failures are merged with the on-disk entries.  The combined list
-        is sorted in ascending order by ``receipt["metadata"]["sequence"]`` to protect
-        the ledger's linear hash chain from out-of-order replay when entries arrive from
-        concurrent push paths.  The sort key is evaluated inside a guarded helper that
-        catches :exc:`TypeError` and :exc:`ValueError` so a non-numeric sequence value
-        in a corrupted entry falls back to ``0`` rather than aborting the entire drain
-        pass.
+        background write failures are merged with the on-disk entries.  Any entries
+        recovered from the pre-drain quarantine snapshot (``{path}.quarantine`` rotated to
+        ``{path}.quarantine.staging``) are also parsed and included in the returned list
+        so that ``drain_buffer()`` replays them against the ledger in the same pass rather
+        than silently deferring them to the next boot cycle.  Malformed quarantine lines
+        that cannot be deserialized are quarantined in ``_dead_letter`` rather than
+        silently dropped.  The combined list of on-disk entries, write-error entries, and
+        quarantine entries is sorted in ascending order by ``receipt["metadata"]["sequence"]``
+        to protect the ledger's linear hash chain from out-of-order replay when entries
+        arrive from concurrent push paths.  The sort key is evaluated inside a guarded
+        helper that catches :exc:`TypeError` and :exc:`ValueError` so a non-numeric
+        sequence value in a corrupted entry falls back to ``0`` rather than aborting the
+        entire drain pass.
 
         **Two-phase commit scope**: the active buffer file is atomically renamed to the
         staging path (``{path}.staging``) via :func:`os.replace`.  Before that rename,
@@ -668,13 +674,16 @@ class OffGridBuffer:
         :exc:`OSError`, the active file is unchanged, the exception re-raises, and no
         counter is modified.
 
-        Disk lines that cannot be parsed as valid JSON or that are missing the
-        ``receipt`` / ``sieved_content`` keys are quarantined in ``_dead_letter`` under
-        the count lock rather than silently dropped; :attr:`dead_letter_count` reflects
-        the accumulated quarantine count.  Returns an empty list when the buffer file does
-        not exist and no write-error entries are pending.
+        Disk lines and quarantine lines that cannot be parsed as valid JSON or that are
+        missing the ``receipt`` / ``sieved_content`` keys are quarantined in
+        ``_dead_letter`` under the count lock rather than silently dropped;
+        :attr:`dead_letter_count` reflects the accumulated quarantine count.  Returns an
+        empty list when the buffer file does not exist, no write-error entries are
+        pending, and no quarantine entries were recovered.
 
-        :return: List of ``(receipt_dict, sieved_content)`` tuples sorted by sequence.
+        :return: List of ``(receipt_dict, sieved_content)`` tuples sorted by sequence,
+            combining on-disk JSONL entries, ``_write_errors`` entries, and pre-drain
+            quarantine snapshot entries.
         :rtype: list[tuple[dict[str, Any], str]]
         :raises OSError: If the buffer file exists but :meth:`pathlib.Path.read_text`
             raises :exc:`OSError` (e.g., permissions change, device removal, filesystem
@@ -711,6 +720,20 @@ class OffGridBuffer:
                     except (OSError, UnicodeDecodeError):
                         _quarantine_text = ""
 
+            quarantine_entries: list[tuple[dict[str, Any], str]] = []
+            for _ql in _quarantine_text.splitlines():
+                _qs: str = _ql.strip()
+                if not _qs:
+                    continue
+                try:
+                    _qobj: dict[str, Any] = json.loads(_qs)
+                    quarantine_entries.append((_qobj["receipt"], _qobj["sieved_content"]))
+                except (json.JSONDecodeError, KeyError):
+                    with self._count_lock:
+                        if len(self._dead_letter) >= _DEAD_LETTER_MAX:
+                            del self._dead_letter[0]
+                        self._dead_letter.append(_qs)
+
             if not self._path.exists():
                 if _quarantine_text.strip():
                     _stg_tmp: str = ""
@@ -735,8 +758,11 @@ class OffGridBuffer:
                 with self._count_lock:
                     self._committed = 0
                     self._drain_write_error_snapshot = _error_snapshot_count
-                pending_error_entries.sort(key=_seq_key)
-                return pending_error_entries
+                all_entries: list[tuple[dict[str, Any], str]] = (
+                    pending_error_entries + quarantine_entries
+                )
+                all_entries.sort(key=_seq_key)
+                return all_entries
 
             with self._count_lock:
                 self._drain_read_failed = False
@@ -765,6 +791,7 @@ class OffGridBuffer:
                     continue
 
             entries.extend(pending_error_entries)
+            entries.extend(quarantine_entries)
             entries.sort(key=_seq_key)
 
             file_entry_count: int = disk_line_count

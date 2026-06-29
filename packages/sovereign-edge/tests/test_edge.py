@@ -689,6 +689,99 @@ class TestOffGridBuffer:
             buf.commit_drain()
             buf.close()
 
+    def test_drain_returns_quarantine_entries_alongside_active_entries(
+        self, tmp_path: Path
+    ) -> None:
+        """drain() must include pre-drain quarantine snapshot entries in its return value
+        so that drain_buffer() replays them against the ledger in the same pass.
+
+        Previously the quarantine text was merged into the staging file for crash recovery
+        but was never parsed and returned to the caller: quarantine entries could survive a
+        drain cycle without ever being submitted to the ledger, accumulating silently in the
+        staging file until the next process restart triggered _recover_staging().
+
+        Invariants verified:
+        - The returned list contains every active JSONL entry.
+        - The returned list also contains every well-formed quarantine entry.
+        - Returned entries are sorted by sequence in ascending order across both sources.
+        - commit_drain() unlinks .staging and .quarantine.staging; no data loss occurs.
+        - After commit_drain() the active JSONL file and quarantine file are both absent,
+          confirming a clean drain cycle.
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        buf_path: str = str(tmp_path / "buf.jsonl")
+        quarantine_path: Path = Path(buf_path + ".quarantine")
+        quarantine_staging_path: Path = Path(buf_path + ".quarantine.staging")
+        staging_path: Path = Path(buf_path + ".staging")
+
+        buf: OffGridBuffer = OffGridBuffer(buf_path)
+        active_receipt: dict[str, Any] = {
+            "timestamp": _TIMESTAMP,
+            "payload_hash": "hash_active",
+            "public_key": "base64key==",
+            "signature": "sig_active",
+            "metadata": {"sequence": 2},
+        }
+        quarantine_receipt: dict[str, Any] = {
+            "timestamp": _TIMESTAMP,
+            "payload_hash": "hash_quarantine",
+            "public_key": "base64key==",
+            "signature": "sig_quarantine",
+            "metadata": {"sequence": 1},
+        }
+        try:
+            buf.push(active_receipt, "active content")
+            buf.flush()
+
+            quarantine_path.write_text(
+                json.dumps(
+                    {"receipt": quarantine_receipt, "sieved_content": "quarantine content"}
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            drained: list[tuple[dict[str, Any], str]] = buf.drain()
+
+            assert len(drained) == 2, (
+                f"drain() must return both the active entry and the quarantine entry; "
+                f"got {len(drained)} entries — quarantine entries are not being returned"
+            )
+
+            returned_hashes: set[str] = {r["payload_hash"] for r, _ in drained}
+            assert active_receipt["payload_hash"] in returned_hashes, (
+                "active buffer entry must appear in drain() return value"
+            )
+            assert quarantine_receipt["payload_hash"] in returned_hashes, (
+                "quarantine entry must appear in drain() return value; "
+                "it was merged into staging for crash recovery but never returned for replay"
+            )
+
+            sequences: list[int] = [
+                r.get("metadata", {}).get("sequence", 0) for r, _ in drained
+            ]
+            assert sequences == sorted(sequences), (
+                f"drain() must return entries sorted by sequence; got {sequences}"
+            )
+            assert sequences[0] == 1, (
+                "quarantine entry (sequence=1) must sort before active entry (sequence=2)"
+            )
+
+            buf.commit_drain()
+
+            assert not staging_path.exists(), (
+                "commit_drain() must delete the .staging file"
+            )
+            assert not quarantine_staging_path.exists(), (
+                "commit_drain() must delete .quarantine.staging (the rotated snapshot)"
+            )
+        finally:
+            buf.drain()
+            buf.commit_drain()
+            buf.close()
+
     def test_lock_probe_permission_error_fails_closed(self, tmp_path: Path) -> None:
         """OffGridBuffer must raise SovereignStorageError and leave the lock file
         untouched when os.kill raises PermissionError during liveness probing.
