@@ -2398,6 +2398,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   using `typing.cast` (imported alongside the existing `typing` imports), satisfying
   strict type checkers without changing runtime behavior.
 
+- **`OffGridBuffer.drain()` — fail-loud on rotated quarantine staging read failure**
+  (`buffer.py`): The inner `try/except (OSError, UnicodeDecodeError)` block that reads
+  `{path}.quarantine.staging` after the atomic rename from `{path}.quarantine` previously
+  swallowed any read error by setting `_quarantine_text = ""`.  At that point the entry
+  data has already been moved out of the live quarantine path; silently discarding the
+  failure would lose those entries with no diagnostic signal.  The handler now raises
+  `SovereignStorageError("Catastrophic failure reading rotated quarantine staging log; "
+  "aborting transaction to preserve disk integrity")` chained from the original
+  `OSError` / `UnicodeDecodeError`, aborting the transaction before the active-to-staging
+  rename occurs so the active buffer remains intact for the next retry.  The outer
+  `except OSError:` guard (which catches `os.replace` failures on the rotation itself)
+  is unchanged and still falls back to reading the original quarantine path.
+
+- **`OffGridBuffer.commit_drain()` — enforce operational lock alignment with `drain()`**
+  (`buffer.py`): `commit_drain()` previously wrapped only its counter mutation under
+  `_count_lock`, leaving the staging-file and quarantine-staging-file unlinks outside
+  the `_drain_lock` that `drain()` holds for its entire transactional scope.  A
+  concurrent `commit_drain()` could therefore delete the staging file while `drain()`
+  was still constructing or merging into it — a window that is especially dangerous
+  during multi-threaded recovery replay.  `commit_drain()` now acquires `_drain_lock`
+  as its outer lock (matching `drain()`'s lock hierarchy of `_drain_lock → _count_lock`)
+  so that `drain()` and `commit_drain()` are fully mutually exclusive at the filesystem
+  level.  Two new tests verify: (1) the quarantine staging read failure raises
+  `SovereignStorageError` and preserves the active buffer; (2) a `commit_drain()` call
+  issued while `drain()` holds `_drain_lock` blocks until `drain()` releases it.
+
+  Total test count: **120 tests pass**.
+
 ## [1.1.0] - 2026-06-01
 
 ### Added

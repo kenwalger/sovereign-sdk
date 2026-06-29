@@ -859,6 +859,63 @@ class TestOffGridBuffer:
         finally:
             buf.close()
 
+    def test_drain_raises_sovereign_storage_error_on_quarantine_staging_read_failure(
+        self, tmp_path: Path
+    ) -> None:
+        """drain() must raise SovereignStorageError and leave the active buffer intact
+        when the rotated quarantine staging file cannot be read after a successful
+        atomic rename from ``{path}.quarantine`` to ``{path}.quarantine.staging``.
+
+        Once the rename succeeds the entry data has been moved out of the live quarantine
+        path.  Swallowing the subsequent read error would silently discard those entries.
+        drain() must instead abort the transaction by raising SovereignStorageError so
+        the caller can resolve the filesystem fault and retry without data loss.
+
+        The failure is induced naturally: the quarantine file is seeded with raw bytes
+        that are not valid UTF-8, so the ``read_text(encoding="utf-8")`` call on the
+        rotated staging snapshot raises :exc:`UnicodeDecodeError`, which is caught and
+        re-raised as :exc:`SovereignStorageError` by the updated handler.
+
+        Invariants verified:
+        - SovereignStorageError is raised with the expected message fragment.
+        - The active buffer file is preserved intact (the active-to-staging rename must
+          not have been executed before the exception propagates).
+        - The staging file must not exist after the exception.
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        buf_path: Path = tmp_path / "buf.jsonl"
+        quarantine_path: Path = Path(str(buf_path) + ".quarantine")
+        staging_path: Path = Path(str(buf_path) + ".staging")
+
+        buf: OffGridBuffer = OffGridBuffer(str(buf_path))
+        try:
+            buf.push(self._make_receipt("qsr"), "qsr content")
+            buf.flush()
+
+            # Write raw bytes that are not valid UTF-8; drain() will atomically rename
+            # this to .quarantine.staging and then call read_text(encoding="utf-8"),
+            # which raises UnicodeDecodeError — triggering the new SovereignStorageError.
+            quarantine_path.write_bytes(b"\xff\xfe\x00 not valid utf-8 \x80\x81\x82")
+
+            with pytest.raises(SovereignStorageError, match="quarantine staging log"):
+                buf.drain()
+
+            assert buf_path.exists(), (
+                "active buffer file must be preserved intact when drain() raises "
+                "SovereignStorageError — the active-to-staging rename must not have "
+                "occurred before the quarantine staging read failure propagated"
+            )
+            assert not staging_path.exists(), (
+                "staging file must not exist — drain() must have aborted before the "
+                "active-to-staging atomic rename"
+            )
+        finally:
+            buf.drain()
+            buf.commit_drain()
+            buf.close()
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -2750,6 +2807,75 @@ class TestOffGridBufferAsync:
         )
         assert not staging_path.exists(), (
             "staging file must be absent after concurrent commit_drain() completes"
+        )
+        buf.close()
+
+    def test_commit_drain_serialized_with_drain(self, tmp_path: Path) -> None:
+        """commit_drain() and drain() must be mutually exclusive via _drain_lock.
+
+        A drain() call that has acquired _drain_lock and rotated the active buffer to
+        the staging path must prevent a concurrent commit_drain() from starting until
+        drain() releases the lock.  Without this serialization, commit_drain() could
+        delete the staging file while drain() is still writing quarantine entries into
+        it, producing a permanently lost set of receipts.
+
+        Setup: push one entry and flush it to disk.  Patch ``os.replace`` in the
+        buffer module to gate drain() mid-execution immediately after it renames the
+        active buffer to the staging path.  While drain() is gated (still holding
+        _drain_lock), start commit_drain() in a separate thread and verify it has not
+        completed after a brief wait.  Then release drain(); both threads must finish
+        cleanly and the staging file must be absent after commit_drain() runs.
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        buf: OffGridBuffer = OffGridBuffer(str(tmp_path / "buf.jsonl"))
+        staging_path: Path = Path(str(tmp_path / "buf.jsonl") + ".staging")
+        receipt: dict[str, Any] = self._make_receipt("serial-drain", sequence=1)
+
+        buf.push(receipt, "serial-drain content")
+        buf.flush()
+
+        drain_past_rotation: threading.Event = threading.Event()
+        allow_drain_return: threading.Event = threading.Event()
+        commit_done: threading.Event = threading.Event()
+
+        original_os_replace = os.replace
+
+        def _gated_replace(src: Any, dst: Any) -> None:
+            original_os_replace(src, dst)
+            if str(dst) == str(staging_path):
+                drain_past_rotation.set()
+                allow_drain_return.wait(timeout=5.0)
+
+        def _do_commit_drain() -> None:
+            drain_past_rotation.wait(timeout=5.0)
+            buf.commit_drain()
+            commit_done.set()
+
+        with patch("sovereign_edge.buffer.os.replace", side_effect=_gated_replace):
+            drain_thread: threading.Thread = threading.Thread(target=buf.drain, daemon=True)
+            commit_thread: threading.Thread = threading.Thread(
+                target=_do_commit_drain, daemon=True
+            )
+            drain_thread.start()
+            commit_thread.start()
+
+            drain_past_rotation.wait(timeout=5.0)
+            assert not commit_done.wait(timeout=0.25), (
+                "commit_drain() completed while drain() still held _drain_lock — "
+                "the two operations are not serialised; the staging file lifecycle "
+                "is vulnerable to a race between concurrent drain and commit_drain"
+            )
+            allow_drain_return.set()
+            drain_thread.join(timeout=5.0)
+
+        commit_thread.join(timeout=5.0)
+        assert commit_done.is_set(), (
+            "commit_drain() never completed after drain() released _drain_lock"
+        )
+        assert not staging_path.exists(), (
+            "staging file must be absent after commit_drain() ran post-serialisation"
         )
         buf.close()
 

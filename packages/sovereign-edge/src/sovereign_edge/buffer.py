@@ -697,7 +697,12 @@ class OffGridBuffer:
             intact so the operator can inspect, truncate, or repair it before retrying
             :meth:`drain`.  This exception is deliberately distinct from the dead-letter
             path (which handles complete-but-corrupt lines such as ``{bad_json}\\n``) to
-            ensure a crash-truncation is never silently absorbed.
+            ensure a crash-truncation is never silently absorbed.  Also raised when the
+            rotated quarantine staging file (``{path}.quarantine.staging``) cannot be read
+            after the atomic rename from ``{path}.quarantine`` succeeds — the entry data
+            has already been moved out of the live quarantine path and would be silently
+            lost if the read failure were swallowed; the exception aborts the transaction
+            so the caller must resolve the filesystem fault before retrying.
         :raises OSError: If the buffer file exists but :meth:`pathlib.Path.read_text`
             raises :exc:`OSError` (e.g., permissions change, device removal, filesystem
             error after existence was confirmed) — :attr:`drain_read_failed` is set to
@@ -725,8 +730,11 @@ class OffGridBuffer:
                     os.replace(self._quarantine_path, self._quarantine_staging_path)
                     try:
                         _quarantine_text = self._quarantine_staging_path.read_text(encoding="utf-8")
-                    except (OSError, UnicodeDecodeError):
-                        _quarantine_text = ""
+                    except (OSError, UnicodeDecodeError) as _qr_err:
+                        raise SovereignStorageError(
+                            "Catastrophic failure reading rotated quarantine staging log; "
+                            "aborting transaction to preserve disk integrity"
+                        ) from _qr_err
                 except OSError:
                     try:
                         _quarantine_text = self._quarantine_path.read_text(encoding="utf-8")
@@ -908,28 +916,32 @@ class OffGridBuffer:
         ``_drain_write_error_snapshot`` is ``0`` and the staging / quarantine files may
         not exist.
 
-        The entire body executes under a single ``_count_lock`` acquisition so that
-        concurrent recovery threads cannot clear the shared staging or quarantine
-        snapshot files out from underneath an active parallel replay — only one
-        thread's cleanup wins; every racing caller observes :exc:`FileNotFoundError`
-        from the unlink attempt, which is silently swallowed inside the lock scope.
+        The entire body is first serialised under the same ``_drain_lock`` that
+        :meth:`drain` holds for its full transactional scope, making
+        :meth:`commit_drain` and :meth:`drain` mutually exclusive at the filesystem
+        level.  Within that outer lock, all filesystem unlinks and counter updates
+        execute under ``_count_lock`` so that concurrent recovery threads cannot race
+        on the shared staging artefacts — the first winner unlinks, every racing
+        caller observes :exc:`FileNotFoundError` from its unlink attempt, which is
+        silently swallowed inside the lock scope.
 
         :return: None
         :rtype: None
         """
-        with self._count_lock:
-            try:
-                self._staging_path.unlink()
-            except FileNotFoundError:
-                pass
-            try:
-                self._quarantine_staging_path.unlink()
-            except (FileNotFoundError, OSError):
-                pass
-            _snap: int = self._drain_write_error_snapshot
-            if _snap:
-                del self._write_errors[:_snap]
-                self._drain_write_error_snapshot = 0
+        with self._drain_lock:
+            with self._count_lock:
+                try:
+                    self._staging_path.unlink()
+                except FileNotFoundError:
+                    pass
+                try:
+                    self._quarantine_staging_path.unlink()
+                except (FileNotFoundError, OSError):
+                    pass
+                _snap: int = self._drain_write_error_snapshot
+                if _snap:
+                    del self._write_errors[:_snap]
+                    self._drain_write_error_snapshot = 0
 
     def close(self) -> None:
         """Flush all pending writes and terminate the background worker thread.
