@@ -2177,6 +2177,77 @@ class TestEdgePipelineDrainBuffer:
             pipeline_b._buffer.close()
             open_ledger.close()
 
+    def test_drain_buffer_quarantine_write_failure_preserves_staging(self, tmp_path: Path) -> None:
+        """drain_buffer() must raise RuntimeError and preserve the staging file when the
+        quarantine write fails with OSError during a permanent-fault replay entry.
+
+        When append_receipt raises ValueError (a permanent format fault) and the subsequent
+        quarantine file write raises OSError, the RuntimeError must propagate out of
+        drain_buffer() and commit_drain() must never be reached.  The staging file must
+        remain on disk so the operator can inspect and manually recover the buffered entries.
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        import builtins
+
+        buffer_path: str = str(tmp_path / ".edge_buffer.jsonl")
+        staging_path: Path = Path(buffer_path + ".staging")
+        quarantine_path: Path = Path(buffer_path + ".quarantine")
+        key_path: str = str(tmp_path / ".keys" / "edge_identity.pem")
+
+        closed_ledger: SovereignLedger = SovereignLedger(":memory:")
+        pipeline_a: EdgePipeline = EdgePipeline(
+            ledger=closed_ledger,
+            signing_key=key_path,
+            buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
+        )
+        closed_ledger.close()
+        try:
+            pipeline_a.process(_seal_frame(tmp_path))
+            pipeline_a._buffer.flush()
+            assert pipeline_a._buffer.size == 1
+        finally:
+            pipeline_a._buffer.close()
+
+        open_ledger: SovereignLedger = SovereignLedger(str(tmp_path / "recovery.db"))
+        pipeline_b: EdgePipeline = EdgePipeline(
+            ledger=open_ledger,
+            signing_key=key_path,
+            buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
+        )
+        _real_open = builtins.open
+
+        def _fail_on_quarantine(file: Any, *args: Any, **kwargs: Any) -> Any:
+            if str(file) == str(pipeline_b._buffer.quarantine_path):
+                raise OSError("simulated quarantine disk fault")
+            return _real_open(file, *args, **kwargs)
+
+        try:
+            with patch.object(
+                open_ledger,
+                "append_receipt",
+                side_effect=ValueError("permanent schema rejection"),
+            ):
+                with patch("builtins.open", side_effect=_fail_on_quarantine):
+                    with pytest.raises(RuntimeError, match="quarantine") as exc_info:
+                        pipeline_b.drain_buffer()
+            assert isinstance(exc_info.value.__cause__, OSError), (
+                "RuntimeError.__cause__ must be the OSError from the quarantine write failure"
+            )
+            assert staging_path.exists(), (
+                "staging file must remain on disk after drain_buffer() raises — "
+                "commit_drain() must not have been called when quarantine write fails"
+            )
+            assert not quarantine_path.exists(), (
+                "quarantine file must not have been created when the write raised OSError"
+            )
+        finally:
+            pipeline_b._buffer.close()
+            open_ledger.close()
+
 
 # ---------------------------------------------------------------------------
 # TestOffGridBufferAsync

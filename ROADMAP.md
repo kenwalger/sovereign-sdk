@@ -1108,6 +1108,19 @@ committed = pipeline.drain_buffer()
   added to ``TestOffGridBuffer``.
   **112 passed, 0 skipped (edge); 401 passed, 1 skipped (workspace).**
 
+* [x] **Quarantine write failure raises `RuntimeError` and preserves staging file**
+  (`pipeline.py`): The `except OSError: pass` on the quarantine append inside
+  `drain_buffer()`'s `except (ValueError, TypeError):` clause is replaced with
+  `except OSError as _qf_err: raise RuntimeError(...)` so that a filesystem fault
+  on the quarantine path immediately halts the drain pass; the staging file is not
+  deleted because `commit_drain()` is never reached.  The `drain_buffer()` docstring
+  four-tier exception hierarchy updated.  `test_drain_buffer_quarantine_write_failure_preserves_staging`
+  added to `TestEdgePipelineDrainBuffer`: patches `append_receipt` to raise `ValueError`
+  and `builtins.open` selectively for the quarantine path to raise `OSError`; asserts
+  `RuntimeError` with ``__cause__`` being `OSError`; asserts staging file exists; asserts
+  quarantine file absent.  `TestEdgePipelineDrainBuffer` grows from 12 to 13 cases.
+  **113 passed, 0 skipped (edge); 402 passed, 1 skipped (workspace).**
+
 ---
 
 ## Phase 10 — Isolated Context Vault & Governance Server (`sovereign-vault`)

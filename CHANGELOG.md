@@ -1843,6 +1843,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with no data loss.
   **Suite: 112 passed, 0 skipped (sovereign-edge); 401 passed, 1 skipped (workspace).**
 
+- **`EdgePipeline.drain_buffer()` — quarantine write failure raises `RuntimeError` and
+  preserves the staging file** (`pipeline.py`): The ``except OSError: pass`` clause on the
+  quarantine file append inside the ``except (ValueError, TypeError):`` handler is replaced
+  with ``except OSError as _qf_err: raise RuntimeError(f"Permanent-fault receipt could not
+  be written to the quarantine file '...'; the staging file is preserved intact for manual
+  recovery — verify filesystem accessibility before retrying drain_buffer()")`` chained from
+  the ``OSError``.  Previously, if the quarantine directory was unwritable or the path
+  crossed a permission boundary, the permanent-fault entry was silently discarded with no
+  durable record and no operator alert.  The ``RuntimeError`` propagates to the outer
+  ``except Exception as exc: crash_exc = exc`` handler; the ``finally`` block extends
+  ``requeue`` with the unprocessed tail (including the failing entry at index ``processed``,
+  since ``processed += 1`` was not reached before the raise); the re-queue pass attempts
+  ``push()`` so the entry lands in the active JSONL buffer; ``commit_drain()`` is never
+  reached, leaving the staging file intact.  The ``drain_buffer()`` docstring ``:raises:``
+  section updated to document the quarantine-write-failure ``RuntimeError`` path.
+
+- **`test_drain_buffer_quarantine_write_failure_preserves_staging`**
+  (``TestEdgePipelineDrainBuffer``, ``test_edge.py``): Buffers one receipt via a closed
+  ledger (``pipeline_a`` pattern), opens a recovery ``pipeline_b``, patches
+  ``append_receipt`` to raise ``ValueError``, and patches ``builtins.open`` selectively to
+  raise ``OSError("simulated quarantine disk fault")`` only when opening
+  ``pipeline_b._buffer.quarantine_path``.  Asserts ``pytest.raises(RuntimeError,
+  match="quarantine")``, asserts ``exc_info.value.__cause__`` is an ``OSError`` instance,
+  asserts ``staging_path.exists()`` (``commit_drain()`` not called), and asserts
+  ``quarantine_path`` is absent (OSError prevented file creation).
+  ``TestEdgePipelineDrainBuffer`` grows from 12 to 13 cases.
+  **Suite: 113 passed, 0 skipped (sovereign-edge); 402 passed, 1 skipped (workspace).**
+
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing
   sensor observations into versioned, tamper-evident, minified JSON transmission envelopes with

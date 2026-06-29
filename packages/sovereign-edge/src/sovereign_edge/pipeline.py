@@ -353,7 +353,10 @@ class EdgePipeline:
         :exc:`ValueError` / :exc:`TypeError` → permanent format fault, entry
         appended directly to the quarantine file at
         :attr:`~sovereign_edge.buffer.OffGridBuffer.quarantine_path` without re-queuing
-        (bypassing the replay cycle entirely to prevent infinite requeue loops);
+        (bypassing the replay cycle entirely to prevent infinite requeue loops); if the
+        quarantine write itself raises :exc:`OSError`, a :exc:`RuntimeError` is raised
+        immediately — the entry has no durable isolation path and the staging file must be
+        preserved intact for manual recovery;
         :exc:`~sovereign_ledger.SovereignStorageError` / ``sqlite3.Error`` → transient
         storage fault, entry re-queued for retry on the next drain pass; all other
         :exc:`Exception` subclasses → unhandled, propagate to the outer
@@ -422,9 +425,12 @@ class EdgePipeline:
             re-queued and excluded from the returned list.
         :rtype: list[str]
         :raises RuntimeError: If the off-grid buffer file raises :exc:`OSError` on its
-            read or atomic rotation (chained from the :exc:`OSError`), or if one or more
-            entries cannot be re-queued after a ledger failure without a concurrent replay
-            crash.  The exception is raised only after all requeue items have been attempted.
+            read or atomic rotation (chained from the :exc:`OSError`); if a quarantine
+            write for a permanent-fault entry raises :exc:`OSError` (chained from the
+            :exc:`OSError`) — in this case the staging file is preserved intact for
+            manual recovery; or if one or more entries cannot be re-queued after a ledger
+            failure without a concurrent replay crash.  The exception is raised only after
+            all requeue items have been attempted.
         :raises SovereignDoubleFaultError: If the replay loop is interrupted by an
             unhandled exception AND one or more entries cannot be re-queued to the buffer
             (i.e., both the ledger replay path and the buffer recovery path fail
@@ -463,8 +469,13 @@ class EdgePipeline:
                                 + "\n"
                             )
                             _qf.flush()
-                    except OSError:
-                        pass
+                    except OSError as _qf_err:
+                        raise RuntimeError(
+                            f"Permanent-fault receipt could not be written to the quarantine "
+                            f"file '{self._buffer.quarantine_path}'; the staging file is "
+                            "preserved intact for manual recovery — verify filesystem "
+                            "accessibility before retrying drain_buffer()"
+                        ) from _qf_err
                 except (SovereignStorageError, sqlite3.Error):
                     requeue.append((receipt_dict, sieved_content))
                 processed += 1
