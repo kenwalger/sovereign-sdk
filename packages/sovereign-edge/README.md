@@ -55,12 +55,12 @@ Register the package inside your local environment or workspace architecture usi
 
 ```toml
 [project]
-name = "sovereign-edge"
-version = "0.1.0"
+name = "sovereign-sdk-edge"
+version = "1.3.0"
 dependencies = [
-    "sovereign-core>=1.1.0",
-    "sovereign-ledger>=1.1.0",
-    "sovereign-sieve>=1.1.0",
+    "sovereign-sdk-core>=1.3.0",
+    "sovereign-sdk-ledger>=1.3.0",
+    "sovereign-sdk-sieve>=1.3.0",
 ]
 ```
 

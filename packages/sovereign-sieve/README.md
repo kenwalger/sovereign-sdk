@@ -9,13 +9,13 @@
 ## Installation
 
 ```bash
-pip install sovereign-sieve
+pip install sovereign-sdk-sieve
 ```
 
 Or, within a `uv` workspace:
 
 ```bash
-uv add sovereign-sieve
+uv add sovereign-sdk-sieve
 ```
 
 ---

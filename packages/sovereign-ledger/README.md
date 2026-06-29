@@ -13,7 +13,7 @@ chain that makes out-of-band filesystem tampering mathematically detectable.
 ## Installation
 
 ```bash
-pip install sovereign-ledger
+pip install sovereign-sdk-ledger
 ```
 
 Requires Python 3.12 or later. Zero runtime dependencies beyond the Python standard library.

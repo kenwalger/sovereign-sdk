@@ -4,14 +4,14 @@ requires-python = ">=3.12"
 
 [manifest]
 members = [
-    "sovereign-core",
-    "sovereign-edge",
-    "sovereign-fastapi",
-    "sovereign-ledger",
-    "sovereign-runtime",
+    "sovereign-sdk-core",
+    "sovereign-sdk-edge",
+    "sovereign-sdk-fastapi",
+    "sovereign-sdk-ledger",
+    "sovereign-sdk-runtime",
+    "sovereign-sdk-sensor",
+    "sovereign-sdk-sieve",
     "sovereign-sdk-workspace",
-    "sovereign-sensor",
-    "sovereign-sieve",
 ]
 
 [[package]]
@@ -421,8 +421,8 @@ wheels = [
 ]
 
 [[package]]
-name = "sovereign-core"
-version = "1.1.0"
+name = "sovereign-sdk-core"
+version = "1.3.0"
 source = { editable = "packages/sovereign-core" }
 dependencies = [
     { name = "cryptography" },
@@ -436,69 +436,79 @@ requires-dist = [
 ]
 
 [[package]]
-name = "sovereign-edge"
-version = "0.1.0"
+name = "sovereign-sdk-edge"
+version = "1.3.0"
 source = { editable = "packages/sovereign-edge" }
 dependencies = [
-    { name = "sovereign-core" },
-    { name = "sovereign-ledger" },
-    { name = "sovereign-sieve" },
+    { name = "sovereign-sdk-core" },
+    { name = "sovereign-sdk-ledger" },
+    { name = "sovereign-sdk-sieve" },
 ]
 
 [package.optional-dependencies]
 dev = [
-    { name = "sovereign-sensor" },
+    { name = "sovereign-sdk-sensor" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "sovereign-core", editable = "packages/sovereign-core" },
-    { name = "sovereign-ledger", editable = "packages/sovereign-ledger" },
-    { name = "sovereign-sensor", marker = "extra == 'dev'", editable = "packages/sovereign-sensor" },
-    { name = "sovereign-sieve", editable = "packages/sovereign-sieve" },
+    { name = "sovereign-sdk-core", editable = "packages/sovereign-core" },
+    { name = "sovereign-sdk-ledger", editable = "packages/sovereign-ledger" },
+    { name = "sovereign-sdk-sensor", marker = "extra == 'dev'", editable = "packages/sovereign-sensor" },
+    { name = "sovereign-sdk-sieve", editable = "packages/sovereign-sieve" },
 ]
 provides-extras = ["dev"]
 
 [[package]]
-name = "sovereign-fastapi"
-version = "1.1.0"
+name = "sovereign-sdk-fastapi"
+version = "1.3.0"
 source = { editable = "packages/sovereign-fastapi" }
 dependencies = [
-    { name = "sovereign-core" },
+    { name = "sovereign-sdk-core" },
     { name = "starlette" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "sovereign-core", editable = "packages/sovereign-core" },
+    { name = "sovereign-sdk-core", editable = "packages/sovereign-core" },
     { name = "starlette", specifier = ">=0.35.0,<1.0.0" },
 ]
 
 [[package]]
-name = "sovereign-ledger"
-version = "1.1.0"
+name = "sovereign-sdk-ledger"
+version = "1.3.0"
 source = { editable = "packages/sovereign-ledger" }
 
 [[package]]
-name = "sovereign-runtime"
-version = "1.1.0"
+name = "sovereign-sdk-runtime"
+version = "1.3.0"
 source = { editable = "packages/sovereign-runtime" }
 dependencies = [
     { name = "click" },
     { name = "python-dotenv" },
-    { name = "sovereign-core" },
+    { name = "sovereign-sdk-core" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
-    { name = "sovereign-core", editable = "packages/sovereign-core" },
+    { name = "sovereign-sdk-core", editable = "packages/sovereign-core" },
 ]
 
 [[package]]
+name = "sovereign-sdk-sensor"
+version = "1.3.0"
+source = { editable = "packages/sovereign-sensor" }
+
+[[package]]
+name = "sovereign-sdk-sieve"
+version = "1.3.0"
+source = { editable = "packages/sovereign-sieve" }
+
+[[package]]
 name = "sovereign-sdk-workspace"
-version = "1.1.0"
+version = "1.3.0"
 source = { virtual = "." }
 
 [package.dev-dependencies]
@@ -507,13 +517,13 @@ dev = [
     { name = "httpx" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
-    { name = "sovereign-core" },
-    { name = "sovereign-edge" },
-    { name = "sovereign-fastapi" },
-    { name = "sovereign-ledger" },
-    { name = "sovereign-runtime" },
-    { name = "sovereign-sensor" },
-    { name = "sovereign-sieve" },
+    { name = "sovereign-sdk-core" },
+    { name = "sovereign-sdk-edge" },
+    { name = "sovereign-sdk-fastapi" },
+    { name = "sovereign-sdk-ledger" },
+    { name = "sovereign-sdk-runtime" },
+    { name = "sovereign-sdk-sensor" },
+    { name = "sovereign-sdk-sieve" },
 ]
 
 [package.metadata]
@@ -524,24 +534,14 @@ dev = [
     { name = "httpx", specifier = ">=0.24.0" },
     { name = "pytest", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", specifier = ">=1.0.0" },
-    { name = "sovereign-core", editable = "packages/sovereign-core" },
-    { name = "sovereign-edge", editable = "packages/sovereign-edge" },
-    { name = "sovereign-fastapi", editable = "packages/sovereign-fastapi" },
-    { name = "sovereign-ledger", editable = "packages/sovereign-ledger" },
-    { name = "sovereign-runtime", editable = "packages/sovereign-runtime" },
-    { name = "sovereign-sensor", editable = "packages/sovereign-sensor" },
-    { name = "sovereign-sieve", editable = "packages/sovereign-sieve" },
+    { name = "sovereign-sdk-core", editable = "packages/sovereign-core" },
+    { name = "sovereign-sdk-edge", editable = "packages/sovereign-edge" },
+    { name = "sovereign-sdk-fastapi", editable = "packages/sovereign-fastapi" },
+    { name = "sovereign-sdk-ledger", editable = "packages/sovereign-ledger" },
+    { name = "sovereign-sdk-runtime", editable = "packages/sovereign-runtime" },
+    { name = "sovereign-sdk-sensor", editable = "packages/sovereign-sensor" },
+    { name = "sovereign-sdk-sieve", editable = "packages/sovereign-sieve" },
 ]
-
-[[package]]
-name = "sovereign-sensor"
-version = "0.1.0"
-source = { editable = "packages/sovereign-sensor" }
-
-[[package]]
-name = "sovereign-sieve"
-version = "1.1.0"
-source = { editable = "packages/sovereign-sieve" }
 
 [[package]]
 name = "starlette"
