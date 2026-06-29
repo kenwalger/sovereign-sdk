@@ -59,8 +59,8 @@ print(result.tax_savings_percentage) # e.g. 66.6667 (%)
   `optimized_token_count`, and `tax_savings_percentage` computed via UTF-8 byte-density heuristic
 * [x] `SieveOutput` dataclass with `text`, `raw_token_count`, `optimized_token_count`, and
   `tax_savings_percentage` fields
-* [x] `packages/sovereign-sieve/pyproject.toml` declaring `sovereign-sieve` as a workspace member
-  at version `1.1.0` with zero runtime dependencies
+* [x] `packages/sovereign-sieve/pyproject.toml` declaring `sovereign-sdk-sieve` as a workspace member
+  at version `1.3.0` with zero runtime dependencies
 * [x] 67-case test suite in `packages/sovereign-sieve/tests/test_sieve.py` covering determinism,
   idempotency, all filler categories, edge cases, Unicode, malformed inputs, and metrics arithmetic
 
@@ -178,9 +178,9 @@ Key deliverables:
 
 ### PyPi
 
-* [x] `sovereign-core` package
-* [x] `sovereign-fastapi` package
-* [x] `sovereign-sieve` package
+* [x] `sovereign-sdk-core` package
+* [x] `sovereign-sdk-fastapi` package
+* [x] `sovereign-sdk-sieve` package
 
 ---
 
@@ -1274,6 +1274,6 @@ sieve, sign, or verify operations.  All cryptographic operations run on local si
 3. **Zero regression** — Each phase ships with a complete test suite maintaining
 100% pass rate across the entire workspace.  No test may be deleted or marked xfail
 to make a phase land.
-4. **Dependency minimalism** — `sovereign-core` must never take on a high-compute
+4. **Dependency minimalism** — `sovereign-sdk-core` must never take on a high-compute
 dependency (PyTorch, transformers, etc.).  Framework adapters carry their own
-optional dependency trees via extras (`pip install sovereign-fastapi[all]`).
+optional dependency trees via extras (`pip install sovereign-sdk-fastapi[all]`).

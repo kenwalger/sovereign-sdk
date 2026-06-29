@@ -3,7 +3,7 @@ Sovereign Core
 Data provenance, cryptographic identity, and ingestion boundaries.
 """
 
-__version__ = "1.1.0"
+__version__ = "1.3.0"
 
 from .crypto import ForensicReceipt, PublicKeyBundle, SuccessionReceipt, SovereignKeyManager, SovereignStorageError
 from .gateway import SessionContext

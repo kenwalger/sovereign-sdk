@@ -109,7 +109,7 @@ This repository is managed as an integrated `uv` workspace separating the crypto
 For scripts, batch pipelines, and offline data-processing workers that do not require cryptographic signing, `sovereign-sieve` delivers the Prose Tax regex engine as a zero-dependency synchronous utility:
 
 ```bash
-pip install sovereign-sieve
+pip install sovereign-sdk-sieve
 ```
 
 ```python

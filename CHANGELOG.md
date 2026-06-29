@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — 2026-06-29
+
+### Changed
+
+- **Unified `sovereign-sdk-*` distribution namespace**: All seven workspace packages
+  renamed under the `sovereign-sdk-` prefix to establish a consistent, unambiguous
+  PyPI namespace for the full SDK suite.  Python import paths (`sovereign_core`,
+  `sovereign_ledger`, etc.) are unchanged; only the pip-installable distribution names
+  are updated.
+
+  | Previous name         | New name (`1.3.0`)       |
+  |---|---|
+  | `sovereign-core`      | `sovereign-sdk-core`     |
+  | `sovereign-ledger`    | `sovereign-sdk-ledger`   |
+  | `sovereign-sieve`     | `sovereign-sdk-sieve`    |
+  | `sovereign-fastapi`   | `sovereign-sdk-fastapi`  |
+  | `sovereign-runtime`   | `sovereign-sdk-runtime`  |
+  | `sovereign-sensor`    | `sovereign-sdk-sensor`   |
+  | `sovereign-sdk-edge`  | `sovereign-sdk-edge`     |
+
+- **Version baseline `1.3.0`**: All workspace packages normalized to `1.3.0`.
+  Previously `sovereign-sensor` (`0.1.0`) and `sovereign-sdk-edge` (`0.1.0`) were
+  at pre-release version identifiers; both are promoted to the unified baseline.
+
+- **Inter-package dependency gates updated**: `sovereign-sdk-fastapi`,
+  `sovereign-sdk-runtime`, and `sovereign-sdk-edge` internal dependency declarations
+  updated to reference the new `sovereign-sdk-*` distribution names at `>=1.3.0`.
+
 ## [Unreleased]
 
 ### Added

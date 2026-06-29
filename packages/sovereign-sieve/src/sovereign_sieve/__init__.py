@@ -8,7 +8,7 @@ framework or cryptographic signing layer.
 
 from .sieve import SieveOutput, pure_sieve, sieve_with_metrics
 
-__version__ = "1.1.0"
+__version__ = "1.3.0"
 
 __all__ = [
     "pure_sieve",
