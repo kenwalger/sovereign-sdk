@@ -908,18 +908,24 @@ class OffGridBuffer:
         ``_drain_write_error_snapshot`` is ``0`` and the staging / quarantine files may
         not exist.
 
+        The entire body executes under a single ``_count_lock`` acquisition so that
+        concurrent recovery threads cannot clear the shared staging or quarantine
+        snapshot files out from underneath an active parallel replay — only one
+        thread's cleanup wins; every racing caller observes :exc:`FileNotFoundError`
+        from the unlink attempt, which is silently swallowed inside the lock scope.
+
         :return: None
         :rtype: None
         """
-        try:
-            self._staging_path.unlink()
-        except FileNotFoundError:
-            pass
-        try:
-            self._quarantine_staging_path.unlink()
-        except (FileNotFoundError, OSError):
-            pass
         with self._count_lock:
+            try:
+                self._staging_path.unlink()
+            except FileNotFoundError:
+                pass
+            try:
+                self._quarantine_staging_path.unlink()
+            except (FileNotFoundError, OSError):
+                pass
             _snap: int = self._drain_write_error_snapshot
             if _snap:
                 del self._write_errors[:_snap]

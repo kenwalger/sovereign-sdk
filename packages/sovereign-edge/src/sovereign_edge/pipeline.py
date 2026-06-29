@@ -23,23 +23,31 @@ class SovereignDoubleFaultError(RuntimeError):
 
     * **Single-receipt fault** (raised from :meth:`EdgePipeline.process`): the ledger
       was unreachable (raising :exc:`~sovereign_ledger.SovereignStorageError` or
-      ``sqlite3.Error``) and the off-grid buffer push also failed.  The fully signed
-      :class:`~sovereign_core.crypto.ForensicReceipt` dict is attached via :attr:`receipt`
-      so the host application can route it through an alternative channel.
+      ``sqlite3.Error``) and the off-grid buffer push also failed.  A compound dict
+      containing the fully signed :class:`~sovereign_core.crypto.ForensicReceipt` dict
+      under the ``"receipt"`` key and the associated sieved text content string under
+      the ``"content"`` key is attached via :attr:`receipt` so the host application can
+      route it through an alternative channel with full payload context preserved.
 
     * **Batch-receipt fault** (raised from :meth:`EdgePipeline.drain_buffer`): the
       ledger replay loop crashed via an unhandled exception AND one or more entries
       could not be re-queued to the buffer (e.g. the buffer worker has terminated).
-      Every unrecoverable receipt dict is collected in :attr:`uncommitted_receipts`
-      so the host can perform out-of-band recovery rather than silently losing them.
+      Every unrecoverable compound dict (``"receipt"`` key holding the ForensicReceipt
+      dict, ``"content"`` key holding the sieved text content string) is collected in
+      :attr:`uncommitted_receipts` so the host can perform out-of-band recovery rather
+      than silently losing them.
 
     :param args: Positional message arguments forwarded to :class:`RuntimeError`.
-    :param receipt: The fully signed ForensicReceipt dict involved in a single-receipt
-        fault.  ``None`` when the exception originates from a batch-drain double fault.
+    :param receipt: A compound dict with keys ``"receipt"`` (the fully signed
+        ForensicReceipt dict) and ``"content"`` (the associated sieved text content
+        string) involved in a single-receipt fault.  ``None`` when the exception
+        originates from a batch-drain double fault.
     :type receipt: dict[str, Any] | None
-    :param uncommitted_receipts: List of ForensicReceipt dicts that could not be
-        persisted or re-queued during a :meth:`~EdgePipeline.drain_buffer` replay pass.
-        ``None`` when the exception originates from a single-receipt :meth:`process` fault.
+    :param uncommitted_receipts: List of compound dicts each with keys ``"receipt"``
+        (ForensicReceipt dict) and ``"content"`` (sieved text content string) that
+        could not be persisted or re-queued during a
+        :meth:`~EdgePipeline.drain_buffer` replay pass.  ``None`` when the exception
+        originates from a single-receipt :meth:`process` fault.
     :type uncommitted_receipts: list[dict[str, Any]] | None
     :param ledger_error: The original exception (root cause of the fallback sequence)
         that triggered the buffer push attempt or crashed the replay loop.  Preserved as
@@ -329,7 +337,7 @@ class EdgePipeline:
                 raise SovereignDoubleFaultError(
                     "Ledger unavailable and off-grid buffer rejected payload; "
                     "the signed receipt is attached to this exception for host-level recovery",
-                    receipt=receipt_dict,
+                    receipt={"receipt": receipt_dict, "content": sieve_result.text},
                     ledger_error=fault_err,
                 ) from push_err
 
@@ -443,7 +451,9 @@ class EdgePipeline:
         :raises SovereignDoubleFaultError: If the replay loop is interrupted by an
             unhandled exception AND one or more entries cannot be re-queued to the buffer
             (i.e., both the ledger replay path and the buffer recovery path fail
-            simultaneously).  The unrecoverable receipt dicts are attached via
+            simultaneously).  The unrecoverable compound dicts (each carrying the
+            ForensicReceipt dict under ``"receipt"`` and the sieved text content string
+            under ``"content"``) are attached via
             :attr:`~SovereignDoubleFaultError.uncommitted_receipts`; the replay exception
             is preserved as :attr:`~SovereignDoubleFaultError.ledger_error`.
         """
@@ -512,9 +522,12 @@ class EdgePipeline:
                         )
                         _rf.flush()
                 except Exception as _disk_err:
-                    _remaining: list[dict[str, Any]] = [r for r, _ in requeue[_rq_idx + 1 :]]
+                    _remaining: list[dict[str, Any]] = [
+                        {"receipt": r, "content": c} for r, c in requeue[_rq_idx + 1 :]
+                    ]
                     _all_uncommitted: list[dict[str, Any]] = (
-                        [r for r, _ in failed_requeue_entries] + _remaining
+                        [{"receipt": r, "content": c} for r, c in failed_requeue_entries]
+                        + _remaining
                     )
                     _alloc_err = SovereignRequeueAllocationError(
                         "Emergency backup logging failed during drain_buffer() re-queue pass; "
@@ -532,7 +545,7 @@ class EdgePipeline:
                     f"receipt{'s' if push_failure_count != 1 else ''} could not be re-queued "
                     f"to the off-grid buffer; unrecoverable receipts are attached via "
                     f"uncommitted_receipts for host-level recovery",
-                    uncommitted_receipts=[r for r, _ in requeue],
+                    uncommitted_receipts=[{"receipt": r, "content": c} for r, c in requeue],
                     ledger_error=crash_exc,
                 ) from crash_exc
             raise crash_exc

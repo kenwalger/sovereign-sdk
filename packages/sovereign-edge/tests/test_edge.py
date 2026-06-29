@@ -1344,10 +1344,24 @@ class TestEdgePipelineBuffering:
                 pipeline.process(frame_bytes)
 
         dfe: SovereignDoubleFaultError = exc_info.value
-        assert isinstance(dfe.receipt, dict), "receipt attribute must be a dict"
-        assert "payload_hash" in dfe.receipt, "receipt must carry payload_hash key"
-        assert isinstance(dfe.receipt["payload_hash"], str)
-        assert len(dfe.receipt["payload_hash"]) == 64
+        assert isinstance(dfe.receipt, dict), "receipt attribute must be a compound dict"
+        assert "receipt" in dfe.receipt, (
+            "compound receipt dict must carry 'receipt' key containing the ForensicReceipt dict"
+        )
+        assert "content" in dfe.receipt, (
+            "compound receipt dict must carry 'content' key containing the sieved text string"
+        )
+        assert isinstance(dfe.receipt["receipt"], dict), (
+            "inner 'receipt' value must be the ForensicReceipt dict"
+        )
+        assert "payload_hash" in dfe.receipt["receipt"], (
+            "inner ForensicReceipt dict must carry payload_hash key"
+        )
+        assert isinstance(dfe.receipt["receipt"]["payload_hash"], str)
+        assert len(dfe.receipt["receipt"]["payload_hash"]) == 64
+        assert isinstance(dfe.receipt["content"], str), (
+            "inner 'content' value must be the sieved text string"
+        )
         assert isinstance(dfe.__cause__, RuntimeError)
         assert isinstance(dfe.ledger_error, (SovereignStorageError, sqlite3.Error)), (
             "ledger_error must preserve the root-cause ledger exception from the failed "
@@ -2103,12 +2117,24 @@ class TestEdgePipelineDrainBuffer:
                             pipeline_b.drain_buffer()
             err: SovereignRequeueAllocationError = exc_info.value
             assert len(err.uncommitted_receipts) >= 1, (
-                f"uncommitted_receipts must contain at least 1 receipt dict; "
+                f"uncommitted_receipts must contain at least 1 compound dict; "
                 f"got {len(err.uncommitted_receipts)}"
             )
             for r in err.uncommitted_receipts:
                 assert isinstance(r, dict), (
-                    "each element of uncommitted_receipts must be a receipt dict"
+                    "each element of uncommitted_receipts must be a compound dict"
+                )
+                assert "receipt" in r, (
+                    "each uncommitted entry must carry 'receipt' key with ForensicReceipt dict"
+                )
+                assert "content" in r, (
+                    "each uncommitted entry must carry 'content' key with sieved text string"
+                )
+                assert isinstance(r["receipt"], dict), (
+                    "inner 'receipt' value must be the ForensicReceipt dict"
+                )
+                assert isinstance(r["content"], str), (
+                    "inner 'content' value must be the sieved text string"
                 )
         finally:
             pipeline_b._buffer.close()
@@ -2441,6 +2467,22 @@ class TestEdgePipelineDrainBuffer:
                 f"Expected 2 uncommitted_receipts (full requeue list); "
                 f"got {len(err.uncommitted_receipts)}"
             )
+            for _entry in err.uncommitted_receipts:
+                assert isinstance(_entry, dict), (
+                    "each uncommitted_receipts entry must be a compound dict"
+                )
+                assert "receipt" in _entry, (
+                    "each uncommitted entry must carry 'receipt' key with ForensicReceipt dict"
+                )
+                assert "content" in _entry, (
+                    "each uncommitted entry must carry 'content' key with sieved text string"
+                )
+                assert isinstance(_entry["receipt"], dict), (
+                    "inner 'receipt' value must be the ForensicReceipt dict"
+                )
+                assert isinstance(_entry["content"], str), (
+                    "inner 'content' value must be the sieved text string"
+                )
         finally:
             try:
                 pipeline_b._buffer.flush()
@@ -2652,6 +2694,64 @@ class TestOffGridBufferAsync:
             f"size() drifted to {buf.size} after concurrent close() — "
             "multiple sentinels placed, _pending incremented more than once"
         )
+
+    def test_concurrent_commit_drain_no_staging_race(self, tmp_path: Path) -> None:
+        """Multiple threads calling commit_drain() concurrently must not race on the
+        staging file: the _count_lock wrapping the entire commit_drain() body ensures
+        exactly one thread unlinks the staging file while every racing caller receives
+        FileNotFoundError (swallowed inside the lock scope).  No exception must
+        propagate from any concurrent commit_drain() invocation.
+
+        Setup: push and drain one entry to materialise a staging file, then launch N
+        threads all calling commit_drain() simultaneously.  After all threads complete,
+        the staging file must be absent and no thread may have raised.
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        buf: OffGridBuffer = OffGridBuffer(str(tmp_path / "buf.jsonl"))
+        receipt: dict[str, Any] = self._make_receipt("commit-race", sequence=1)
+        staging_path: Path = Path(str(tmp_path / "buf.jsonl") + ".staging")
+
+        buf.push(receipt, "commit-race content")
+        buf.flush()
+        buf.drain()
+
+        assert staging_path.exists(), "staging file must exist before concurrent commit_drain()"
+
+        n_threads: int = 16
+        errors: list[Exception] = []
+        error_lock: threading.Lock = threading.Lock()
+        barrier: threading.Barrier = threading.Barrier(n_threads)
+
+        def _commit() -> None:
+            barrier.wait()
+            try:
+                buf.commit_drain()
+            except Exception as exc:
+                with error_lock:
+                    errors.append(exc)
+
+        threads: list[threading.Thread] = [
+            threading.Thread(target=_commit, daemon=True) for _ in range(n_threads)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5.0)
+
+        assert all(not t.is_alive() for t in threads), (
+            "One or more commit_drain() threads deadlocked"
+        )
+        assert not errors, (
+            f"commit_drain() raised from {len(errors)} thread(s) under concurrent "
+            f"execution; exceptions: {errors!r} — _count_lock must serialise all "
+            "unlink operations so FileNotFoundError is swallowed, not propagated"
+        )
+        assert not staging_path.exists(), (
+            "staging file must be absent after concurrent commit_drain() completes"
+        )
+        buf.close()
 
 
 # ---------------------------------------------------------------------------
