@@ -1938,6 +1938,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``TestEdgePipelineDrainBuffer`` grows from 13 to 14 cases.
   **Suite: 115 passed, 0 skipped (sovereign-edge); 404 passed, 1 skipped (workspace).**
 
+- **Durable staging of in-memory write-error entries when the active buffer is absent**
+  (`buffer.py`): Closes a crash-recovery gap in ``drain()``'s buffer-absent branch.
+  Previously, if the active ``.jsonl`` file did not exist because every ``push()`` call
+  had failed with ``OSError`` (entries held only in ``_write_errors``), the staging file
+  was populated only from the ``.quarantine`` text.  The in-memory
+  ``pending_error_entries`` were returned to the caller but never persisted; a process
+  crash between ``drain()`` and ``commit_drain()`` would permanently lose them.
+
+  The buffer-absent branch now serialises all ``pending_error_entries`` as JSONL lines
+  (each line a ``{"receipt": ..., "sieved_content": ...}`` object, ``ensure_ascii=False``)
+  and appends them to the staging-file content alongside any existing quarantine text.
+  The condition for writing staging is updated from ``if _quarantine_text.strip():`` to
+  ``if _absent_stg_content.strip():`` where ``_absent_stg_content`` is the concatenation
+  of quarantine text (normalised to end with ``\n``) and the serialised error lines.
+  ``commit_drain()`` already removes the staging file unconditionally, so no additional
+  teardown is required.
+
+  New test ``test_write_errors_durably_staged_when_buffer_absent``
+  (``TestOffGridBufferWriteErrors``): patches ``builtins.open`` to raise
+  ``OSError("ENOSPC: no space left")`` for all writes so the background worker records
+  the entry in ``_write_errors`` without creating the active buffer file.  Calls
+  ``drain()`` with the buffer absent, asserts the staging file exists and contains a
+  single JSONL line whose ``receipt.payload_hash`` matches the original receipt.
+  Verifies ``commit_drain()`` removes the staging file.
+  ``TestOffGridBufferWriteErrors`` grows from 13 to 14 cases.
+
+- **`SovereignDoubleFaultError.uncommitted_receipts` includes all requeue entries**
+  (`pipeline.py`): Corrects a truncated cascade-error manifest in ``drain_buffer()``.
+  The ``SovereignDoubleFaultError`` raised when a ledger replay crash coincides with
+  ``push()`` failures previously attached only ``[r for r, _ in failed_requeue_entries]``
+  — the subset of entries whose ``push()`` call raised ``RuntimeError``.  Entries where
+  ``push()`` succeeded were in the buffer's in-memory queue but not yet durably flushed;
+  they were omitted from the rescue manifest.  The fix changes the list comprehension to
+  ``[r for r, _ in requeue]``, capturing every receipt that could not complete ledger
+  acceptance regardless of whether the subsequent buffer re-queue call succeeded or failed.
+
+  New test ``test_double_fault_uncommitted_receipts_includes_full_requeue``
+  (``TestEdgePipelineDrainBuffer``): buffers two receipts via a pipeline with a closed
+  ledger, then replays through a second pipeline whose ``append_receipt`` raises
+  ``RuntimeError``.  A selective ``push()`` patch raises ``RuntimeError`` only on the
+  first re-queue call, letting the second succeed.  Asserts
+  ``len(SovereignDoubleFaultError.uncommitted_receipts) == 2`` — both receipts appear in
+  the rescue manifest, not just the one whose re-queue push failed.
+  ``TestEdgePipelineDrainBuffer`` grows from 14 to 15 cases.
+  **Suite: 117 passed, 0 skipped (sovereign-edge); 406 passed, 1 skipped (workspace).**
+
 - **Phase 9 — `sovereign-sensor` bare-metal Write-Side Custody sensor layer** (new workspace
   member `packages/sovereign-sensor/`): Introduces a MicroPython-compatible HAL for sealing
   sensor observations into versioned, tamper-evident, minified JSON transmission envelopes with

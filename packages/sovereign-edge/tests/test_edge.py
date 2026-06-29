@@ -2379,6 +2379,78 @@ class TestEdgePipelineDrainBuffer:
             pipeline_b._buffer.close()
             open_ledger.close()
 
+    def test_double_fault_uncommitted_receipts_includes_full_requeue(self, tmp_path: Path) -> None:
+        """When drain_buffer() raises SovereignDoubleFaultError, uncommitted_receipts must
+        contain every receipt in the requeue list — not only those whose push() call raised
+        RuntimeError — so the operator has a complete rescue manifest.
+
+        Setup: two receipts are buffered via a crashed pipeline, then replayed through a
+        second pipeline whose ledger raises RuntimeError during append_receipt.  The first
+        push() call during re-queuing also raises RuntimeError, but the second succeeds.
+        Both receipts must appear in SovereignDoubleFaultError.uncommitted_receipts.
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        buffer_path: str = str(tmp_path / ".edge_buffer.jsonl")
+        key_path: str = str(tmp_path / ".keys" / "edge_identity.pem")
+
+        closed_ledger: SovereignLedger = SovereignLedger(":memory:")
+        pipeline_a: EdgePipeline = EdgePipeline(
+            ledger=closed_ledger,
+            signing_key=key_path,
+            buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
+        )
+        closed_ledger.close()
+        try:
+            pipeline_a.process(_seal_frame(tmp_path, {"seq": 1}))
+            pipeline_a.process(_seal_frame(tmp_path, {"seq": 2}))
+            pipeline_a._buffer.flush()
+            assert pipeline_a._buffer.size == 2
+        finally:
+            pipeline_a._buffer.close()
+
+        open_ledger: SovereignLedger = SovereignLedger(str(tmp_path / "recovery.db"))
+        pipeline_b: EdgePipeline = EdgePipeline(
+            ledger=open_ledger,
+            signing_key=key_path,
+            buffer_path=buffer_path,
+            sensor_secret=_SENSOR_SECRET,
+        )
+        original_push = pipeline_b._buffer.push
+        push_call_count: list[int] = [0]
+
+        def selective_push(receipt_dict: dict[str, Any], sieved_content: str) -> None:
+            push_call_count[0] += 1
+            if push_call_count[0] == 1:
+                raise RuntimeError("simulated buffer closed on first requeue")
+            return original_push(receipt_dict, sieved_content)
+
+        try:
+            with patch.object(
+                open_ledger,
+                "append_receipt",
+                side_effect=RuntimeError("simulated replay crash"),
+            ):
+                with patch.object(pipeline_b._buffer, "push", side_effect=selective_push):
+                    with pytest.raises(SovereignDoubleFaultError) as exc_info:
+                        pipeline_b.drain_buffer()
+            err: SovereignDoubleFaultError = exc_info.value
+            assert len(err.uncommitted_receipts) == 2, (
+                f"Expected 2 uncommitted_receipts (full requeue list); "
+                f"got {len(err.uncommitted_receipts)}"
+            )
+        finally:
+            try:
+                pipeline_b._buffer.flush()
+                pipeline_b._buffer.drain()
+                pipeline_b._buffer.commit_drain()
+            except Exception:
+                pass
+            pipeline_b._buffer.close()
+            open_ledger.close()
+
 
 # ---------------------------------------------------------------------------
 # TestOffGridBufferAsync
@@ -3130,6 +3202,52 @@ class TestOffGridBufferWriteErrors:
         )
         buf.drain()
         buf.commit_drain()  # clear write errors (double-fault entry) so close() succeeds
+        buf.close()
+
+    def test_write_errors_durably_staged_when_buffer_absent(self, tmp_path: Path) -> None:
+        """When the active buffer file never existed (all pushes failed with OSError) and
+        drain() is called, the in-memory write-error entries must be serialised as JSONL
+        into the staging file so they survive a crash between drain() and commit_drain().
+
+        :param tmp_path: Pytest-provided isolated temporary directory.
+        :type tmp_path: Path
+        """
+        import json as _json
+        buf_path: Path = tmp_path / "buffer.jsonl"
+        staging_path: Path = Path(str(buf_path) + ".staging")
+        receipt: dict[str, Any] = self._make_receipt("write-err", sequence=3)
+        buf: OffGridBuffer = OffGridBuffer(str(buf_path))
+        with patch("builtins.open", side_effect=OSError("ENOSPC: no space left")):
+            buf.push(receipt, "write-err-content")
+            buf.flush()
+        assert buf.write_error_count == 1, (
+            "write error must be recorded when the background writer fails with OSError"
+        )
+        assert not buf_path.exists(), (
+            "active buffer file must not exist when the disk write failed"
+        )
+        entries: list[tuple[dict[str, Any], str]] = buf.drain()
+        assert len(entries) == 1, (
+            "drain() must return the write-error entry when the active buffer is absent"
+        )
+        assert staging_path.exists(), (
+            "drain() must write the write-error entry to the staging file "
+            "when the active buffer file does not exist"
+        )
+        staging_lines = [
+            ln for ln in staging_path.read_text(encoding="utf-8").splitlines() if ln.strip()
+        ]
+        assert len(staging_lines) == 1, (
+            "staging file must contain exactly one JSONL line for the single write-error entry"
+        )
+        staging_obj = _json.loads(staging_lines[0])
+        assert staging_obj.get("receipt", {}).get("payload_hash") == receipt["payload_hash"], (
+            "staging entry must preserve the original receipt payload_hash"
+        )
+        buf.commit_drain()
+        assert not staging_path.exists(), (
+            "commit_drain() must remove the staging file after successful drain"
+        )
         buf.close()
 
 

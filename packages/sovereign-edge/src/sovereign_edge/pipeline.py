@@ -532,7 +532,7 @@ class EdgePipeline:
                     f"receipt{'s' if push_failure_count != 1 else ''} could not be re-queued "
                     f"to the off-grid buffer; unrecoverable receipts are attached via "
                     f"uncommitted_receipts for host-level recovery",
-                    uncommitted_receipts=[r for r, _ in failed_requeue_entries],
+                    uncommitted_receipts=[r for r, _ in requeue],
                     ledger_error=crash_exc,
                 ) from crash_exc
             raise crash_exc

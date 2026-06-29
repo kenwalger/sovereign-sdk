@@ -1149,6 +1149,31 @@ committed = pipeline.drain_buffer()
   13 to 14 cases.
   **115 passed, 0 skipped (edge); 404 passed, 1 skipped (workspace).**
 
+* [x] **Durable staging of in-memory write-error entries when the active buffer is absent**
+  (`buffer.py`): Closes the crash-recovery gap in `drain()`'s buffer-absent branch where
+  entries held only in `_write_errors` (due to all pushes failing with `OSError`) were
+  returned to the caller but never persisted to the staging file.  A process crash between
+  `drain()` and `commit_drain()` would permanently lose them.  The branch now serialises
+  all `pending_error_entries` as JSONL lines and appends them to the staging file alongside
+  any existing quarantine text.  The condition for writing staging is updated from
+  `if _quarantine_text.strip():` to `if _absent_stg_content.strip():`.
+  `test_write_errors_durably_staged_when_buffer_absent` added to
+  `TestOffGridBufferWriteErrors`: patches `builtins.open` to raise `OSError`; asserts
+  staging file exists after `drain()`, contains correct JSONL entry, and is removed after
+  `commit_drain()`.  `TestOffGridBufferWriteErrors` grows from 13 to 14 cases.
+
+* [x] **`SovereignDoubleFaultError.uncommitted_receipts` includes all requeue entries**
+  (`pipeline.py`): Corrects the truncated cascade-error manifest in `drain_buffer()`.
+  Changes `uncommitted_receipts=[r for r, _ in failed_requeue_entries]` to
+  `uncommitted_receipts=[r for r, _ in requeue]` so every receipt that could not complete
+  ledger acceptance is included — not only those whose subsequent `push()` call raised
+  `RuntimeError`.  `test_double_fault_uncommitted_receipts_includes_full_requeue` added to
+  `TestEdgePipelineDrainBuffer`: buffers two receipts, replays through a pipeline with a
+  crashing ledger and a selective `push()` failure; asserts
+  `len(uncommitted_receipts) == 2`.  `TestEdgePipelineDrainBuffer` grows from 14 to 15
+  cases.
+  **117 passed, 0 skipped (edge); 406 passed, 1 skipped (workspace).**
+
 ---
 
 ## Phase 10 — Isolated Context Vault & Governance Server (`sovereign-vault`)

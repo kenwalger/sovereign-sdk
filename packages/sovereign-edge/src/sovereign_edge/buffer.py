@@ -748,7 +748,15 @@ class OffGridBuffer:
                         self._dead_letter.append(_qs)
 
             if not self._path.exists():
-                if _quarantine_text.strip():
+                _err_lines: str = "".join(
+                    json.dumps({"receipt": _er, "sieved_content": _ec}, ensure_ascii=False) + "\n"
+                    for _er, _ec in pending_error_entries
+                )
+                _absent_stg_content: str = _quarantine_text
+                if _absent_stg_content and not _absent_stg_content.endswith("\n"):
+                    _absent_stg_content += "\n"
+                _absent_stg_content += _err_lines
+                if _absent_stg_content.strip():
                     _stg_tmp: str = ""
                     try:
                         with tempfile.NamedTemporaryFile(
@@ -759,7 +767,7 @@ class OffGridBuffer:
                             encoding="utf-8",
                         ) as _tmp_fh:
                             _stg_tmp = _tmp_fh.name
-                            _tmp_fh.write(_quarantine_text)
+                            _tmp_fh.write(_absent_stg_content)
                         os.replace(_stg_tmp, self._staging_path)
                         _stg_tmp = ""
                     except OSError:
