@@ -1,0 +1,12 @@
+sequenceDiagram
+    autonumber
+    participant HW as Hardware Pin / Sensor
+    participant MCU as MicroController (MicroPython)
+    participant SEC as Hardware Security Module (TPM/HSM)
+    participant Edge as sovereign-sdk-edge Receiver
+
+    HW->>MCU: Raw Analog/Digital Signal
+    MCU->>MCU: Cast to Canonical Schema Type
+    MCU->>SEC: Request HMAC/SHA256 Signature
+    SEC-->>MCU: Cryptographic Envelope Seal
+    MCU->>Edge: Transmit Minified Payload (LoRaWAN/Serial)

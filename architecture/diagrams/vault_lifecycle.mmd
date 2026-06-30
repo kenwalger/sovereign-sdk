@@ -1,0 +1,10 @@
+stateDiagram-v2
+    [*] --> Memory: Ephemeral In-Memory State
+    Memory --> HSM_Seal: Local Write Request Triggered
+    state HSM_Seal {
+        [*] --> TPM_Lock: Bind to Hardware Silicon UUID
+        TPM_Lock --> AES_GCM: Authenticated Block Encryption
+    }
+    HSM_Seal --> ImmutableCustody: Frozen On-Disk Ciphertext
+    ImmutableCustody --> ZeroKnowledgeDecay: Offline Window Exceeded
+    ZeroKnowledgeDecay --> [*]: Cryptographic Self-Destruction
