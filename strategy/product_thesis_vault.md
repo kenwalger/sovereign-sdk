@@ -2,9 +2,9 @@
 
 ## The Boundary
 
-| Boundary | Component |
-| :--- | :--- |
-| Memory → Custody | `sovereign-vault`[cite: 11, 13] |
+| Boundary | Component         |
+| :--- |:------------------|
+| Memory → Custody | `sovereign-vault` |
 
 ## The Problem Space
 

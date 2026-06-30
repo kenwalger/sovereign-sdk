@@ -18,12 +18,12 @@ Open-source components include:
 * [sovereign-sdk-sieve](https://pypi.org/project/sovereign-sdk-sieve/)
 * [sovereign-sdk-ledger](https://pypi.org/project/sovereign-sdk-ledger/)
 * [sovereign-sdk-sensor](https://pypi.org/project/sovereign-sdk-sensor/)
-* [sovereign-sdk-edge](https://pypi.org/project/sovereign-sdk-sieve/)
+* [sovereign-sdk-edge](https://pypi.org/project/sovereign-sdk-edge/)
 
 ```mermaid
 flowchart TD
-    A["[ Open-Source SDK ]<br>(Drives Ingestion, Local-First Adoption)") 
-    │--> B["[ Developer Mindshare & Scale ]<br>(Validates Core Boundary Architecture)"]
+    A["[ Open-Source SDK ]<br>(Drives Ingestion, Local-First Adoption)"] 
+    A --> B["[ Developer Mindshare & Scale ]<br>(Validates Core Boundary Architecture)"]
     B --> C["[ Enterprise Boundary Friction ]<br>(Brings Visibility, Cost, & Compliance Risks)"]
     C --> D["[ Commercial Governance Layer ]<br>(Airlock & Audit Drive Revenue)"]
 

@@ -34,7 +34,7 @@ flowchart TD
 
 ## Component Integration Matrix
 1. The Genesis Boundary (`sovereign-sdk-sensor`)  
-- **Deployment:** Integrated directly into multispectral camera triggers, high-resolution photogrammetry capture workstations, and ambient climate nodes monitoring sensitive display display vitrines.
+- **Deployment:** Integrated directly into multispectral camera triggers, high-resolution photogrammetry capture workstations, and ambient climate nodes monitoring sensitive display vitrines.
 - **Execution:** The moment an image sensor fires or an asset tag is scanned, sovereign-sdk-sensor binds the file hash, machine UUID, a monotonic frame counter, and the spatial tracking metadata into a tight canonical schema. An onboard cryptographic chip signs the envelope instantly, sealing the metadata at the physical source of origin before the heavy image payload is even transferred to local storage arrays.
 
 2. The Local Gatekeeper (`sovereign-sdk-edge`)  
