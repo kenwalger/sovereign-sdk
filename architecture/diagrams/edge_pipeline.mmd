@@ -1,0 +1,9 @@
+flowchart TD
+    In[Ingestion Intake] --> Auth{HMAC Verification}
+    Auth -->|Fail| Quar[Quarantine Log]
+    Auth -->|Pass| Sieve[Sieve Heuristics Engine]
+    Sieve --> Clean[Preserved Structural Payload]
+    Clean --> LedgerWrite{Is Primary Ledger Up?}
+    LedgerWrite -->|Yes| Ledger[sovereign-sdk-ledger]
+    LedgerWrite -->|No| Buffer[Durable JSONL Off-Grid Buffer]
+    Buffer --> Staging[.staging Local Roll Recovery]

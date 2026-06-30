@@ -1,0 +1,11 @@
+flowchart LR
+    App[Local App / Coding Agent] --> Airlock[Sovereign Airlock Proxy]
+    Airlock --> Policy{Policy Gate}
+    Policy -->|Deny/Block| Fault[Escalation Exception]
+    Policy -->|Pass/Warn| Sieve[sovereign-sdk-sieve]
+    Sieve --> ContextMin[Context-Minimized Payload]
+    ContextMin --> Wire((Frontier Model API))
+    Airlock --> Ledger[sovereign-sdk-ledger]
+    subgraph Evidence Generation
+        Ledger --> Receipt[Local Forensic Receipt Generated]
+    end
