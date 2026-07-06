@@ -143,7 +143,10 @@ class AirlockBoundary:
         # Post-sieve: evaluate telemetry rules requiring actual sieve output
         post_verdict = self._policy.evaluate_post_sieve(telemetry)
         if not post_verdict.allowed:
-            raise AirlockPolicyViolation("; ".join(post_verdict.violations))
+            raise AirlockPolicyViolation(
+                "; ".join(post_verdict.violations),
+                warnings=verdict.warnings,
+            )
         verdict.warnings.extend(post_verdict.warnings)
 
         # Component D: Evidence generation — non-fatal on any failure

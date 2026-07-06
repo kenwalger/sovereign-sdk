@@ -90,6 +90,20 @@ rules:
 | `warn` | Appends to `AirlockResult.policy_warnings`; transmission continues |
 | `deny` | Raises `AirlockPolicyViolation`; payload blocked |
 
+### Exception Inspection
+
+When a post-sieve `deny` rule fires, any `warn`-action messages accumulated during the
+pre-sieve pass are preserved on the exception for diagnostic inspection:
+
+```python
+try:
+    result = await boundary.process(payload)
+except AirlockPolicyViolation as exc:
+    print(exc)           # deny violation message
+    print(exc.warnings)  # pre-sieve warn messages (list[str], may be empty)
+    raise
+```
+
 ---
 
 ## Transport Normalisation
