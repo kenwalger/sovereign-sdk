@@ -1301,7 +1301,7 @@ result = await boundary.process(normalize_openai(request))
 * [x] `AirlockPolicyViolation(RuntimeError)` and `AirlockConfigurationError(ValueError)`
   (`exception.py`) — domain exceptions for deny-action enforcement and configuration
   invariant violations respectively; `AirlockPolicyViolation.__init__` accepts optional
-  `warnings: list[str] | None` (default `[]`) stored as `self.warnings`, preserving
+  `warnings: list[str] | None` (default `warnings: list[str] | None = None`) stored as `self.warnings`, preserving
   pre-sieve `warn`-action diagnostic context when a post-sieve deny fires
 * [x] `AirlockConfigurationError` de-duplication (`policy.py`) — explicit
   `except AirlockConfigurationError: raise` guard in `PolicyEngine.__init__` prevents
