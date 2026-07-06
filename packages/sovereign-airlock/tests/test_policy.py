@@ -103,6 +103,51 @@ class TestPolicyLoading:
         with pytest.raises(AirlockConfigurationError, match="bad_regex"):
             PolicyEngine(_write_policy(tmp_path, config))
 
+    def test_raises_on_raw_rule_without_pattern(self, tmp_path: Path) -> None:
+        """A raw-scope rule missing 'pattern' raises AirlockConfigurationError at init."""
+        config = {
+            "version": "1.0",
+            "global": {},
+            "rules": [{"name": "no_pattern_rule", "scope": "raw", "action": "deny"}],
+        }
+        with pytest.raises(AirlockConfigurationError, match="no_pattern_rule"):
+            PolicyEngine(_write_policy(tmp_path, config))
+
+    def test_raises_on_fields_rule_with_empty_fields(self, tmp_path: Path) -> None:
+        """A fields-scope rule with an empty 'fields' list raises AirlockConfigurationError at init."""
+        config = {
+            "version": "1.0",
+            "global": {},
+            "rules": [
+                {
+                    "name": "empty_fields_rule",
+                    "scope": "fields",
+                    "fields": [],
+                    "pattern": "secret",
+                    "action": "deny",
+                }
+            ],
+        }
+        with pytest.raises(AirlockConfigurationError, match="empty_fields_rule"):
+            PolicyEngine(_write_policy(tmp_path, config))
+
+    def test_raises_on_telemetry_rule_without_metric(self, tmp_path: Path) -> None:
+        """A telemetry-scope rule missing 'metric' raises AirlockConfigurationError at init."""
+        config = {
+            "version": "1.0",
+            "global": {},
+            "rules": [
+                {
+                    "name": "incomplete_telemetry",
+                    "scope": "telemetry",
+                    "threshold": 1000,
+                    "action": "warn",
+                }
+            ],
+        }
+        with pytest.raises(AirlockConfigurationError, match="incomplete_telemetry"):
+            PolicyEngine(_write_policy(tmp_path, config))
+
 
 # ---------------------------------------------------------------------------
 # TestRawScopeEvaluation

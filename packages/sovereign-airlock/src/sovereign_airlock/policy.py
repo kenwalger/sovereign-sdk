@@ -151,8 +151,10 @@ class PolicyEngine:
         :type rule_def: dict[str, Any]
         :return: A validated, immutable :class:`PolicyRule` with a pre-compiled pattern.
         :rtype: PolicyRule
-        :raises AirlockConfigurationError: If ``pattern`` is present but not a valid regex,
-            or if a ``telemetry``-scope rule specifies a ``metric`` not in ``_VALID_METRICS``.
+        :raises AirlockConfigurationError: If a scope-required field is absent (``pattern``
+            for ``raw``, ``metric`` for ``telemetry``, non-empty ``fields`` for ``fields``),
+            if ``pattern`` is present but not a valid regex, or if a ``telemetry``-scope
+            rule specifies a ``metric`` not in ``_VALID_METRICS``.
         :raises ValueError: If ``scope`` or ``action`` carry an unrecognised value.
         :raises KeyError: If ``name``, ``scope``, or ``action`` keys are absent.
         """
@@ -178,12 +180,27 @@ class PolicyEngine:
                 raise AirlockConfigurationError(
                     f"Invalid regex pattern in rule '{name}': {exc}"
                 ) from exc
+        if scope == "raw" and raw_pattern is None:
+            raise AirlockConfigurationError(
+                f"Rule '{name}' has scope 'raw' but is missing required 'pattern' key."
+            )
 
         raw_metric: str | None = rule_def.get("metric")
-        if scope == "telemetry" and raw_metric is not None and raw_metric not in _VALID_METRICS:
+        if scope == "telemetry":
+            if raw_metric is None:
+                raise AirlockConfigurationError(
+                    f"Rule '{name}' has scope 'telemetry' but is missing required 'metric' key."
+                )
+            if raw_metric not in _VALID_METRICS:
+                raise AirlockConfigurationError(
+                    f"Unknown telemetry metric '{raw_metric}' in rule '{name}'; "
+                    f"expected one of {sorted(_VALID_METRICS)}."
+                )
+
+        raw_fields: list[str] = list(rule_def.get("fields") or [])
+        if scope == "fields" and not raw_fields:
             raise AirlockConfigurationError(
-                f"Unknown telemetry metric '{raw_metric}' in rule '{name}'; "
-                f"expected one of {sorted(_VALID_METRICS)}."
+                f"Rule '{name}' has scope 'fields' but is missing or has empty 'fields' key."
             )
 
         return PolicyRule(
@@ -191,7 +208,7 @@ class PolicyEngine:
             scope=scope,
             action=action,
             pattern=compiled,
-            fields=tuple(rule_def.get("fields") or ()),
+            fields=tuple(raw_fields),
             metric=raw_metric,
             threshold=rule_def.get("threshold"),
         )

@@ -155,3 +155,10 @@ class TestReceiptBuilder:
         receipt = builder.build_and_commit("content", telemetry, [], "raw")
         assert receipt is not None
         assert "payload_hash" in receipt
+
+    def test_receipt_metadata_contains_payload_hash(
+        self, builder: ReceiptBuilder, telemetry: AirlockTelemetry
+    ) -> None:
+        """Receipt metadata binds payload_hash to the pre-sieve raw content hash from telemetry."""
+        receipt = builder.build_and_commit("sieved content", telemetry, [], "raw")
+        assert receipt["metadata"]["payload_hash"] == telemetry.payload_hash

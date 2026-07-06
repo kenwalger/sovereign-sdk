@@ -78,8 +78,8 @@ class ReceiptBuilder:
         :param source: Source transport identifier from the :class:`~sovereign_airlock.payload.NormalizedPayload`.
         :type source: str
         :return: A signed :class:`~sovereign_core.ForensicReceipt` whose ``metadata`` includes
-            ``boundary``, ``source_transport``, ``prose_tax_summary``, and optionally
-            ``policy_warnings``.
+            ``boundary``, ``source_transport``, ``payload_hash`` (the pre-sieve raw content
+            hash from telemetry), ``prose_tax_summary``, and optionally ``policy_warnings``.
         :rtype: ForensicReceipt
         :raises Exception: Any exception raised by :meth:`~sovereign_core.SovereignKeyManager.generate_receipt`
             propagates directly (signing failures are not silenced).
@@ -87,6 +87,7 @@ class ReceiptBuilder:
         metadata: dict[str, Any] = {
             "boundary": "sovereign-sdk-airlock",
             "source_transport": source,
+            "payload_hash": telemetry.payload_hash,
             "prose_tax_summary": {
                 "raw_token_count": telemetry.raw_tokens,
                 "optimized_token_count": telemetry.sieved_tokens,
