@@ -1225,6 +1225,109 @@ committed = pipeline.drain_buffer()
 
 ---
 
+## Phase 9.6 — Outbound Governance Boundary (`sovereign-sdk-airlock`) — Shipped ✓
+
+**Target:** Introduce the model-neutral outbound governance boundary that inspects,
+evaluates, minimises, and records structured payloads before they cross a sovereign
+perimeter and enter an external computational system.  Implements the four-component
+Airlock lifecycle defined in SAR-0004 (Airlock, Not Gateway).
+
+```python
+import asyncio
+from sovereign_ledger import SovereignLedger
+from sovereign_airlock import AirlockBoundary, normalize_openai
+
+ledger = SovereignLedger(".keys/sovereign_audit.db")
+boundary = AirlockBoundary(
+    policy_path="policy.yaml",
+    signing_key=".keys/",
+    ledger=ledger,
+)
+
+result = await boundary.process(normalize_openai(request))
+# result.sieved_content                          — Prose-Tax-minimised payload for transmission
+# result.telemetry.payload_hash                  — SHA-256 of the raw pre-sieve content
+# result.receipt["metadata"]["payload_hash"]     — same hash sealed in the signed receipt
+# result.receipt["signature"]                    — Ed25519 boundary crossing evidence
+# result.policy_warnings                         — non-fatal warn-rule messages
+```
+
+**Delivered:**
+
+* [x] `NormalizedPayload` frozen dataclass (`payload.py`) — provider-neutral inspection
+  surface with `source`, `content`, `metadata`, `tools`, and `token_estimate` fields;
+  factory functions `normalize_openai()`, `normalize_anthropic()`, and `normalize_raw()`
+  translate transport-specific request schemas to the common governance surface
+* [x] `AirlockTelemetry` frozen dataclass (`telemetry.py`) — four Component C sieve
+  metrics (`raw_tokens`, `sieved_tokens`, `tax_savings_percentage`, `payload_hash`);
+  `from_sieve_output()` classmethod re-derives `tax_savings_percentage` independently
+  of `SieveOutput` with an explicit `raw_tokens == 0` guard and full
+  `max(0.0, min(100.0, ...))` clamp enforcing the documented `[0.0, 100.0]` range
+* [x] `PolicyEngine(config_path)` (`policy.py`) — deterministic, offline YAML rule
+  evaluator supporting `raw` (regex over flat content), `fields` (dot-notation field
+  extraction), and `telemetry` (numeric metric threshold) scopes; actions `allow`,
+  `warn`, `deny`; global `max_token_ceiling` check; `AirlockConfigurationError` on
+  invalid YAML, unrecognised scope/action values, unrecognised telemetry metric names
+  (validated at boot against `_VALID_METRICS`), `prose_tax_warning_threshold` outside
+  `[0.0, 1.0]`, or missing scope-required fields (`pattern` for `raw`; non-empty `fields`
+  and `pattern` for `fields`; `metric` and `threshold` for `telemetry`) — all structurally
+  invalid rules fail loudly at boot rather than silently becoming runtime no-ops;
+  `_extract_field` scoped so `messages.content`/`input`/`prompt` map to payload content
+  while `messages.role`, `messages.tool_calls`, and other `messages.<sub>` paths return
+  `""` (no unintended content leakage through broad patterns); `_POST_SIEVE_METRICS`
+  frozenset gates pre-sieve evaluation so `sieved_tokens` and `tax_savings_percentage`
+  rules are never proxied against `token_estimate`; `evaluate_post_sieve(telemetry)`
+  evaluates those metrics against actual sieve output and applies the prose tax threshold
+  check, returning a `PolicyVerdict` that can carry `deny` violations
+* [x] `PolicyRule` and `PolicyVerdict` frozen and mutable dataclasses (`policy.py`) —
+  immutable rule descriptor (`fields` stored as `tuple[str, ...]`) and mutable evaluation
+  result carrying `allowed`, `violations`, and `warnings` lists
+* [x] `ReceiptBuilder(key_manager, ledger)` (`receipt.py`) — assembles boundary
+  crossing metadata (`boundary`, `source_transport`, `payload_hash`, `prose_tax_summary`,
+  `policy_warnings`), signs via `SovereignKeyManager.generate_receipt()`, and commits
+  to `SovereignLedger.append_receipt()`; `payload_hash` in metadata is bound to
+  `telemetry.payload_hash` (SHA-256 of raw pre-sieve content), linking input provenance
+  to the signed evidence record; ledger write failure emits `WARNING`-level log and
+  returns the receipt regardless — outbound transmission is never blocked
+* [x] `AirlockBoundary(policy_path, signing_key, ledger)` (`boundary.py`) — async
+  orchestrator implementing the four-component transaction lifecycle: policy evaluation
+  → sieve convergence → post-sieve telemetry evaluation → evidence generation; sieve
+  pass offloaded via `asyncio.to_thread` to prevent CPU-bound blocking on the event
+  loop; pre-sieve `deny` verdict raises `AirlockPolicyViolation` immediately; post-sieve
+  `evaluate_post_sieve()` deny verdict also raises `AirlockPolicyViolation`; receipt
+  generation failure is non-fatal (logged, `receipt=None` in result)
+* [x] `AirlockResult` dataclass (`boundary.py`) — structured result carrying
+  `sieved_content`, `telemetry`, `receipt`, and `policy_warnings`
+* [x] `AirlockPolicyViolation(RuntimeError)` and `AirlockConfigurationError(ValueError)`
+  (`exception.py`) — domain exceptions for deny-action enforcement and configuration
+  invariant violations respectively
+* [x] `packages/sovereign-airlock/pyproject.toml` — workspace member at version
+  `1.4.0`; runtime dependencies: `sovereign-sdk-core>=1.3.0`,
+  `sovereign-sdk-ledger>=1.3.0`, `sovereign-sdk-sieve>=1.3.0`, `pyyaml>=6.0`
+* [x] 83-case test suite across four files (`TestAirlockTelemetry`: 12;
+  `TestPolicyLoading` + `TestRawScopeEvaluation` + `TestFieldsScopeEvaluation` +
+  `TestTelemetryScopeEvaluation` + `TestGlobalCeiling`: 35; `TestReceiptBuilder`: 11;
+  `TestAirlockBoundaryHappyPath` + `TestAirlockBoundaryPolicyDenial` +
+  `TestAirlockBoundaryPolicyWarning` + `TestAirlockBoundaryTransportNeutrality` +
+  `TestAirlockBoundaryResiliency` + `TestProseTaxThreshold` +
+  `TestNormalizedPayloadImmutability`: 25) covering frozen telemetry dataclass
+  immutability, zero-token ZeroDivisionError guard, full `[0.0, 100.0]` savings clamp,
+  payload hash derivation, YAML config loading, all three rule scopes, all three
+  policy actions, global ceiling enforcement, scope-specific required-field boot validation
+  (`pattern`/`fields`/`metric`/`threshold` missing raises `AirlockConfigurationError`),
+  regex boot-time compilation, telemetry metric name validation, `prose_tax_warning_threshold`
+  range `[0.0, 1.0]`, `_extract_field` sub-field specificity (`messages.role` → `""`),
+  pre-sieve metric skip guard, post-sieve `evaluate_post_sieve()` deny/warn evaluation,
+  `PolicyRule.fields` tuple immutability, receipt metadata `payload_hash` provenance
+  binding, prose tax threshold warning lifecycle, deep payload immutability
+  (`tuple` + `MappingProxyType`), receipt metadata invariants, cryptographic verifiability,
+  non-fatal ledger write failure, transport-neutral normalisation (OpenAI, Anthropic, raw),
+  deny/warn/allow lifecycle correctness, and full async `AirlockBoundary.process()`
+  transaction lifecycle end-to-end.
+  **84 passed, 0 failed (airlock); 494 passed, 1 skipped (workspace).**
+
+---
+
 ## Phase 10 — Isolated Context Vault & Governance Server (`sovereign-vault`)
 
 **Target:** Implement the "Sovereign Vault" architecture as an isolated local orchestration

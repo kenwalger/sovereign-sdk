@@ -83,6 +83,21 @@ This repository is managed as an integrated `uv` workspace separating the crypto
 │   │   └── tests/
 │   │       └── test_edge.py
 │   │
+│   ├── sovereign-airlock/                # Outbound governance boundary (SAR-0004)
+│   │   ├── src/sovereign_airlock/
+│   │   │   ├── boundary.py               # AirlockBoundary — async 4-component orchestrator
+│   │   │   ├── payload.py                # NormalizedPayload — provider-neutral inspection surface
+│   │   │   ├── policy.py                 # PolicyEngine — YAML rule evaluation (raw/fields/telemetry)
+│   │   │   ├── telemetry.py              # AirlockTelemetry — sieve convergence metrics
+│   │   │   ├── receipt.py                # ReceiptBuilder — evidence assembly and ledger commit
+│   │   │   ├── exception.py              # AirlockPolicyViolation, AirlockConfigurationError
+│   │   │   └── __init__.py
+│   │   └── tests/
+│   │       ├── test_boundary.py
+│   │       ├── test_policy.py
+│   │       ├── test_receipts.py
+│   │       └── test_telemetry.py
+│   │
 │   ├── sovereign-runtime/                # Compute/Execution tier (tool & model isolation)
 │   │   └── src/sovereign_runtime/
 │   │       ├── router.py                 # Intent-based pre-flight namespace exposure
@@ -212,6 +227,45 @@ Three fortification properties are enforced at the architecture level:
    to `0.0`, and stamps `"sieve_fault": True` in the receipt metadata.  The receipt
    is still committed to the ledger or off-grid buffer so no observation is silently
    discarded regardless of sieve-layer faults.
+
+---
+
+## `sovereign-sdk-airlock` — Outbound Governance Boundary
+
+For applications and agentic runtimes that must govern what leaves the sovereign perimeter,
+`sovereign-sdk-airlock` provides the deliberate inspection and containment boundary defined
+by SAR-0004 (Airlock, Not Gateway):
+
+```python
+import asyncio
+from sovereign_ledger import SovereignLedger
+from sovereign_airlock import AirlockBoundary, AirlockPolicyViolation, normalize_openai
+
+ledger = SovereignLedger(".keys/sovereign_audit.db")
+boundary = AirlockBoundary(
+    policy_path="policy.yaml",
+    signing_key=".keys/",
+    ledger=ledger,
+)
+
+try:
+    result = await boundary.process(normalize_openai(request))
+    # result.sieved_content                          — minimised payload ready for transmission
+    # result.telemetry.payload_hash                  — SHA-256 of the raw pre-sieve content
+    # result.receipt["metadata"]["payload_hash"]     — same hash sealed in the signed receipt
+    # result.receipt["signature"]                    — Ed25519 boundary crossing evidence
+    # result.policy_warnings                         — non-fatal warn-rule messages
+except AirlockPolicyViolation as exc:
+    # Payload blocked by a deny rule — do not transmit
+    raise
+```
+
+Policy rules are declared in a local YAML file and evaluated in three scopes:
+- `raw` — regex pattern matched against the flat combined content string
+- `fields` — pattern matched against named structured fields (`messages.content`, `tools.description`, etc.)
+- `telemetry` — numeric threshold applied to `raw_tokens`, `sieved_tokens`, or `tax_savings_percentage`
+
+Airlock is transport-agnostic. `normalize_openai()`, `normalize_anthropic()`, and `normalize_raw()` convert any request format into the provider-neutral `NormalizedPayload` before governance evaluation begins.
 
 ---
 

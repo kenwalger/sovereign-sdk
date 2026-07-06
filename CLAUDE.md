@@ -58,3 +58,17 @@ Before declaring an engineering task or phase update complete, you must execute 
 
 - `commit-message.txt` generation: At the conclusion of a successful test execution pass, generate a pristine, technical Git commit message following Conventional Commits (e.g., `feat(ledger): implement hash-chained append-only storage engine`). Write this text directly into `commit-message.txt` at the root directory. Do not execute the git commit command yourself.
 - `uv` Workspace Compliance: After altering dependencies or adding new workspace members, always run `uv lock` to keep the monorepo's dependency layout completely verified and synchronized.
+
+
+## Architectural Governance & Spec Invariants (SAR)
+
+All code generations, component implementations, and workspace modifications must strictly conform to the Sovereign Systems Specification Architecture Records (SARs) located under `architecture/receipts/`.
+
+### Core Technical Constraints:
+1. **SAR-0004 (Containment Boundaries):** Components sitting at perimeter intersections (e.g., `sovereign-airlock`) must act as strict, deliberate inspection and containment zones—never transparent or routing proxies.
+2. **SAR-0007 (Zero External Network Footprint):** Third-party runtime dependencies must be lightweight, non-ML, and non-transitive. Execution must be locked entirely to local machine silicon with zero cloud-mediated API requirements for validation.
+3. **SAR-0009 (Fault-Tolerant Logging):** Ledger writes, signature logging, and evidence commits are explicitly non-fatal to outbound communication lifecycles. Storage-tier faults must emit a warning locally and fail open safely to prevent crashing agent runtimes.
+4. **SAR-0010 (Vocabulary Mapping):** All exposed classes, errors, objects, and types must mapped strictly from terms declared in the established Specification Glossary (`AirlockBoundary`, `NormalizedPayload`, etc.).
+
+### Pre-Flight Verification Rule:
+Before initiating code modifications for any core module, the model must read `planning_docs/active_plans` for active blueprints, verify its execution loop against the relevant governing SAR files, and trace the directional dependency graph (upstream packages must remain entirely isolated from downstream orchestrators).

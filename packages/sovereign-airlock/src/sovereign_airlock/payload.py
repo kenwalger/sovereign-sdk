@@ -1,0 +1,181 @@
+# packages/sovereign-airlock/src/sovereign_airlock/payload.py
+from __future__ import annotations
+
+import types
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass(frozen=True)
+class NormalizedPayload:
+    """Provider-neutral inspection object for outbound governance evaluation.
+
+    A :class:`NormalizedPayload` is not a transport object.  It is an inspection
+    object: a stable governance surface derived from any originating protocol,
+    provider, or runtime.  All policy evaluation, telemetry generation, context
+    minimisation, and receipt creation operate exclusively against this structure.
+
+    Constructor accepts mutable equivalents (``list[str]`` for ``content``,
+    ``dict[str, Any]`` for ``metadata``, ``list[dict[str, Any]]`` for ``tools``);
+    ``__post_init__`` converts each to its corresponding immutable form.
+
+    :param source: Transport or provider identifier (e.g. ``"openai"``, ``"anthropic"``, ``"raw"``).
+    :type source: str
+    :param content: Ordered collection of text strings extracted from the payload (system
+        prompt, user messages, raw text, etc.).  Stored as an immutable ``tuple[str, ...]``;
+        joined with a single space for flat-string evaluation in ``raw`` and ``fields`` scope rules.
+    :type content: tuple[str, ...]
+    :param metadata: Transport-specific fields that are not part of the primary content
+        surface (e.g. ``model``, ``temperature``, request headers).  Stored as an immutable
+        :class:`~types.MappingProxyType` to prevent post-construction mutation.
+    :type metadata: types.MappingProxyType[str, Any]
+    :param tools: Ordered collection of tool/function definitions attached to the request,
+        each expressed as a provider-neutral read-only mapping with at minimum ``name`` and
+        ``description`` keys.  Stored as an immutable ``tuple`` of :class:`~types.MappingProxyType`
+        entries.
+    :type tools: tuple[types.MappingProxyType[str, Any], ...]
+    :param token_estimate: Heuristic token count of the combined content, computed via the
+        UTF-8 byte-density heuristic (÷ 4).  Used for pre-sieve policy telemetry evaluation.
+    :type token_estimate: int
+    """
+
+    source: str
+    content: tuple[str, ...]
+    metadata: types.MappingProxyType[str, Any] = field(
+        default_factory=lambda: types.MappingProxyType({})
+    )
+    tools: tuple[types.MappingProxyType[str, Any], ...] = field(default_factory=tuple)
+    token_estimate: int = 0
+
+    def __post_init__(self) -> None:
+        """Convert mutable constructor arguments to their immutable stored equivalents.
+
+        :raises TypeError: If any ``tools`` entry cannot be coerced to a ``dict``.
+        """
+        object.__setattr__(self, "content", tuple(self.content))
+        object.__setattr__(
+            self,
+            "metadata",
+            self.metadata
+            if isinstance(self.metadata, types.MappingProxyType)
+            else types.MappingProxyType(dict(self.metadata)),
+        )
+        object.__setattr__(
+            self,
+            "tools",
+            tuple(
+                t
+                if isinstance(t, types.MappingProxyType)
+                else types.MappingProxyType(dict(t))
+                for t in self.tools
+            ),
+        )
+
+
+def _estimate_tokens(text: str) -> int:
+    """Approximates token count using the UTF-8 byte-density heuristic (÷ 4)."""
+    return max(0, len(text.encode("utf-8")) // 4)
+
+
+def normalize_openai(request: dict[str, Any]) -> NormalizedPayload:
+    """Normalise an OpenAI-compatible chat completion request into a :class:`NormalizedPayload`.
+
+    Extracts content from ``messages[].content`` (both plain string and multi-part
+    content-block formats), and tool definitions from the top-level ``tools`` key.
+
+    :param request: A dict representing an OpenAI chat completion request body.
+    :type request: dict[str, Any]
+    :return: A provider-neutral :class:`NormalizedPayload` suitable for governance evaluation.
+    :rtype: NormalizedPayload
+    """
+    content: list[str] = []
+    for msg in request.get("messages") or []:
+        msg_content = msg.get("content", "")
+        if isinstance(msg_content, str):
+            content.append(msg_content)
+        elif isinstance(msg_content, list):
+            for part in msg_content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    content.append(part.get("text", ""))
+
+    tools: list[dict[str, Any]] = list(request.get("tools") or [])
+    metadata: dict[str, Any] = {
+        k: v for k, v in request.items() if k not in ("messages", "tools")
+    }
+    combined = " ".join(content)
+    return NormalizedPayload(
+        source="openai",
+        content=content,
+        metadata=metadata,
+        tools=tools,
+        token_estimate=_estimate_tokens(combined),
+    )
+
+
+def normalize_anthropic(request: dict[str, Any]) -> NormalizedPayload:
+    """Normalise an Anthropic-compatible messages API request into a :class:`NormalizedPayload`.
+
+    Handles both plain-string and content-block ``messages[].content`` formats, and
+    the top-level ``system`` field (plain string or content-block list).
+
+    :param request: A dict representing an Anthropic messages API request body.
+    :type request: dict[str, Any]
+    :return: A provider-neutral :class:`NormalizedPayload` suitable for governance evaluation.
+    :rtype: NormalizedPayload
+    """
+    content: list[str] = []
+
+    system = request.get("system")
+    if isinstance(system, str):
+        content.append(system)
+    elif isinstance(system, list):
+        for block in system:
+            if isinstance(block, dict) and block.get("type") == "text":
+                content.append(block.get("text", ""))
+
+    for msg in request.get("messages") or []:
+        msg_content = msg.get("content", "")
+        if isinstance(msg_content, str):
+            content.append(msg_content)
+        elif isinstance(msg_content, list):
+            for block in msg_content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    content.append(block.get("text", ""))
+
+    tools: list[dict[str, Any]] = list(request.get("tools") or [])
+    metadata: dict[str, Any] = {
+        k: v for k, v in request.items() if k not in ("messages", "tools", "system")
+    }
+    combined = " ".join(content)
+    return NormalizedPayload(
+        source="anthropic",
+        content=content,
+        metadata=metadata,
+        tools=tools,
+        token_estimate=_estimate_tokens(combined),
+    )
+
+
+def normalize_raw(
+    text: str,
+    source: str = "raw",
+    metadata: dict[str, Any] | None = None,
+) -> NormalizedPayload:
+    """Normalise a plain string into a :class:`NormalizedPayload`.
+
+    :param text: The raw string payload to wrap.
+    :type text: str
+    :param source: Transport identifier label.  Defaults to ``"raw"``.
+    :type source: str
+    :param metadata: Optional annotation mapping attached to the payload.
+    :type metadata: dict[str, Any] | None
+    :return: A :class:`NormalizedPayload` wrapping the raw string.
+    :rtype: NormalizedPayload
+    """
+    return NormalizedPayload(
+        source=source,
+        content=[text],
+        metadata=metadata or {},
+        tools=[],
+        token_estimate=_estimate_tokens(text),
+    )
