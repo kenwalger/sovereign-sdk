@@ -12,6 +12,7 @@ from .telemetry import AirlockTelemetry
 
 _VALID_SCOPES: frozenset[str] = frozenset({"raw", "fields", "telemetry"})
 _VALID_ACTIONS: frozenset[str] = frozenset({"allow", "warn", "deny"})
+_VALID_METRICS: frozenset[str] = frozenset({"raw_tokens", "sieved_tokens", "tax_savings_percentage"})
 _POST_SIEVE_METRICS: frozenset[str] = frozenset({"sieved_tokens", "tax_savings_percentage"})
 
 
@@ -94,7 +95,8 @@ class PolicyEngine:
         :param config_path: Path to the YAML policy file.
         :type config_path: str | Path
         :raises AirlockConfigurationError: On missing file, malformed YAML, invalid rule
-            definitions, or malformed regex patterns.
+            definitions, malformed regex patterns, out-of-range ``prose_tax_warning_threshold``,
+            or unrecognised telemetry metric names.
         """
         path = Path(config_path)
         try:
@@ -119,6 +121,11 @@ class PolicyEngine:
         self._prose_tax_warning_threshold = float(
             global_cfg.get("prose_tax_warning_threshold", 0.0)
         )
+        if not (0.0 <= self._prose_tax_warning_threshold <= 1.0):
+            raise AirlockConfigurationError(
+                f"prose_tax_warning_threshold must be in [0.0, 1.0]; "
+                f"got {self._prose_tax_warning_threshold}."
+            )
 
         self._rules = []
         for rule_def in raw.get("rules") or []:
@@ -144,7 +151,8 @@ class PolicyEngine:
         :type rule_def: dict[str, Any]
         :return: A validated, immutable :class:`PolicyRule` with a pre-compiled pattern.
         :rtype: PolicyRule
-        :raises AirlockConfigurationError: If ``pattern`` is present but not a valid regex.
+        :raises AirlockConfigurationError: If ``pattern`` is present but not a valid regex,
+            or if a ``telemetry``-scope rule specifies a ``metric`` not in ``_VALID_METRICS``.
         :raises ValueError: If ``scope`` or ``action`` carry an unrecognised value.
         :raises KeyError: If ``name``, ``scope``, or ``action`` keys are absent.
         """
@@ -171,13 +179,20 @@ class PolicyEngine:
                     f"Invalid regex pattern in rule '{name}': {exc}"
                 ) from exc
 
+        raw_metric: str | None = rule_def.get("metric")
+        if scope == "telemetry" and raw_metric is not None and raw_metric not in _VALID_METRICS:
+            raise AirlockConfigurationError(
+                f"Unknown telemetry metric '{raw_metric}' in rule '{name}'; "
+                f"expected one of {sorted(_VALID_METRICS)}."
+            )
+
         return PolicyRule(
             name=name,
             scope=scope,
             action=action,
             pattern=compiled,
             fields=tuple(rule_def.get("fields") or ()),
-            metric=rule_def.get("metric"),
+            metric=raw_metric,
             threshold=rule_def.get("threshold"),
         )
 

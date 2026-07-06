@@ -61,12 +61,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     on malformed, structurally invalid, or regex-invalid configuration.  All regex
     patterns pre-compiled via `re.compile()` at init time; malformed patterns raise
     `AirlockConfigurationError` immediately rather than deferring to a runtime
-    `re.error`.  `PolicyRule.fields` stored as `tuple[str, ...]` (immutable; previously
-    `list[str]`).  `_POST_SIEVE_METRICS` frozenset (`sieved_tokens`,
-    `tax_savings_percentage`) guards `_evaluate_telemetry`: when `telemetry=None`,
-    post-sieve metrics are skipped rather than proxied via `payload.token_estimate`.
-    `evaluate_post_sieve(telemetry)` evaluates post-sieve-only telemetry rules and the
-    prose tax threshold; returns a `PolicyVerdict` that may carry `deny` violations.
+    `re.error`.  `_VALID_METRICS` frozenset (`raw_tokens`, `sieved_tokens`,
+    `tax_savings_percentage`) validated in `_parse_rule` at boot time; unrecognised
+    metric names (e.g. typo `raw_token`) raise `AirlockConfigurationError` immediately.
+    `prose_tax_warning_threshold` validated to `[0.0, 1.0]` in `__init__`; values
+    outside this range raise `AirlockConfigurationError`.  `PolicyRule.fields` stored
+    as `tuple[str, ...]` (immutable; previously `list[str]`).  `_POST_SIEVE_METRICS`
+    frozenset (`sieved_tokens`, `tax_savings_percentage`) guards `_evaluate_telemetry`:
+    when `telemetry=None`, post-sieve metrics are skipped rather than proxied via
+    `payload.token_estimate`.  `evaluate_post_sieve(telemetry)` evaluates post-sieve-only
+    telemetry rules and the prose tax threshold; returns a `PolicyVerdict` that may carry
+    `deny` violations.
 
   - **`NormalizedPayload` deep immutability** (`payload.py`): `__post_init__` converts
     `content` to `tuple[str, ...]`, `metadata` to `types.MappingProxyType[str, Any]`,
@@ -87,7 +92,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     raise `AirlockPolicyViolation`; warn verdicts are appended to `verdict.warnings` and
     sealed in receipt metadata.
 
-  - **73-case test suite** across `test_policy.py` (27), `test_telemetry.py` (11),
+  - **76-case test suite** across `test_policy.py` (29), `test_telemetry.py` (12),
     `test_receipts.py` (10), and `test_boundary.py` (25).  Round 1 PR remediation adds
     7 cases: `test_raises_on_malformed_regex_pattern` (`TestPolicyLoading`),
     `TestProseTaxThreshold` (2 cases), and `TestNormalizedPayloadImmutability` (4 cases).
@@ -95,12 +100,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `test_tax_savings_rule_skipped_when_telemetry_absent`, `test_evaluate_post_sieve_fires_sieved_tokens_warn_rule`,
     `test_evaluate_post_sieve_deny_rule_returns_violation`, `test_policy_rule_fields_is_immutable_tuple`,
     `test_negative_savings_clamped_to_zero`, and `test_post_sieve_telemetry_deny_raises_policy_violation`.
-    **73 passed, 0 failed (airlock); 483 passed, 1 skipped (workspace).**
+    Round 4 PR remediation adds 3 cases: `test_raises_on_unknown_telemetry_metric`,
+    `test_raises_on_out_of_bounds_prose_tax_threshold`, and
+    `test_over_optimized_savings_clamped_to_hundred`.
+    **76 passed, 0 failed (airlock); 486 passed, 1 skipped (workspace).**
 
-  - **`AirlockTelemetry.tax_savings_percentage` clamp** (`telemetry.py`): `max(0.0, ...)`
-    applied to the savings calculation in `from_sieve_output()`.  Content expansion
-    (sieved tokens exceeding raw tokens) previously produced a negative percentage;
-    now clamped to `0.0`.
+  - **`AirlockTelemetry.tax_savings_percentage` full clamp** (`telemetry.py`):
+    `max(0.0, min(100.0, round(...)))` applied to the savings calculation in
+    `from_sieve_output()`.  Content expansion (sieved > raw) clamps to `0.0`; impossible
+    inversion (negative `optimized_token_count`) clamps to `100.0`.
 
 - **Phase 9.5 — `sovereign-edge` sensor ingestion bridge** (new workspace member
   `packages/sovereign-edge/`): Introduces the middleware pipeline that intercepts

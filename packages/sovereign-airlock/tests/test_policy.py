@@ -423,6 +423,34 @@ class TestGlobalCeiling:
         verdict = engine.evaluate(payload)
         assert verdict.allowed is True
 
+    def test_raises_on_unknown_telemetry_metric(self, tmp_path: Path) -> None:
+        """A telemetry rule with an unrecognised metric name raises AirlockConfigurationError at init."""
+        config = {
+            "version": "1.0",
+            "global": {},
+            "rules": [
+                {
+                    "name": "typo_metric",
+                    "scope": "telemetry",
+                    "metric": "raw_token",
+                    "threshold": 1000,
+                    "action": "warn",
+                }
+            ],
+        }
+        with pytest.raises(AirlockConfigurationError, match="raw_token"):
+            PolicyEngine(_write_policy(tmp_path, config))
+
+    def test_raises_on_out_of_bounds_prose_tax_threshold(self, tmp_path: Path) -> None:
+        """A prose_tax_warning_threshold outside [0.0, 1.0] raises AirlockConfigurationError."""
+        config = {
+            "version": "1.0",
+            "global": {"prose_tax_warning_threshold": 35.0},
+            "rules": [],
+        }
+        with pytest.raises(AirlockConfigurationError, match="prose_tax_warning_threshold"):
+            PolicyEngine(_write_policy(tmp_path, config))
+
     def test_policy_rule_fields_is_immutable_tuple(self, tmp_path: Path) -> None:
         """PolicyRule.fields is stored as an immutable tuple, not a mutable list."""
         config = {

@@ -59,9 +59,9 @@ class AirlockTelemetry:
         if raw_tokens == 0:
             tax_savings_percentage: float = 0.0
         else:
-            tax_savings_percentage = max(0.0, round(
+            tax_savings_percentage = max(0.0, min(100.0, round(
                 (raw_tokens - sieved_tokens) / raw_tokens * 100.0, 4
-            ))
+            )))
 
         return cls(
             raw_tokens=raw_tokens,
