@@ -1,4 +1,5 @@
 # packages/sovereign-airlock/src/sovereign_airlock/boundary.py
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -105,7 +106,8 @@ class AirlockBoundary:
            raises :exc:`~sovereign_airlock.exception.AirlockPolicyViolation` immediately
            and no sieve or ledger operation is performed.
         2. Pass the combined content through :func:`~sovereign_sieve.sieve_with_metrics`
-           to produce the Prose-Tax-minimised sieved content and token metrics.
+           via :func:`asyncio.to_thread` to prevent CPU-bound blocking on the event loop,
+           producing the Prose-Tax-minimised sieved content and token metrics.
         3. Invoke :meth:`~sovereign_airlock.policy.PolicyEngine.evaluate_post_sieve` with
            the sieve telemetry.  Post-sieve ``sieved_tokens`` and ``tax_savings_percentage``
            telemetry rules are evaluated against actual values; a ``deny`` outcome raises
@@ -131,9 +133,9 @@ class AirlockBoundary:
         if not verdict.allowed:
             raise AirlockPolicyViolation("; ".join(verdict.violations))
 
-        # Component C: Sieve convergence pass
+        # Component C: Sieve convergence pass (offloaded to thread pool — CPU-bound)
         raw_content: str = " ".join(payload.content)
-        sieve_output = sieve_with_metrics(raw_content)
+        sieve_output = await asyncio.to_thread(sieve_with_metrics, raw_content)
         telemetry: AirlockTelemetry = AirlockTelemetry.from_sieve_output(
             sieve_output, raw_content
         )

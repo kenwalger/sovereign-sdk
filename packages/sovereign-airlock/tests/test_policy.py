@@ -148,6 +148,24 @@ class TestPolicyLoading:
         with pytest.raises(AirlockConfigurationError, match="incomplete_telemetry"):
             PolicyEngine(_write_policy(tmp_path, config))
 
+    def test_raises_on_non_numeric_threshold(self, tmp_path: Path) -> None:
+        """A telemetry rule with a non-numeric threshold raises AirlockConfigurationError at init."""
+        config = {
+            "version": "1.0",
+            "global": {},
+            "rules": [
+                {
+                    "name": "bad_threshold_rule",
+                    "scope": "telemetry",
+                    "metric": "raw_tokens",
+                    "threshold": "very_large",
+                    "action": "warn",
+                }
+            ],
+        }
+        with pytest.raises(AirlockConfigurationError, match="bad_threshold_rule"):
+            PolicyEngine(_write_policy(tmp_path, config))
+
     def test_raises_on_telemetry_rule_without_threshold(self, tmp_path: Path) -> None:
         """A telemetry-scope rule missing 'threshold' raises AirlockConfigurationError at init."""
         config = {

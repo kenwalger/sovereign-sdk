@@ -1291,8 +1291,9 @@ result = await boundary.process(normalize_openai(request))
   returns the receipt regardless — outbound transmission is never blocked
 * [x] `AirlockBoundary(policy_path, signing_key, ledger)` (`boundary.py`) — async
   orchestrator implementing the four-component transaction lifecycle: policy evaluation
-  → sieve convergence → post-sieve telemetry evaluation → evidence generation; pre-sieve
-  `deny` verdict raises `AirlockPolicyViolation` immediately; post-sieve
+  → sieve convergence → post-sieve telemetry evaluation → evidence generation; sieve
+  pass offloaded via `asyncio.to_thread` to prevent CPU-bound blocking on the event
+  loop; pre-sieve `deny` verdict raises `AirlockPolicyViolation` immediately; post-sieve
   `evaluate_post_sieve()` deny verdict also raises `AirlockPolicyViolation`; receipt
   generation failure is non-fatal (logged, `receipt=None` in result)
 * [x] `AirlockResult` dataclass (`boundary.py`) — structured result carrying
@@ -1323,7 +1324,7 @@ result = await boundary.process(normalize_openai(request))
   non-fatal ledger write failure, transport-neutral normalisation (OpenAI, Anthropic, raw),
   deny/warn/allow lifecycle correctness, and full async `AirlockBoundary.process()`
   transaction lifecycle end-to-end.
-  **83 passed, 0 failed (airlock); 493 passed, 1 skipped (workspace).**
+  **84 passed, 0 failed (airlock); 494 passed, 1 skipped (workspace).**
 
 ---
 

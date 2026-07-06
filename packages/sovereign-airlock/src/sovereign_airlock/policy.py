@@ -39,7 +39,9 @@ class PolicyRule:
         (e.g. ``"raw_tokens"``, ``"sieved_tokens"``).
     :type metric: str | None
     :param threshold: Numeric ceiling beyond which the telemetry rule triggers.
-    :type threshold: int | float | None
+        Coerced to ``float`` at parse time for ``telemetry``-scope rules; non-numeric
+        values raise :exc:`~sovereign_airlock.exception.AirlockConfigurationError`.
+    :type threshold: float | None
     """
 
     name: str
@@ -201,6 +203,12 @@ class PolicyEngine:
                 raise AirlockConfigurationError(
                     f"Rule '{name}' has scope 'telemetry' but is missing required 'threshold' key."
                 )
+            try:
+                raw_threshold = float(raw_threshold)
+            except (ValueError, TypeError) as exc:
+                raise AirlockConfigurationError(
+                    f"Rule '{name}': threshold value {raw_threshold!r} cannot be coerced to float: {exc}"
+                ) from exc
 
         raw_fields: list[str] = list(rule_def.get("fields") or [])
         if scope == "fields" and not raw_fields:

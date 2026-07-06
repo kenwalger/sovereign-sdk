@@ -79,6 +79,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `messages.tool_calls`) return `""` to prevent unintended content leakage through
     broad `messages.*` patterns.
 
+  - **`AirlockBoundary.process`** (`boundary.py`): Sieve convergence pass offloaded to
+    a thread pool via `await asyncio.to_thread(sieve_with_metrics, raw_content)`, eliminating
+    CPU-bound blocking on the async event loop during heavy sieve cycles.
+
+  - **`PolicyEngine._parse_rule`** (`policy.py`): `threshold` for `telemetry`-scope rules
+    is now coerced to `float` at boot time; a non-numeric value (e.g. a string like
+    `"very_large"`) raises `AirlockConfigurationError` immediately rather than surviving
+    to cause a `TypeError` at evaluation time.
+
   - **`ReceiptBuilder.build_and_commit`** (`receipt.py`): Receipt `metadata` now includes
     `payload_hash` bound to `telemetry.payload_hash` (SHA-256 of the pre-sieve raw content).
     This binds input provenance to the signed evidence record, allowing auditors to
@@ -103,7 +112,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     raise `AirlockPolicyViolation`; warn verdicts are appended to `verdict.warnings` and
     sealed in receipt metadata.
 
-  - **83-case test suite** across `test_policy.py` (35), `test_telemetry.py` (12),
+  - **84-case test suite** across `test_policy.py` (36), `test_telemetry.py` (12),
     `test_receipts.py` (11), and `test_boundary.py` (25).  Round 1 PR remediation adds
     7 cases: `test_raises_on_malformed_regex_pattern` (`TestPolicyLoading`),
     `TestProseTaxThreshold` (2 cases), and `TestNormalizedPayloadImmutability` (4 cases).
@@ -118,7 +127,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     and `test_receipt_metadata_contains_payload_hash`.
     Round 6 (final polish) adds 3 cases: `test_raises_on_telemetry_rule_without_threshold`,
     `test_raises_on_fields_rule_without_pattern`, and `test_messages_role_does_not_leak_content`.
-    **83 passed, 0 failed (airlock); 493 passed, 1 skipped (workspace).**
+    Round 7 adds 1 case: `test_raises_on_non_numeric_threshold`.
+    **84 passed, 0 failed (airlock); 494 passed, 1 skipped (workspace).**
 
   - **`AirlockTelemetry.tax_savings_percentage` full clamp** (`telemetry.py`):
     `max(0.0, min(100.0, round(...)))` applied to the savings calculation in
