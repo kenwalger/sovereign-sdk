@@ -131,7 +131,10 @@ class AirlockBoundary:
         # Component B: Policy evaluation (pre-sieve)
         verdict: PolicyVerdict = self._policy.evaluate(payload)
         if not verdict.allowed:
-            raise AirlockPolicyViolation("; ".join(verdict.violations))
+            raise AirlockPolicyViolation(
+                "; ".join(verdict.violations),
+                warnings=verdict.warnings,
+            )
 
         # Component C: Sieve convergence pass (offloaded to thread pool — CPU-bound)
         raw_content: str = " ".join(payload.content)

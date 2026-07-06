@@ -129,6 +129,17 @@ class TestAirlockBoundaryPolicyDenial:
         # Chain is intact but empty — no receipt was committed
         assert mem_ledger.verify_ledger_integrity(expected_tip_hash=None)
 
+    async def test_pre_sieve_deny_preserves_accumulated_warnings(
+        self, airlock: AirlockBoundary
+    ) -> None:
+        """Pre-sieve deny carries concurrent warn-rule messages via exc.warnings."""
+        payload = normalize_raw(
+            "internal.sovereign.local config: -----BEGIN PRIVATE KEY-----"
+        )
+        with pytest.raises(AirlockPolicyViolation) as exc_info:
+            await airlock.process(payload)
+        assert any("guard_internal_namespaces" in w for w in exc_info.value.warnings)
+
     async def test_post_sieve_telemetry_deny_raises_policy_violation(
         self, tmp_path: Path, sovereign_secret: str
     ) -> None:
