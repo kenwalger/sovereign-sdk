@@ -8,7 +8,7 @@ _MINIMAL_POLICY: dict = {
     "version": "1.0",
     "global": {
         "max_token_ceiling": 40000,
-        "prose_tax_warning_threshold": 0.35,
+        "prose_tax_warning_threshold": 0.0,
     },
     "rules": [
         {

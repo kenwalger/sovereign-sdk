@@ -107,7 +107,9 @@ class AirlockBoundary:
         2. Pass the combined content through :func:`~sovereign_sieve.sieve_with_metrics`
            to produce the Prose-Tax-minimised sieved content and token metrics.
         3. Assemble an :class:`~sovereign_airlock.telemetry.AirlockTelemetry` record from
-           the sieve output.
+           the sieve output.  Check the ``prose_tax_warning_threshold``; if savings fall
+           below the configured threshold a non-fatal warning is appended to
+           ``verdict.warnings`` before evidence generation.
         4. Attempt evidence recording via :class:`~sovereign_airlock.receipt.ReceiptBuilder`.
            Ledger write failure is non-fatal: a warning is emitted and the result is
            returned with the signed receipt intact.  Signing failure is logged and the
@@ -133,6 +135,11 @@ class AirlockBoundary:
         telemetry: AirlockTelemetry = AirlockTelemetry.from_sieve_output(
             sieve_output, raw_content
         )
+
+        # Post-sieve prose tax threshold check (non-fatal, appended to policy warnings)
+        prose_tax_warnings = self._policy.check_prose_tax_threshold(telemetry)
+        if prose_tax_warnings:
+            verdict.warnings.extend(prose_tax_warnings)
 
         # Component D: Evidence generation — non-fatal on any failure
         receipt: ForensicReceipt | None = None

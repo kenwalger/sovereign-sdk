@@ -1287,19 +1287,22 @@ result = await boundary.process(normalize_openai(request))
 * [x] `packages/sovereign-airlock/pyproject.toml` — workspace member at version
   `1.4.0`; runtime dependencies: `sovereign-sdk-core>=1.3.0`,
   `sovereign-sdk-ledger>=1.3.0`, `sovereign-sdk-sieve>=1.3.0`, `pyyaml>=6.0`
-* [x] 59-case test suite across four classes (`TestAirlockTelemetry`: 10;
+* [x] 66-case test suite across four files (`TestAirlockTelemetry`: 10;
   `TestPolicyLoading` + `TestRawScopeEvaluation` + `TestFieldsScopeEvaluation` +
-  `TestTelemetryScopeEvaluation` + `TestGlobalCeiling`: 21; `TestReceiptBuilder`: 10;
+  `TestTelemetryScopeEvaluation` + `TestGlobalCeiling`: 22; `TestReceiptBuilder`: 10;
   `TestAirlockBoundaryHappyPath` + `TestAirlockBoundaryPolicyDenial` +
   `TestAirlockBoundaryPolicyWarning` + `TestAirlockBoundaryTransportNeutrality` +
-  `TestAirlockBoundaryResiliency`: 18) covering frozen telemetry dataclass
+  `TestAirlockBoundaryResiliency` + `TestProseTaxThreshold` +
+  `TestNormalizedPayloadImmutability`: 24) covering frozen telemetry dataclass
   immutability, zero-token ZeroDivisionError guard, payload hash derivation,
   YAML config loading, all three rule scopes, all three policy actions, global
-  ceiling enforcement, receipt metadata invariants, cryptographic verifiability,
-  non-fatal ledger write failure, transport-neutral normalisation (OpenAI,
-  Anthropic, raw), deny/warn/allow lifecycle correctness, and full async
-  `AirlockBoundary.process()` transaction lifecycle end-to-end.
-  **59 passed, 0 failed (airlock); 469 passed, 1 skipped (workspace).**
+  ceiling enforcement, regex boot-time compilation with `AirlockConfigurationError`
+  on malformed patterns, prose tax threshold warning lifecycle, deep payload
+  immutability (`tuple` + `MappingProxyType`), receipt metadata invariants,
+  cryptographic verifiability, non-fatal ledger write failure, transport-neutral
+  normalisation (OpenAI, Anthropic, raw), deny/warn/allow lifecycle correctness,
+  and full async `AirlockBoundary.process()` transaction lifecycle end-to-end.
+  **66 passed, 0 failed (airlock); 476 passed, 1 skipped (workspace).**
 
 ---
 

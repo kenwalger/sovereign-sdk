@@ -91,6 +91,18 @@ class TestPolicyLoading:
         with pytest.raises(AirlockConfigurationError, match="mapping"):
             PolicyEngine(path)
 
+    def test_raises_on_malformed_regex_pattern(self, tmp_path: Path) -> None:
+        """A rule with an invalid regex pattern raises AirlockConfigurationError at init time."""
+        config = {
+            "version": "1.0",
+            "global": {},
+            "rules": [
+                {"name": "bad_regex", "scope": "raw", "action": "deny", "pattern": "[invalid("}
+            ],
+        }
+        with pytest.raises(AirlockConfigurationError, match="bad_regex"):
+            PolicyEngine(_write_policy(tmp_path, config))
+
 
 # ---------------------------------------------------------------------------
 # TestRawScopeEvaluation

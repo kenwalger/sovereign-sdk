@@ -1,4 +1,7 @@
 # packages/sovereign-airlock/src/sovereign_airlock/payload.py
+from __future__ import annotations
+
+import types
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -12,28 +15,61 @@ class NormalizedPayload:
     provider, or runtime.  All policy evaluation, telemetry generation, context
     minimisation, and receipt creation operate exclusively against this structure.
 
+    Constructor accepts mutable equivalents (``list[str]`` for ``content``,
+    ``dict[str, Any]`` for ``metadata``, ``list[dict[str, Any]]`` for ``tools``);
+    ``__post_init__`` converts each to its corresponding immutable form.
+
     :param source: Transport or provider identifier (e.g. ``"openai"``, ``"anthropic"``, ``"raw"``).
     :type source: str
-    :param content: Ordered list of text strings extracted from the payload (system prompt,
-        user messages, raw text, etc.).  Joined with a single space for flat-string
-        evaluation in ``raw`` and ``fields`` scope rules.
-    :type content: list[str]
+    :param content: Ordered collection of text strings extracted from the payload (system
+        prompt, user messages, raw text, etc.).  Stored as an immutable ``tuple[str, ...]``;
+        joined with a single space for flat-string evaluation in ``raw`` and ``fields`` scope rules.
+    :type content: tuple[str, ...]
     :param metadata: Transport-specific fields that are not part of the primary content
-        surface (e.g. ``model``, ``temperature``, request headers).
-    :type metadata: dict[str, Any]
-    :param tools: List of tool/function definitions attached to the request, each expressed
-        as a provider-neutral mapping with at minimum ``name`` and ``description`` keys.
-    :type tools: list[dict[str, Any]]
+        surface (e.g. ``model``, ``temperature``, request headers).  Stored as an immutable
+        :class:`~types.MappingProxyType` to prevent post-construction mutation.
+    :type metadata: types.MappingProxyType[str, Any]
+    :param tools: Ordered collection of tool/function definitions attached to the request,
+        each expressed as a provider-neutral read-only mapping with at minimum ``name`` and
+        ``description`` keys.  Stored as an immutable ``tuple`` of :class:`~types.MappingProxyType`
+        entries.
+    :type tools: tuple[types.MappingProxyType[str, Any], ...]
     :param token_estimate: Heuristic token count of the combined content, computed via the
         UTF-8 byte-density heuristic (÷ 4).  Used for pre-sieve policy telemetry evaluation.
     :type token_estimate: int
     """
 
     source: str
-    content: list[str]
-    metadata: dict[str, Any] = field(default_factory=dict)
-    tools: list[dict[str, Any]] = field(default_factory=list)
+    content: tuple[str, ...]
+    metadata: types.MappingProxyType[str, Any] = field(
+        default_factory=lambda: types.MappingProxyType({})
+    )
+    tools: tuple[types.MappingProxyType[str, Any], ...] = field(default_factory=tuple)
     token_estimate: int = 0
+
+    def __post_init__(self) -> None:
+        """Convert mutable constructor arguments to their immutable stored equivalents.
+
+        :raises TypeError: If any ``tools`` entry cannot be coerced to a ``dict``.
+        """
+        object.__setattr__(self, "content", tuple(self.content))
+        object.__setattr__(
+            self,
+            "metadata",
+            self.metadata
+            if isinstance(self.metadata, types.MappingProxyType)
+            else types.MappingProxyType(dict(self.metadata)),
+        )
+        object.__setattr__(
+            self,
+            "tools",
+            tuple(
+                t
+                if isinstance(t, types.MappingProxyType)
+                else types.MappingProxyType(dict(t))
+                for t in self.tools
+            ),
+        )
 
 
 def _estimate_tokens(text: str) -> int:

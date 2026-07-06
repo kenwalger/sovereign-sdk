@@ -25,9 +25,11 @@ class PolicyRule:
     :type scope: str
     :param action: Outcome on match.  One of ``"allow"``, ``"warn"``, or ``"deny"``.
     :type action: str
-    :param pattern: Regex pattern applied during ``raw`` and ``fields`` scope evaluation.
-        ``None`` when unused (i.e. for ``telemetry`` scope rules).
-    :type pattern: str | None
+    :param pattern: Pre-compiled regex applied during ``raw`` and ``fields`` scope evaluation.
+        ``None`` when unused (i.e. for ``telemetry`` scope rules).  Compiled at
+        :class:`PolicyEngine` initialisation time; a malformed pattern raises
+        :exc:`~sovereign_airlock.exception.AirlockConfigurationError` before any rule is stored.
+    :type pattern: re.Pattern[str] | None
     :param fields: Dot-notation field paths evaluated during ``fields`` scope matching
         (e.g. ``"messages.content"``, ``"tools.description"``).
     :type fields: list[str]
@@ -41,7 +43,7 @@ class PolicyRule:
     name: str
     scope: str
     action: str
-    pattern: str | None = None
+    pattern: re.Pattern[str] | None = None
     fields: list[str] = field(default_factory=list)
     metric: str | None = None
     threshold: int | float | None = None
@@ -69,12 +71,16 @@ class PolicyEngine:
     """Machine-local policy evaluator that loads governance rules from a YAML configuration file.
 
     Evaluation is deterministic and fully offline: no network calls are issued,
-    no model inference is invoked, and no mutable global state is touched.
+    no model inference is invoked, and no mutable global state is touched.  All regex
+    patterns are compiled at initialisation time; a malformed pattern causes an immediate
+    :exc:`~sovereign_airlock.exception.AirlockConfigurationError` rather than a deferred
+    ``re.error`` at evaluation time.
 
     :param config_path: Filesystem path to the YAML policy configuration file.
     :type config_path: str | Path
     :raises AirlockConfigurationError: If the file is absent, cannot be parsed as
-        valid YAML, or contains structurally invalid rule definitions.
+        valid YAML, contains structurally invalid rule definitions, or any rule carries
+        a malformed regex pattern.
     """
 
     _rules: list[PolicyRule]
@@ -86,7 +92,8 @@ class PolicyEngine:
 
         :param config_path: Path to the YAML policy file.
         :type config_path: str | Path
-        :raises AirlockConfigurationError: On missing file, malformed YAML, or invalid rule definitions.
+        :raises AirlockConfigurationError: On missing file, malformed YAML, invalid rule
+            definitions, or malformed regex patterns.
         """
         path = Path(config_path)
         try:
@@ -128,10 +135,15 @@ class PolicyEngine:
     def _parse_rule(self, rule_def: dict[str, Any]) -> PolicyRule:
         """Parse and validate a single rule mapping from the YAML configuration.
 
+        Compiles any ``pattern`` string via :func:`re.compile` at parse time so that
+        malformed patterns raise :exc:`~sovereign_airlock.exception.AirlockConfigurationError`
+        during :meth:`__init__` rather than a deferred ``re.error`` at evaluation time.
+
         :param rule_def: Raw rule dictionary extracted from the YAML ``rules`` list.
         :type rule_def: dict[str, Any]
-        :return: A validated, immutable :class:`PolicyRule`.
+        :return: A validated, immutable :class:`PolicyRule` with a pre-compiled pattern.
         :rtype: PolicyRule
+        :raises AirlockConfigurationError: If ``pattern`` is present but not a valid regex.
         :raises ValueError: If ``scope`` or ``action`` carry an unrecognised value.
         :raises KeyError: If ``name``, ``scope``, or ``action`` keys are absent.
         """
@@ -148,11 +160,21 @@ class PolicyEngine:
                 f"Unknown action {action!r}; expected one of {sorted(_VALID_ACTIONS)}."
             )
 
+        raw_pattern = rule_def.get("pattern")
+        compiled: re.Pattern[str] | None = None
+        if raw_pattern is not None:
+            try:
+                compiled = re.compile(str(raw_pattern))
+            except re.error as exc:
+                raise AirlockConfigurationError(
+                    f"Invalid regex pattern in rule '{name}': {exc}"
+                ) from exc
+
         return PolicyRule(
             name=name,
             scope=scope,
             action=action,
-            pattern=rule_def.get("pattern"),
+            pattern=compiled,
             fields=list(rule_def.get("fields") or []),
             metric=rule_def.get("metric"),
             threshold=rule_def.get("threshold"),
@@ -204,6 +226,32 @@ class PolicyEngine:
 
         return verdict
 
+    def check_prose_tax_threshold(self, telemetry: AirlockTelemetry) -> list[str]:
+        """Return a warning if post-sieve savings fall below the configured threshold.
+
+        A ``prose_tax_warning_threshold`` of ``0.0`` (the default) disables this check.
+        When enabled, the configured fractional threshold (e.g. ``0.35`` for 35%) is
+        compared against ``telemetry.tax_savings_percentage`` (stored as a percentage
+        value in the range ``[0.0, 100.0]``).
+
+        :param telemetry: Post-sieve metrics assembled by
+            :meth:`~sovereign_airlock.telemetry.AirlockTelemetry.from_sieve_output`.
+        :type telemetry: AirlockTelemetry
+        :return: A single-element list containing a human-readable warning message when
+            savings are below the threshold, or an empty list when the threshold is
+            unset or satisfied.
+        :rtype: list[str]
+        """
+        if self._prose_tax_warning_threshold <= 0.0:
+            return []
+        threshold_pct = self._prose_tax_warning_threshold * 100.0
+        if telemetry.tax_savings_percentage < threshold_pct:
+            return [
+                f"Prose Tax savings {telemetry.tax_savings_percentage:.4f}% is below "
+                f"the configured warning threshold of {threshold_pct:.1f}%."
+            ]
+        return []
+
     # ------------------------------------------------------------------
     # Scope evaluators
     # ------------------------------------------------------------------
@@ -217,7 +265,7 @@ class PolicyEngine:
         if not rule.pattern:
             return
         flat = " ".join(payload.content)
-        if re.search(rule.pattern, flat):
+        if rule.pattern.search(flat):
             self._apply_action(rule, f"Rule '{rule.name}' matched in raw content.", verdict)
 
     def _evaluate_fields(
@@ -230,7 +278,7 @@ class PolicyEngine:
             return
         for field_path in rule.fields:
             extracted = self._extract_field(field_path, payload)
-            if extracted and re.search(rule.pattern, extracted):
+            if extracted and rule.pattern.search(extracted):
                 self._apply_action(
                     rule,
                     f"Rule '{rule.name}' matched in field '{field_path}'.",

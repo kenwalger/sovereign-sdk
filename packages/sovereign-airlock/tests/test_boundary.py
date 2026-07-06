@@ -1,10 +1,12 @@
 """TDD test suite for sovereign_airlock.boundary — write before implementation."""
 
 import logging
+import types
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+import yaml
 
 from sovereign_ledger import SovereignLedger, SovereignStorageError
 
@@ -264,3 +266,91 @@ class TestAirlockBoundaryResiliency:
         result = await airlock.process(payload)
         assert result.telemetry.raw_tokens >= result.telemetry.sieved_tokens
         assert 0.0 <= result.telemetry.tax_savings_percentage <= 100.0
+
+
+# ---------------------------------------------------------------------------
+# TestProseTaxThreshold
+# ---------------------------------------------------------------------------
+
+class TestProseTaxThreshold:
+    async def test_low_savings_triggers_prose_tax_warning(
+        self, tmp_path: Path, sovereign_secret: str
+    ) -> None:
+        """Prose tax threshold warning fires when sieve savings fall below the threshold."""
+        config = {
+            "version": "1.0",
+            "global": {"prose_tax_warning_threshold": 0.35},
+            "rules": [],
+        }
+        policy_p = tmp_path / "policy.yaml"
+        policy_p.write_text(yaml.dump(config), encoding="utf-8")
+        boundary = AirlockBoundary(
+            policy_path=policy_p,
+            signing_key=str(tmp_path / "keys"),
+        )
+        # Technical SQL payload with no filler words — sieve removes nothing → ~0% savings.
+        # With threshold 0.35 (35%), savings of ~0% is below threshold → warning expected.
+        payload = normalize_raw("SELECT id, temperature FROM sensor_data WHERE node_id = 42")
+        result = await boundary.process(payload)
+        assert any("threshold" in w.lower() for w in result.policy_warnings)
+
+    async def test_threshold_zero_disables_prose_tax_warning(
+        self, tmp_path: Path, sovereign_secret: str
+    ) -> None:
+        """prose_tax_warning_threshold of 0.0 disables the prose tax check entirely."""
+        config = {
+            "version": "1.0",
+            "global": {"prose_tax_warning_threshold": 0.0},
+            "rules": [],
+        }
+        policy_p = tmp_path / "policy.yaml"
+        policy_p.write_text(yaml.dump(config), encoding="utf-8")
+        boundary = AirlockBoundary(
+            policy_path=policy_p,
+            signing_key=str(tmp_path / "keys"),
+        )
+        payload = normalize_raw("SELECT id FROM sensor_data")
+        result = await boundary.process(payload)
+        assert result.policy_warnings == []
+
+
+# ---------------------------------------------------------------------------
+# TestNormalizedPayloadImmutability
+# ---------------------------------------------------------------------------
+
+class TestNormalizedPayloadImmutability:
+    def test_content_is_immutable_tuple(self) -> None:
+        """NormalizedPayload.content is stored as an immutable tuple."""
+        payload = normalize_raw("test content")
+        assert isinstance(payload.content, tuple)
+        with pytest.raises((AttributeError, TypeError)):
+            payload.content.append("mutation")  # type: ignore[attr-defined]
+
+    def test_metadata_is_mapping_proxy(self) -> None:
+        """NormalizedPayload.metadata is stored as a MappingProxyType."""
+        payload = normalize_raw("test", metadata={"key": "value"})
+        assert isinstance(payload.metadata, types.MappingProxyType)
+        with pytest.raises(TypeError):
+            payload.metadata["new_key"] = "mutation"  # type: ignore[index]
+
+    def test_tools_is_immutable_tuple(self) -> None:
+        """NormalizedPayload.tools is stored as an immutable tuple."""
+        request = {
+            "messages": [{"role": "user", "content": "test"}],
+            "tools": [{"name": "t", "description": "d"}],
+        }
+        payload = normalize_openai(request)
+        assert isinstance(payload.tools, tuple)
+        with pytest.raises((AttributeError, TypeError)):
+            payload.tools.append({"name": "mutation"})  # type: ignore[attr-defined]
+
+    def test_tool_entries_are_mapping_proxies(self) -> None:
+        """Each tool entry inside NormalizedPayload.tools is a MappingProxyType."""
+        request = {
+            "messages": [{"role": "user", "content": "test"}],
+            "tools": [{"name": "tool1", "description": "does things"}],
+        }
+        payload = normalize_openai(request)
+        assert len(payload.tools) == 1
+        assert isinstance(payload.tools[0], types.MappingProxyType)
+        assert payload.tools[0].get("name") == "tool1"

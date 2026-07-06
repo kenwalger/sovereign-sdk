@@ -58,7 +58,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     rule evaluator supporting `raw`, `fields`, and `telemetry` evaluation scopes with
     `allow`, `warn`, and `deny` actions.  Global `max_token_ceiling` and
     `prose_tax_warning_threshold` configuration.  `AirlockConfigurationError` raised
-    on malformed or structurally invalid configuration.
+    on malformed, structurally invalid, or regex-invalid configuration.  All regex
+    patterns pre-compiled via `re.compile()` at init time; malformed patterns raise
+    `AirlockConfigurationError` immediately rather than deferring to a runtime
+    `re.error`.  `check_prose_tax_threshold(telemetry)` evaluates post-sieve savings
+    against the configured fractional threshold and returns non-fatal warning messages.
+
+  - **`NormalizedPayload` deep immutability** (`payload.py`): `__post_init__` converts
+    `content` to `tuple[str, ...]`, `metadata` to `types.MappingProxyType[str, Any]`,
+    and each `tools` entry to `types.MappingProxyType[str, Any]`.  Constructor still
+    accepts mutable `list`/`dict` equivalents; conversion is transparent to all
+    factory functions.
 
   - **`ReceiptBuilder(key_manager, ledger)`** (`receipt.py`): Assembles boundary
     crossing metadata and produces a signed `ForensicReceipt` via
@@ -69,10 +79,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **`AirlockBoundary(policy_path, signing_key, ledger)`** (`boundary.py`):
     Async orchestrator implementing the four-component transaction lifecycle.  `deny`
     verdict raises `AirlockPolicyViolation` before any sieve or ledger operation.
+    Post-sieve prose tax threshold check via `PolicyEngine.check_prose_tax_threshold()`;
+    threshold warnings appended to `verdict.warnings` before evidence generation and
+    sealed in receipt metadata.
 
-  - **59-case test suite** across `test_policy.py` (21), `test_telemetry.py` (10),
-    `test_receipts.py` (10), and `test_boundary.py` (18).  Full TDD cycle: all test
-    files written before implementation; 59 passed, 0 failed.
+  - **66-case test suite** across `test_policy.py` (22), `test_telemetry.py` (10),
+    `test_receipts.py` (10), and `test_boundary.py` (24).  Round 1 PR remediation adds
+    7 cases: `test_raises_on_malformed_regex_pattern` (`TestPolicyLoading`),
+    `TestProseTaxThreshold` (2 cases), and `TestNormalizedPayloadImmutability` (4 cases).
+    **66 passed, 0 failed (airlock); 476 passed, 1 skipped (workspace).**
 
 - **Phase 9.5 — `sovereign-edge` sensor ingestion bridge** (new workspace member
   `packages/sovereign-edge/`): Introduces the middleware pipeline that intercepts
