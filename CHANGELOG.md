@@ -37,6 +37,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Phase 9.6 — `sovereign-sdk-airlock` outbound governance boundary** (new workspace
+  member `packages/sovereign-airlock/`): Introduces the model-neutral Airlock
+  lifecycle boundary that inspects, evaluates, minimises, and records structured
+  payloads before they cross a sovereign perimeter (SAR-0004).
+
+  - **`NormalizedPayload` frozen dataclass** (`payload.py`): Provider-neutral
+    inspection surface extracted from any transport-specific request format.
+    Factory functions `normalize_openai()`, `normalize_anthropic()`, and
+    `normalize_raw()` translate protocol-specific schemas into the stable governance
+    surface without leaking transport state.
+
+  - **`AirlockTelemetry` frozen dataclass** (`telemetry.py`): Four Component C sieve
+    metrics (`raw_tokens`, `sieved_tokens`, `tax_savings_percentage`, `payload_hash`).
+    `from_sieve_output()` classmethod includes an explicit `raw_tokens == 0` guard
+    defaulting `tax_savings_percentage` to `0.0`, preventing ZeroDivisionError on
+    zero-token or null-pass payloads.
+
+  - **`PolicyEngine(config_path)`** (`policy.py`): Deterministic, fully offline YAML
+    rule evaluator supporting `raw`, `fields`, and `telemetry` evaluation scopes with
+    `allow`, `warn`, and `deny` actions.  Global `max_token_ceiling` and
+    `prose_tax_warning_threshold` configuration.  `AirlockConfigurationError` raised
+    on malformed or structurally invalid configuration.
+
+  - **`ReceiptBuilder(key_manager, ledger)`** (`receipt.py`): Assembles boundary
+    crossing metadata and produces a signed `ForensicReceipt` via
+    `SovereignKeyManager.generate_receipt()`.  Ledger write failure is non-fatal —
+    a `WARNING` log is emitted and the receipt is returned regardless, so outbound
+    transmission is never blocked by a storage-tier anomaly.
+
+  - **`AirlockBoundary(policy_path, signing_key, ledger)`** (`boundary.py`):
+    Async orchestrator implementing the four-component transaction lifecycle.  `deny`
+    verdict raises `AirlockPolicyViolation` before any sieve or ledger operation.
+
+  - **59-case test suite** across `test_policy.py` (21), `test_telemetry.py` (10),
+    `test_receipts.py` (10), and `test_boundary.py` (18).  Full TDD cycle: all test
+    files written before implementation; 59 passed, 0 failed.
+
 - **Phase 9.5 — `sovereign-edge` sensor ingestion bridge** (new workspace member
   `packages/sovereign-edge/`): Introduces the middleware pipeline that intercepts
   sealed sensor wire frames from `sovereign-sensor`, applies the `sovereign-sieve`

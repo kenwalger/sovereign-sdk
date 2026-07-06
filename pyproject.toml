@@ -24,10 +24,12 @@ dev-dependencies = [
     "sovereign-sdk-runtime",
     "sovereign-sdk-sensor",
     "sovereign-sdk-sieve",
+    "sovereign-sdk-airlock",
 ]
 
 # This block tells uv to resolve these dev-dependencies locally
 [tool.uv.sources]
+sovereign-sdk-airlock = { workspace = true }
 sovereign-sdk-core = { workspace = true }
 sovereign-sdk-edge = { workspace = true }
 sovereign-sdk-fastapi = { workspace = true }
