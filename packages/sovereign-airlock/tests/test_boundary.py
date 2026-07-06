@@ -129,6 +129,33 @@ class TestAirlockBoundaryPolicyDenial:
         # Chain is intact but empty — no receipt was committed
         assert mem_ledger.verify_ledger_integrity(expected_tip_hash=None)
 
+    async def test_post_sieve_telemetry_deny_raises_policy_violation(
+        self, tmp_path: Path, sovereign_secret: str
+    ) -> None:
+        """A post-sieve deny rule on sieved_tokens raises AirlockPolicyViolation after the sieve pass."""
+        config = {
+            "version": "1.0",
+            "global": {},
+            "rules": [
+                {
+                    "name": "sieved_hard_cap",
+                    "scope": "telemetry",
+                    "metric": "sieved_tokens",
+                    "threshold": 1,
+                    "action": "deny",
+                }
+            ],
+        }
+        policy_p = tmp_path / "policy.yaml"
+        policy_p.write_text(yaml.dump(config), encoding="utf-8")
+        boundary = AirlockBoundary(
+            policy_path=policy_p,
+            signing_key=str(tmp_path / "keys"),
+        )
+        payload = normalize_raw("This payload has more than one sieved token.")
+        with pytest.raises(AirlockPolicyViolation, match="sieved_hard_cap"):
+            await boundary.process(payload)
+
 
 # ---------------------------------------------------------------------------
 # TestAirlockBoundaryPolicyWarning

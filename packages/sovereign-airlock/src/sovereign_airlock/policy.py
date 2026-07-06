@@ -12,6 +12,7 @@ from .telemetry import AirlockTelemetry
 
 _VALID_SCOPES: frozenset[str] = frozenset({"raw", "fields", "telemetry"})
 _VALID_ACTIONS: frozenset[str] = frozenset({"allow", "warn", "deny"})
+_POST_SIEVE_METRICS: frozenset[str] = frozenset({"sieved_tokens", "tax_savings_percentage"})
 
 
 @dataclass(frozen=True)
@@ -32,7 +33,7 @@ class PolicyRule:
     :type pattern: re.Pattern[str] | None
     :param fields: Dot-notation field paths evaluated during ``fields`` scope matching
         (e.g. ``"messages.content"``, ``"tools.description"``).
-    :type fields: list[str]
+    :type fields: tuple[str, ...]
     :param metric: Token-economy metric name evaluated during ``telemetry`` scope matching
         (e.g. ``"raw_tokens"``, ``"sieved_tokens"``).
     :type metric: str | None
@@ -44,7 +45,7 @@ class PolicyRule:
     scope: str
     action: str
     pattern: re.Pattern[str] | None = None
-    fields: list[str] = field(default_factory=list)
+    fields: tuple[str, ...] = field(default_factory=tuple)
     metric: str | None = None
     threshold: int | float | None = None
 
@@ -175,7 +176,7 @@ class PolicyEngine:
             scope=scope,
             action=action,
             pattern=compiled,
-            fields=list(rule_def.get("fields") or []),
+            fields=tuple(rule_def.get("fields") or ()),
             metric=rule_def.get("metric"),
             threshold=rule_def.get("threshold"),
         )
@@ -226,31 +227,50 @@ class PolicyEngine:
 
         return verdict
 
-    def check_prose_tax_threshold(self, telemetry: AirlockTelemetry) -> list[str]:
-        """Return a warning if post-sieve savings fall below the configured threshold.
+    def evaluate_post_sieve(self, telemetry: AirlockTelemetry) -> PolicyVerdict:
+        """Evaluate telemetry-scope rules that require actual post-sieve data.
 
-        A ``prose_tax_warning_threshold`` of ``0.0`` (the default) disables this check.
-        When enabled, the configured fractional threshold (e.g. ``0.35`` for 35%) is
-        compared against ``telemetry.tax_savings_percentage`` (stored as a percentage
-        value in the range ``[0.0, 100.0]``).
+        Only rules with metrics in ``_POST_SIEVE_METRICS`` (``sieved_tokens``,
+        ``tax_savings_percentage``) are evaluated here.  ``raw_tokens`` rules and
+        all ``raw``/``fields`` rules were already assessed during the pre-sieve
+        :meth:`evaluate` call.  Also applies the ``prose_tax_warning_threshold`` check.
 
-        :param telemetry: Post-sieve metrics assembled by
+        :param telemetry: Post-sieve metrics from
             :meth:`~sovereign_airlock.telemetry.AirlockTelemetry.from_sieve_output`.
         :type telemetry: AirlockTelemetry
-        :return: A single-element list containing a human-readable warning message when
-            savings are below the threshold, or an empty list when the threshold is
-            unset or satisfied.
-        :rtype: list[str]
+        :return: A :class:`PolicyVerdict` recording any post-sieve deny/warn outcomes.
+        :rtype: PolicyVerdict
         """
-        if self._prose_tax_warning_threshold <= 0.0:
-            return []
-        threshold_pct = self._prose_tax_warning_threshold * 100.0
-        if telemetry.tax_savings_percentage < threshold_pct:
-            return [
-                f"Prose Tax savings {telemetry.tax_savings_percentage:.4f}% is below "
-                f"the configured warning threshold of {threshold_pct:.1f}%."
-            ]
-        return []
+        verdict = PolicyVerdict()
+
+        for rule in self._rules:
+            if rule.scope != "telemetry" or rule.metric not in _POST_SIEVE_METRICS or rule.threshold is None:
+                continue
+
+            if rule.metric == "sieved_tokens":
+                metric_value: int | float = telemetry.sieved_tokens
+            elif rule.metric == "tax_savings_percentage":
+                metric_value = telemetry.tax_savings_percentage
+            else:
+                continue
+
+            if metric_value > rule.threshold:
+                self._apply_action(
+                    rule,
+                    f"Rule '{rule.name}': metric '{rule.metric}' value {metric_value} "
+                    f"exceeds threshold {rule.threshold}.",
+                    verdict,
+                )
+
+        if self._prose_tax_warning_threshold > 0.0:
+            threshold_pct = self._prose_tax_warning_threshold * 100.0
+            if telemetry.tax_savings_percentage < threshold_pct:
+                verdict.warnings.append(
+                    f"Prose Tax savings {telemetry.tax_savings_percentage:.4f}% is below "
+                    f"the configured warning threshold of {threshold_pct:.1f}%."
+                )
+
+        return verdict
 
     # ------------------------------------------------------------------
     # Scope evaluators
@@ -298,6 +318,8 @@ class PolicyEngine:
 
         metric_value: int | float
         if telemetry is None:
+            if rule.metric in _POST_SIEVE_METRICS:
+                return
             metric_value = payload.token_estimate
         elif rule.metric == "raw_tokens":
             metric_value = telemetry.raw_tokens

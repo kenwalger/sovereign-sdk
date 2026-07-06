@@ -93,6 +93,12 @@ class TestAirlockTelemetry:
         assert len(telemetry.payload_hash) == 64
         assert all(c in "0123456789abcdef" for c in telemetry.payload_hash)
 
+    def test_negative_savings_clamped_to_zero(self) -> None:
+        """When sieved_tokens > raw_tokens (content expansion), tax_savings_percentage is clamped to 0.0."""
+        output = _make_sieve_output(raw_token_count=50, optimized_token_count=75)
+        telemetry = AirlockTelemetry.from_sieve_output(output, "short input that expanded")
+        assert telemetry.tax_savings_percentage == 0.0
+
     def test_full_sieve_round_trip_via_sieve_with_metrics(self) -> None:
         """AirlockTelemetry built from a live sieve_with_metrics pass is self-consistent."""
         from sovereign_sieve import sieve_with_metrics

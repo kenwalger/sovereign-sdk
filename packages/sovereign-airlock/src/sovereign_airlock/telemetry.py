@@ -18,9 +18,10 @@ class AirlockTelemetry:
     :type raw_tokens: int
     :param sieved_tokens: Estimated token count after Prose Tax minimisation.
     :type sieved_tokens: int
-    :param tax_savings_percentage: Percentage reduction from raw to sieved, in the
-        range ``[0.0, 100.0]``, rounded to four decimal places.  Explicitly
-        defaults to ``0.0`` when ``raw_tokens == 0`` to prevent ZeroDivisionError.
+    :param tax_savings_percentage: Percentage reduction from raw to sieved, clamped
+        to ``[0.0, 100.0]`` and rounded to four decimal places.  Explicitly
+        ``0.0`` when ``raw_tokens == 0`` (ZeroDivisionError guard) or when the
+        sieve expands content beyond the raw token count.
     :type tax_savings_percentage: float
     :param payload_hash: SHA-256 hex digest of the raw (pre-sieve) content string.
         Serves as an observable identifier for cross-referencing the incoming
@@ -58,9 +59,9 @@ class AirlockTelemetry:
         if raw_tokens == 0:
             tax_savings_percentage: float = 0.0
         else:
-            tax_savings_percentage = round(
+            tax_savings_percentage = max(0.0, round(
                 (raw_tokens - sieved_tokens) / raw_tokens * 100.0, 4
-            )
+            ))
 
         return cls(
             raw_tokens=raw_tokens,

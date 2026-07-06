@@ -1260,15 +1260,20 @@ result = await boundary.process(normalize_openai(request))
 * [x] `AirlockTelemetry` frozen dataclass (`telemetry.py`) — four Component C sieve
   metrics (`raw_tokens`, `sieved_tokens`, `tax_savings_percentage`, `payload_hash`);
   `from_sieve_output()` classmethod re-derives `tax_savings_percentage` independently
-  of `SieveOutput` with an explicit `raw_tokens == 0` guard defaulting to `0.0`
+  of `SieveOutput` with an explicit `raw_tokens == 0` guard and `max(0.0, ...)` clamp
+  preventing negative percentages when sieve output expands beyond raw token count
 * [x] `PolicyEngine(config_path)` (`policy.py`) — deterministic, offline YAML rule
   evaluator supporting `raw` (regex over flat content), `fields` (dot-notation field
   extraction), and `telemetry` (numeric metric threshold) scopes; actions `allow`,
   `warn`, `deny`; global `max_token_ceiling` check; `AirlockConfigurationError` on
-  invalid YAML or unrecognised scope/action values
+  invalid YAML or unrecognised scope/action values; `_POST_SIEVE_METRICS` frozenset
+  gates pre-sieve evaluation so `sieved_tokens` and `tax_savings_percentage` rules are
+  never proxied against `token_estimate`; `evaluate_post_sieve(telemetry)` evaluates
+  those metrics against actual sieve output and applies the `prose_tax_warning_threshold`
+  check, returning a `PolicyVerdict` that can carry `deny` violations
 * [x] `PolicyRule` and `PolicyVerdict` frozen and mutable dataclasses (`policy.py`) —
-  immutable rule descriptor and mutable evaluation result carrying `allowed`,
-  `violations`, and `warnings` lists
+  immutable rule descriptor (`fields` stored as `tuple[str, ...]`) and mutable evaluation
+  result carrying `allowed`, `violations`, and `warnings` lists
 * [x] `ReceiptBuilder(key_manager, ledger)` (`receipt.py`) — assembles boundary
   crossing metadata (`boundary`, `source_transport`, `prose_tax_summary`,
   `policy_warnings`), signs via `SovereignKeyManager.generate_receipt()`, and commits
@@ -1276,9 +1281,10 @@ result = await boundary.process(normalize_openai(request))
   log and returns the receipt regardless — outbound transmission is never blocked
 * [x] `AirlockBoundary(policy_path, signing_key, ledger)` (`boundary.py`) — async
   orchestrator implementing the four-component transaction lifecycle: policy evaluation
-  → sieve convergence → telemetry assembly → evidence generation; `deny` verdict raises
-  `AirlockPolicyViolation` before any sieve or ledger operation; receipt generation
-  failure is non-fatal (logged, `receipt=None` in result)
+  → sieve convergence → post-sieve telemetry evaluation → evidence generation; pre-sieve
+  `deny` verdict raises `AirlockPolicyViolation` immediately; post-sieve
+  `evaluate_post_sieve()` deny verdict also raises `AirlockPolicyViolation`; receipt
+  generation failure is non-fatal (logged, `receipt=None` in result)
 * [x] `AirlockResult` dataclass (`boundary.py`) — structured result carrying
   `sieved_content`, `telemetry`, `receipt`, and `policy_warnings`
 * [x] `AirlockPolicyViolation(RuntimeError)` and `AirlockConfigurationError(ValueError)`
@@ -1287,22 +1293,24 @@ result = await boundary.process(normalize_openai(request))
 * [x] `packages/sovereign-airlock/pyproject.toml` — workspace member at version
   `1.4.0`; runtime dependencies: `sovereign-sdk-core>=1.3.0`,
   `sovereign-sdk-ledger>=1.3.0`, `sovereign-sdk-sieve>=1.3.0`, `pyyaml>=6.0`
-* [x] 66-case test suite across four files (`TestAirlockTelemetry`: 10;
+* [x] 73-case test suite across four files (`TestAirlockTelemetry`: 11;
   `TestPolicyLoading` + `TestRawScopeEvaluation` + `TestFieldsScopeEvaluation` +
-  `TestTelemetryScopeEvaluation` + `TestGlobalCeiling`: 22; `TestReceiptBuilder`: 10;
+  `TestTelemetryScopeEvaluation` + `TestGlobalCeiling`: 27; `TestReceiptBuilder`: 10;
   `TestAirlockBoundaryHappyPath` + `TestAirlockBoundaryPolicyDenial` +
   `TestAirlockBoundaryPolicyWarning` + `TestAirlockBoundaryTransportNeutrality` +
   `TestAirlockBoundaryResiliency` + `TestProseTaxThreshold` +
-  `TestNormalizedPayloadImmutability`: 24) covering frozen telemetry dataclass
-  immutability, zero-token ZeroDivisionError guard, payload hash derivation,
-  YAML config loading, all three rule scopes, all three policy actions, global
-  ceiling enforcement, regex boot-time compilation with `AirlockConfigurationError`
-  on malformed patterns, prose tax threshold warning lifecycle, deep payload
-  immutability (`tuple` + `MappingProxyType`), receipt metadata invariants,
-  cryptographic verifiability, non-fatal ledger write failure, transport-neutral
-  normalisation (OpenAI, Anthropic, raw), deny/warn/allow lifecycle correctness,
-  and full async `AirlockBoundary.process()` transaction lifecycle end-to-end.
-  **66 passed, 0 failed (airlock); 476 passed, 1 skipped (workspace).**
+  `TestNormalizedPayloadImmutability`: 25) covering frozen telemetry dataclass
+  immutability, zero-token ZeroDivisionError guard, negative savings clamp,
+  payload hash derivation, YAML config loading, all three rule scopes, all three
+  policy actions, global ceiling enforcement, regex boot-time compilation with
+  `AirlockConfigurationError` on malformed patterns, pre-sieve metric skip guard,
+  post-sieve `evaluate_post_sieve()` deny/warn evaluation, `PolicyRule.fields` tuple
+  immutability, prose tax threshold warning lifecycle, deep payload immutability
+  (`tuple` + `MappingProxyType`), receipt metadata invariants, cryptographic
+  verifiability, non-fatal ledger write failure, transport-neutral normalisation
+  (OpenAI, Anthropic, raw), deny/warn/allow lifecycle correctness, and full async
+  `AirlockBoundary.process()` transaction lifecycle end-to-end.
+  **73 passed, 0 failed (airlock); 483 passed, 1 skipped (workspace).**
 
 ---
 

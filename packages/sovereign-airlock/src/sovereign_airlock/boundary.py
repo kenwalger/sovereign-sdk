@@ -106,10 +106,12 @@ class AirlockBoundary:
            and no sieve or ledger operation is performed.
         2. Pass the combined content through :func:`~sovereign_sieve.sieve_with_metrics`
            to produce the Prose-Tax-minimised sieved content and token metrics.
-        3. Assemble an :class:`~sovereign_airlock.telemetry.AirlockTelemetry` record from
-           the sieve output.  Check the ``prose_tax_warning_threshold``; if savings fall
-           below the configured threshold a non-fatal warning is appended to
-           ``verdict.warnings`` before evidence generation.
+        3. Invoke :meth:`~sovereign_airlock.policy.PolicyEngine.evaluate_post_sieve` with
+           the sieve telemetry.  Post-sieve ``sieved_tokens`` and ``tax_savings_percentage``
+           telemetry rules are evaluated against actual values; a ``deny`` outcome raises
+           :exc:`~sovereign_airlock.exception.AirlockPolicyViolation`.  The
+           ``prose_tax_warning_threshold`` check is also applied here; breaches are
+           appended as non-fatal warnings.
         4. Attempt evidence recording via :class:`~sovereign_airlock.receipt.ReceiptBuilder`.
            Ledger write failure is non-fatal: a warning is emitted and the result is
            returned with the signed receipt intact.  Signing failure is logged and the
@@ -136,10 +138,11 @@ class AirlockBoundary:
             sieve_output, raw_content
         )
 
-        # Post-sieve prose tax threshold check (non-fatal, appended to policy warnings)
-        prose_tax_warnings = self._policy.check_prose_tax_threshold(telemetry)
-        if prose_tax_warnings:
-            verdict.warnings.extend(prose_tax_warnings)
+        # Post-sieve: evaluate telemetry rules requiring actual sieve output
+        post_verdict = self._policy.evaluate_post_sieve(telemetry)
+        if not post_verdict.allowed:
+            raise AirlockPolicyViolation("; ".join(post_verdict.violations))
+        verdict.warnings.extend(post_verdict.warnings)
 
         # Component D: Evidence generation — non-fatal on any failure
         receipt: ForensicReceipt | None = None

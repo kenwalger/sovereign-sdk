@@ -255,6 +255,99 @@ class TestTelemetryScopeEvaluation:
         verdict = engine.evaluate(payload, telemetry=telemetry)
         assert not any("excessive_context" in w for w in verdict.warnings)
 
+    def test_sieved_tokens_rule_skipped_when_telemetry_absent(self, tmp_path: Path) -> None:
+        """With telemetry=None, a sieved_tokens rule is silently skipped, not proxied."""
+        config = {
+            "version": "1.0",
+            "global": {},
+            "rules": [
+                {
+                    "name": "tight_sieved_limit",
+                    "scope": "telemetry",
+                    "metric": "sieved_tokens",
+                    "threshold": 10,
+                    "action": "warn",
+                }
+            ],
+        }
+        engine = PolicyEngine(_write_policy(tmp_path, config))
+        payload = NormalizedPayload(
+            source="raw",
+            content=["payload with many tokens"],
+            metadata={},
+            tools=[],
+            token_estimate=5000,
+        )
+        verdict = engine.evaluate(payload, telemetry=None)
+        assert not any("tight_sieved_limit" in w for w in verdict.warnings)
+
+    def test_tax_savings_rule_skipped_when_telemetry_absent(self, tmp_path: Path) -> None:
+        """With telemetry=None, a tax_savings_percentage rule is silently skipped."""
+        config = {
+            "version": "1.0",
+            "global": {},
+            "rules": [
+                {
+                    "name": "low_savings",
+                    "scope": "telemetry",
+                    "metric": "tax_savings_percentage",
+                    "threshold": 5.0,
+                    "action": "warn",
+                }
+            ],
+        }
+        engine = PolicyEngine(_write_policy(tmp_path, config))
+        payload = NormalizedPayload(
+            source="raw",
+            content=["content"],
+            metadata={},
+            tools=[],
+            token_estimate=500,
+        )
+        verdict = engine.evaluate(payload, telemetry=None)
+        assert not any("low_savings" in w for w in verdict.warnings)
+
+    def test_evaluate_post_sieve_fires_sieved_tokens_warn_rule(self, tmp_path: Path) -> None:
+        """evaluate_post_sieve() fires a sieved_tokens rule against actual post-sieve telemetry."""
+        config = {
+            "version": "1.0",
+            "global": {},
+            "rules": [
+                {
+                    "name": "post_sieve_cap",
+                    "scope": "telemetry",
+                    "metric": "sieved_tokens",
+                    "threshold": 50,
+                    "action": "warn",
+                }
+            ],
+        }
+        engine = PolicyEngine(_write_policy(tmp_path, config))
+        telemetry = _make_telemetry(raw_tokens=200, sieved_tokens=100)
+        verdict = engine.evaluate_post_sieve(telemetry)
+        assert any("post_sieve_cap" in w for w in verdict.warnings)
+
+    def test_evaluate_post_sieve_deny_rule_returns_violation(self, tmp_path: Path) -> None:
+        """evaluate_post_sieve() deny rule sets allowed=False when threshold is exceeded."""
+        config = {
+            "version": "1.0",
+            "global": {},
+            "rules": [
+                {
+                    "name": "sieved_hard_cap",
+                    "scope": "telemetry",
+                    "metric": "sieved_tokens",
+                    "threshold": 50,
+                    "action": "deny",
+                }
+            ],
+        }
+        engine = PolicyEngine(_write_policy(tmp_path, config))
+        telemetry = _make_telemetry(raw_tokens=200, sieved_tokens=100)
+        verdict = engine.evaluate_post_sieve(telemetry)
+        assert verdict.allowed is False
+        assert any("sieved_hard_cap" in v for v in verdict.violations)
+
     def test_falls_back_to_token_estimate_when_telemetry_absent(self, tmp_path: Path) -> None:
         """With telemetry=None, raw scope falls back to payload.token_estimate."""
         config = {
@@ -329,3 +422,24 @@ class TestGlobalCeiling:
         )
         verdict = engine.evaluate(payload)
         assert verdict.allowed is True
+
+    def test_policy_rule_fields_is_immutable_tuple(self, tmp_path: Path) -> None:
+        """PolicyRule.fields is stored as an immutable tuple, not a mutable list."""
+        config = {
+            "version": "1.0",
+            "global": {},
+            "rules": [
+                {
+                    "name": "field_rule",
+                    "scope": "fields",
+                    "fields": ["messages.content", "tools.description"],
+                    "pattern": "secret",
+                    "action": "deny",
+                }
+            ],
+        }
+        engine = PolicyEngine(_write_policy(tmp_path, config))
+        rule = engine._rules[0]
+        assert isinstance(rule.fields, tuple)
+        with pytest.raises(AttributeError):
+            rule.fields.append("mutation")  # type: ignore[attr-defined]

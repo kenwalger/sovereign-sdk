@@ -61,8 +61,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     on malformed, structurally invalid, or regex-invalid configuration.  All regex
     patterns pre-compiled via `re.compile()` at init time; malformed patterns raise
     `AirlockConfigurationError` immediately rather than deferring to a runtime
-    `re.error`.  `check_prose_tax_threshold(telemetry)` evaluates post-sieve savings
-    against the configured fractional threshold and returns non-fatal warning messages.
+    `re.error`.  `PolicyRule.fields` stored as `tuple[str, ...]` (immutable; previously
+    `list[str]`).  `_POST_SIEVE_METRICS` frozenset (`sieved_tokens`,
+    `tax_savings_percentage`) guards `_evaluate_telemetry`: when `telemetry=None`,
+    post-sieve metrics are skipped rather than proxied via `payload.token_estimate`.
+    `evaluate_post_sieve(telemetry)` evaluates post-sieve-only telemetry rules and the
+    prose tax threshold; returns a `PolicyVerdict` that may carry `deny` violations.
 
   - **`NormalizedPayload` deep immutability** (`payload.py`): `__post_init__` converts
     `content` to `tuple[str, ...]`, `metadata` to `types.MappingProxyType[str, Any]`,
@@ -79,15 +83,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **`AirlockBoundary(policy_path, signing_key, ledger)`** (`boundary.py`):
     Async orchestrator implementing the four-component transaction lifecycle.  `deny`
     verdict raises `AirlockPolicyViolation` before any sieve or ledger operation.
-    Post-sieve prose tax threshold check via `PolicyEngine.check_prose_tax_threshold()`;
-    threshold warnings appended to `verdict.warnings` before evidence generation and
+    Post-sieve evaluation via `PolicyEngine.evaluate_post_sieve(telemetry)`: deny verdicts
+    raise `AirlockPolicyViolation`; warn verdicts are appended to `verdict.warnings` and
     sealed in receipt metadata.
 
-  - **66-case test suite** across `test_policy.py` (22), `test_telemetry.py` (10),
-    `test_receipts.py` (10), and `test_boundary.py` (24).  Round 1 PR remediation adds
+  - **73-case test suite** across `test_policy.py` (27), `test_telemetry.py` (11),
+    `test_receipts.py` (10), and `test_boundary.py` (25).  Round 1 PR remediation adds
     7 cases: `test_raises_on_malformed_regex_pattern` (`TestPolicyLoading`),
     `TestProseTaxThreshold` (2 cases), and `TestNormalizedPayloadImmutability` (4 cases).
-    **66 passed, 0 failed (airlock); 476 passed, 1 skipped (workspace).**
+    Round 3 PR remediation adds 7 cases: `test_sieved_tokens_rule_skipped_when_telemetry_absent`,
+    `test_tax_savings_rule_skipped_when_telemetry_absent`, `test_evaluate_post_sieve_fires_sieved_tokens_warn_rule`,
+    `test_evaluate_post_sieve_deny_rule_returns_violation`, `test_policy_rule_fields_is_immutable_tuple`,
+    `test_negative_savings_clamped_to_zero`, and `test_post_sieve_telemetry_deny_raises_policy_violation`.
+    **73 passed, 0 failed (airlock); 483 passed, 1 skipped (workspace).**
+
+  - **`AirlockTelemetry.tax_savings_percentage` clamp** (`telemetry.py`): `max(0.0, ...)`
+    applied to the savings calculation in `from_sieve_output()`.  Content expansion
+    (sieved tokens exceeding raw tokens) previously produced a negative percentage;
+    now clamped to `0.0`.
 
 - **Phase 9.5 — `sovereign-edge` sensor ingestion bridge** (new workspace member
   `packages/sovereign-edge/`): Introduces the middleware pipeline that intercepts
