@@ -133,6 +133,8 @@ class PolicyEngine:
         for rule_def in raw.get("rules") or []:
             try:
                 self._rules.append(self._parse_rule(rule_def))
+            except AirlockConfigurationError:
+                raise
             except (KeyError, TypeError, ValueError) as exc:
                 raise AirlockConfigurationError(
                     f"Invalid rule definition {rule_def!r}: {exc}"

@@ -131,7 +131,10 @@ class AirlockBoundary:
         # Component B: Policy evaluation (pre-sieve)
         verdict: PolicyVerdict = self._policy.evaluate(payload)
         if not verdict.allowed:
-            raise AirlockPolicyViolation("; ".join(verdict.violations))
+            raise AirlockPolicyViolation(
+                "; ".join(verdict.violations),
+                warnings=verdict.warnings,
+            )
 
         # Component C: Sieve convergence pass (offloaded to thread pool — CPU-bound)
         raw_content: str = " ".join(payload.content)
@@ -143,7 +146,11 @@ class AirlockBoundary:
         # Post-sieve: evaluate telemetry rules requiring actual sieve output
         post_verdict = self._policy.evaluate_post_sieve(telemetry)
         if not post_verdict.allowed:
-            raise AirlockPolicyViolation("; ".join(post_verdict.violations))
+            combined_warnings = list(verdict.warnings) + list(post_verdict.warnings)
+            raise AirlockPolicyViolation(
+                "; ".join(post_verdict.violations),
+                warnings=combined_warnings,
+            )
         verdict.warnings.extend(post_verdict.warnings)
 
         # Component D: Evidence generation — non-fatal on any failure

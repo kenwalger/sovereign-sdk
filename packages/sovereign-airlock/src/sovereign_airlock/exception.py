@@ -10,7 +10,24 @@ class AirlockPolicyViolation(RuntimeError):
 
     :param message: Human-readable description of the policy rules that were violated.
     :type message: str
+    :param warnings: Non-fatal ``warn``-action messages accumulated prior to the deny,
+        preserved here for caller diagnostics.  Empty list when none were collected.
+    :type warnings: list[str] | None
     """
+
+    warnings: list[str]
+
+    def __init__(self, message: str, warnings: list[str] | None = None) -> None:
+        """
+        Initialise the violation exception with violation message and optional prior warnings.
+
+        :param message: Human-readable description of the policy rules that were violated.
+        :type message: str
+        :param warnings: Non-fatal ``warn``-action messages accumulated before the deny verdict.
+        :type warnings: list[str] | None
+        """
+        super().__init__(message)
+        self.warnings = list(warnings) if warnings is not None else []
 
 
 class AirlockConfigurationError(ValueError):

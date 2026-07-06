@@ -257,6 +257,7 @@ try:
     # result.policy_warnings                         — non-fatal warn-rule messages
 except AirlockPolicyViolation as exc:
     # Payload blocked by a deny rule — do not transmit
+    # exc.warnings carries any pre-sieve warn-rule messages accumulated before the deny
     raise
 ```
 

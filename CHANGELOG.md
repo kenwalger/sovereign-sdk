@@ -33,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sovereign-sdk-runtime`, and `sovereign-sdk-edge` internal dependency declarations
   updated to reference the new `sovereign-sdk-*` distribution names at `>=1.3.0`.
 
-## [Unreleased]
+## [1.4.0] — 2026-07-05
 
 ### Added
 
@@ -134,6 +134,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `max(0.0, min(100.0, round(...)))` applied to the savings calculation in
     `from_sieve_output()`.  Content expansion (sieved > raw) clamps to `0.0`; impossible
     inversion (negative `optimized_token_count`) clamps to `100.0`.
+
+  - **`AirlockPolicyViolation.warnings` diagnostic attribute** (`exception.py`,
+    `boundary.py`): `AirlockPolicyViolation.__init__` now accepts an optional
+    `warnings: list[str] | None` parameter; accumulated pre-sieve `warn`-action messages
+    are stored as `self.warnings: list[str]`.  When `AirlockBoundary.process()` raises
+    `AirlockPolicyViolation` on a post-sieve deny verdict, it passes `verdict.warnings`
+    so callers can programmatically inspect pre-sieve diagnostic context via `exc.warnings`
+    without losing it at the exception boundary.
+
+  - **`AirlockConfigurationError` de-duplication** (`policy.py`): Since
+    `AirlockConfigurationError` extends `ValueError`, clean validation errors raised inside
+    `_parse_rule` were being caught by the broad `except (KeyError, TypeError, ValueError)`
+    handler in `PolicyEngine.__init__` and re-wrapped with a redundant "Invalid rule
+    definition" prefix.  An explicit `except AirlockConfigurationError: raise` guard now
+    lets those errors surface natively with their original message intact.
+
+  - **SPDX license metadata** (`pyproject.toml`): `project.license` migrated from
+    deprecated TOML table form (`{ text = "MIT" }`) to SPDX string literal (`"MIT"`).
+    Deprecated `License :: OSI Approved :: MIT License` classifier removed.  Eliminates
+    two `SetuptoolsDeprecationWarning` emissions that become hard build errors after
+    2027-02-18.
+
+  - **PEP 517 build validation**: `uv build --package sovereign-sdk-airlock` clean-room
+    pass produces `sovereign_sdk_airlock-1.4.0.tar.gz` and
+    `sovereign_sdk_airlock-1.4.0-py3-none-any.whl` with no editable-path or direct-url
+    leakage.  Wheel METADATA confirmed: all `Requires-Dist` entries, `Description-Content-Type:
+    text/markdown`, and full `README.md` long-description body (3,401 bytes, UTF-8).
 
 - **Phase 9.5 — `sovereign-edge` sensor ingestion bridge** (new workspace member
   `packages/sovereign-edge/`): Introduces the middleware pipeline that intercepts

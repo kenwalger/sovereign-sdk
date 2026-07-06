@@ -129,6 +129,17 @@ class TestAirlockBoundaryPolicyDenial:
         # Chain is intact but empty — no receipt was committed
         assert mem_ledger.verify_ledger_integrity(expected_tip_hash=None)
 
+    async def test_pre_sieve_deny_preserves_accumulated_warnings(
+        self, airlock: AirlockBoundary
+    ) -> None:
+        """Pre-sieve deny carries concurrent warn-rule messages via exc.warnings."""
+        payload = normalize_raw(
+            "internal.sovereign.local config: -----BEGIN PRIVATE KEY-----"
+        )
+        with pytest.raises(AirlockPolicyViolation) as exc_info:
+            await airlock.process(payload)
+        assert any("guard_internal_namespaces" in w for w in exc_info.value.warnings)
+
     async def test_post_sieve_telemetry_deny_raises_policy_violation(
         self, tmp_path: Path, sovereign_secret: str
     ) -> None:
@@ -155,6 +166,48 @@ class TestAirlockBoundaryPolicyDenial:
         payload = normalize_raw("This payload has more than one sieved token.")
         with pytest.raises(AirlockPolicyViolation, match="sieved_hard_cap"):
             await boundary.process(payload)
+
+    async def test_post_sieve_deny_carries_combined_pre_and_post_sieve_warnings(
+        self, tmp_path: Path, sovereign_secret: str
+    ) -> None:
+        """exc.warnings merges pre-sieve warn messages and post-sieve warn messages on a post-sieve deny."""
+        config = {
+            "version": "1.0",
+            "global": {"prose_tax_warning_threshold": 0.35},
+            "rules": [
+                {
+                    "name": "guard_internal_namespaces",
+                    "scope": "fields",
+                    "fields": ["messages.content", "input", "prompt"],
+                    "pattern": r"internal\.sovereign\.local",
+                    "action": "warn",
+                },
+                {
+                    "name": "sieved_hard_cap",
+                    "scope": "telemetry",
+                    "metric": "sieved_tokens",
+                    "threshold": 1,
+                    "action": "deny",
+                },
+            ],
+        }
+        policy_p = tmp_path / "policy.yaml"
+        policy_p.write_text(yaml.dump(config), encoding="utf-8")
+        boundary = AirlockBoundary(
+            policy_path=policy_p,
+            signing_key=str(tmp_path / "keys"),
+        )
+        # internal.sovereign.local → pre-sieve guard_internal_namespaces warn
+        # SQL content → ~0% prose-tax savings → post-sieve threshold warn
+        # sieved_tokens > 1 → post-sieve sieved_hard_cap deny
+        payload = normalize_raw(
+            "internal.sovereign.local SELECT id FROM sensor_data WHERE node_id = 42"
+        )
+        with pytest.raises(AirlockPolicyViolation) as exc_info:
+            await boundary.process(payload)
+        exc = exc_info.value
+        assert any("guard_internal_namespaces" in w for w in exc.warnings)
+        assert any("threshold" in w.lower() for w in exc.warnings)
 
 
 # ---------------------------------------------------------------------------

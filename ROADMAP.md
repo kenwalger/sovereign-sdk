@@ -1300,11 +1300,22 @@ result = await boundary.process(normalize_openai(request))
   `sieved_content`, `telemetry`, `receipt`, and `policy_warnings`
 * [x] `AirlockPolicyViolation(RuntimeError)` and `AirlockConfigurationError(ValueError)`
   (`exception.py`) — domain exceptions for deny-action enforcement and configuration
-  invariant violations respectively
+  invariant violations respectively; `AirlockPolicyViolation.__init__` accepts optional
+  `warnings: list[str] | None` (default `[]`) stored as `self.warnings`, preserving
+  pre-sieve `warn`-action diagnostic context when a post-sieve deny fires
+* [x] `AirlockConfigurationError` de-duplication (`policy.py`) — explicit
+  `except AirlockConfigurationError: raise` guard in `PolicyEngine.__init__` prevents
+  clean boot-time validation errors raised by `_parse_rule` from being caught and
+  re-wrapped by the broad `except (KeyError, TypeError, ValueError)` handler (since
+  `AirlockConfigurationError` extends `ValueError`)
 * [x] `packages/sovereign-airlock/pyproject.toml` — workspace member at version
   `1.4.0`; runtime dependencies: `sovereign-sdk-core>=1.3.0`,
-  `sovereign-sdk-ledger>=1.3.0`, `sovereign-sdk-sieve>=1.3.0`, `pyyaml>=6.0`
-* [x] 83-case test suite across four files (`TestAirlockTelemetry`: 12;
+  `sovereign-sdk-ledger>=1.3.0`, `sovereign-sdk-sieve>=1.3.0`, `pyyaml>=6.0`;
+  `license` migrated from deprecated TOML table form to SPDX string literal (`"MIT"`);
+  deprecated `License :: OSI Approved :: MIT License` classifier removed; PEP 517 build
+  validated via `uv build --package sovereign-sdk-airlock` — clean sdist and
+  pure-Python wheel produced with no editable-path or direct-url leakage
+* [x] 84-case test suite across four files (`TestAirlockTelemetry`: 12;
   `TestPolicyLoading` + `TestRawScopeEvaluation` + `TestFieldsScopeEvaluation` +
   `TestTelemetryScopeEvaluation` + `TestGlobalCeiling`: 35; `TestReceiptBuilder`: 11;
   `TestAirlockBoundaryHappyPath` + `TestAirlockBoundaryPolicyDenial` +
