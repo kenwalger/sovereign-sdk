@@ -62,19 +62,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     patterns pre-compiled via `re.compile()` at init time; malformed patterns raise
     `AirlockConfigurationError` immediately rather than deferring to a runtime
     `re.error`.  Scope-specific required field enforcement in `_parse_rule`: `raw` scope
-    requires `pattern`; `fields` scope requires a non-empty `fields` list; `telemetry`
-    scope requires `metric` — all missing cases raise `AirlockConfigurationError` at boot
-    time rather than silently becoming runtime no-ops.  `_VALID_METRICS` frozenset
-    (`raw_tokens`, `sieved_tokens`, `tax_savings_percentage`) validated in `_parse_rule`
-    at boot time; unrecognised metric names raise `AirlockConfigurationError` immediately.
-    `prose_tax_warning_threshold` validated to `[0.0, 1.0]` in `__init__`; values outside
-    this range raise `AirlockConfigurationError`.  `PolicyRule.fields` stored as
-    `tuple[str, ...]` (immutable; previously `list[str]`).  `_POST_SIEVE_METRICS` frozenset
-    (`sieved_tokens`, `tax_savings_percentage`) guards `_evaluate_telemetry`: when
-    `telemetry=None`, post-sieve metrics are skipped rather than proxied via
-    `payload.token_estimate`.  `evaluate_post_sieve(telemetry)` evaluates post-sieve-only
-    telemetry rules and the prose tax threshold; returns a `PolicyVerdict` that may carry
-    `deny` violations.
+    requires `pattern`; `fields` scope requires a non-empty `fields` list and a `pattern`;
+    `telemetry` scope requires both `metric` and `threshold` — all missing cases raise
+    `AirlockConfigurationError` at boot rather than silently becoming runtime no-ops.
+    `_VALID_METRICS` frozenset (`raw_tokens`, `sieved_tokens`, `tax_savings_percentage`)
+    validated in `_parse_rule` at boot time; unrecognised metric names raise
+    `AirlockConfigurationError` immediately.  `prose_tax_warning_threshold` validated to
+    `[0.0, 1.0]` in `__init__`; values outside this range raise `AirlockConfigurationError`.
+    `PolicyRule.fields` stored as `tuple[str, ...]` (immutable; previously `list[str]`).
+    `_POST_SIEVE_METRICS` frozenset (`sieved_tokens`, `tax_savings_percentage`) guards
+    `_evaluate_telemetry`: when `telemetry=None`, post-sieve metrics are skipped rather
+    than proxied via `payload.token_estimate`.  `evaluate_post_sieve(telemetry)` evaluates
+    post-sieve-only telemetry rules and the prose tax threshold; returns a `PolicyVerdict`
+    that may carry `deny` violations.  `_extract_field` scoped: `messages.content`,
+    `input`, `prompt` map to payload content; `messages.<other>` (e.g. `messages.role`,
+    `messages.tool_calls`) return `""` to prevent unintended content leakage through
+    broad `messages.*` patterns.
 
   - **`ReceiptBuilder.build_and_commit`** (`receipt.py`): Receipt `metadata` now includes
     `payload_hash` bound to `telemetry.payload_hash` (SHA-256 of the pre-sieve raw content).
@@ -100,7 +103,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     raise `AirlockPolicyViolation`; warn verdicts are appended to `verdict.warnings` and
     sealed in receipt metadata.
 
-  - **80-case test suite** across `test_policy.py` (32), `test_telemetry.py` (12),
+  - **83-case test suite** across `test_policy.py` (35), `test_telemetry.py` (12),
     `test_receipts.py` (11), and `test_boundary.py` (25).  Round 1 PR remediation adds
     7 cases: `test_raises_on_malformed_regex_pattern` (`TestPolicyLoading`),
     `TestProseTaxThreshold` (2 cases), and `TestNormalizedPayloadImmutability` (4 cases).
@@ -110,10 +113,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `test_negative_savings_clamped_to_zero`, and `test_post_sieve_telemetry_deny_raises_policy_violation`.
     Round 4 PR remediation adds 3 cases: `test_raises_on_unknown_telemetry_metric`,
     `test_raises_on_out_of_bounds_prose_tax_threshold`, and `test_over_optimized_savings_clamped_to_hundred`.
-    Round 5 (final) adds 4 cases: `test_raises_on_raw_rule_without_pattern`,
+    Round 5 adds 4 cases: `test_raises_on_raw_rule_without_pattern`,
     `test_raises_on_fields_rule_with_empty_fields`, `test_raises_on_telemetry_rule_without_metric`,
     and `test_receipt_metadata_contains_payload_hash`.
-    **80 passed, 0 failed (airlock); 490 passed, 1 skipped (workspace).**
+    Round 6 (final polish) adds 3 cases: `test_raises_on_telemetry_rule_without_threshold`,
+    `test_raises_on_fields_rule_without_pattern`, and `test_messages_role_does_not_leak_content`.
+    **83 passed, 0 failed (airlock); 493 passed, 1 skipped (workspace).**
 
   - **`AirlockTelemetry.tax_savings_percentage` full clamp** (`telemetry.py`):
     `max(0.0, min(100.0, round(...)))` applied to the savings calculation in

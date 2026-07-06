@@ -44,7 +44,7 @@ async def main():
     result = await boundary.process(normalize_openai(request))
     print(result.sieved_content)
     print(result.telemetry.tax_savings_percentage, "% Prose Tax savings")
-    print(result.receipt["payload_hash"])
+    print(result.receipt["metadata"]["payload_hash"])  # raw pre-sieve content hash
 
 asyncio.run(main())
 ```

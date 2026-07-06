@@ -250,10 +250,11 @@ boundary = AirlockBoundary(
 
 try:
     result = await boundary.process(normalize_openai(request))
-    # result.sieved_content         — minimised payload ready for transmission
-    # result.telemetry.payload_hash — SHA-256 of the raw pre-sieve content
-    # result.receipt["signature"]   — Ed25519 boundary crossing evidence
-    # result.policy_warnings        — non-fatal warn-rule messages
+    # result.sieved_content                          — minimised payload ready for transmission
+    # result.telemetry.payload_hash                  — SHA-256 of the raw pre-sieve content
+    # result.receipt["metadata"]["payload_hash"]     — same hash sealed in the signed receipt
+    # result.receipt["signature"]                    — Ed25519 boundary crossing evidence
+    # result.policy_warnings                         — non-fatal warn-rule messages
 except AirlockPolicyViolation as exc:
     # Payload blocked by a deny rule — do not transmit
     raise

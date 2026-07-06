@@ -1245,10 +1245,11 @@ boundary = AirlockBoundary(
 )
 
 result = await boundary.process(normalize_openai(request))
-# result.sieved_content         — Prose-Tax-minimised payload for transmission
-# result.telemetry.payload_hash — SHA-256 of the raw pre-sieve content
-# result.receipt["signature"]   — Ed25519 boundary crossing evidence
-# result.policy_warnings        — non-fatal warn-rule messages
+# result.sieved_content                          — Prose-Tax-minimised payload for transmission
+# result.telemetry.payload_hash                  — SHA-256 of the raw pre-sieve content
+# result.receipt["metadata"]["payload_hash"]     — same hash sealed in the signed receipt
+# result.receipt["signature"]                    — Ed25519 boundary crossing evidence
+# result.policy_warnings                         — non-fatal warn-rule messages
 ```
 
 **Delivered:**
@@ -1268,9 +1269,12 @@ result = await boundary.process(normalize_openai(request))
   `warn`, `deny`; global `max_token_ceiling` check; `AirlockConfigurationError` on
   invalid YAML, unrecognised scope/action values, unrecognised telemetry metric names
   (validated at boot against `_VALID_METRICS`), `prose_tax_warning_threshold` outside
-  `[0.0, 1.0]`, or missing scope-required fields (`pattern` for `raw`; non-empty
-  `fields` for `fields`; `metric` for `telemetry`) — structurally invalid rules fail
-  loudly at boot rather than silently becoming runtime no-ops; `_POST_SIEVE_METRICS`
+  `[0.0, 1.0]`, or missing scope-required fields (`pattern` for `raw`; non-empty `fields`
+  and `pattern` for `fields`; `metric` and `threshold` for `telemetry`) — all structurally
+  invalid rules fail loudly at boot rather than silently becoming runtime no-ops;
+  `_extract_field` scoped so `messages.content`/`input`/`prompt` map to payload content
+  while `messages.role`, `messages.tool_calls`, and other `messages.<sub>` paths return
+  `""` (no unintended content leakage through broad patterns); `_POST_SIEVE_METRICS`
   frozenset gates pre-sieve evaluation so `sieved_tokens` and `tax_savings_percentage`
   rules are never proxied against `token_estimate`; `evaluate_post_sieve(telemetry)`
   evaluates those metrics against actual sieve output and applies the prose tax threshold
@@ -1299,9 +1303,9 @@ result = await boundary.process(normalize_openai(request))
 * [x] `packages/sovereign-airlock/pyproject.toml` — workspace member at version
   `1.4.0`; runtime dependencies: `sovereign-sdk-core>=1.3.0`,
   `sovereign-sdk-ledger>=1.3.0`, `sovereign-sdk-sieve>=1.3.0`, `pyyaml>=6.0`
-* [x] 80-case test suite across four files (`TestAirlockTelemetry`: 12;
+* [x] 83-case test suite across four files (`TestAirlockTelemetry`: 12;
   `TestPolicyLoading` + `TestRawScopeEvaluation` + `TestFieldsScopeEvaluation` +
-  `TestTelemetryScopeEvaluation` + `TestGlobalCeiling`: 32; `TestReceiptBuilder`: 11;
+  `TestTelemetryScopeEvaluation` + `TestGlobalCeiling`: 35; `TestReceiptBuilder`: 11;
   `TestAirlockBoundaryHappyPath` + `TestAirlockBoundaryPolicyDenial` +
   `TestAirlockBoundaryPolicyWarning` + `TestAirlockBoundaryTransportNeutrality` +
   `TestAirlockBoundaryResiliency` + `TestProseTaxThreshold` +
@@ -1309,16 +1313,17 @@ result = await boundary.process(normalize_openai(request))
   immutability, zero-token ZeroDivisionError guard, full `[0.0, 100.0]` savings clamp,
   payload hash derivation, YAML config loading, all three rule scopes, all three
   policy actions, global ceiling enforcement, scope-specific required-field boot validation
-  (missing `pattern`/`fields`/`metric` raise `AirlockConfigurationError`), regex
-  boot-time compilation, telemetry metric name validation, `prose_tax_warning_threshold`
-  range `[0.0, 1.0]`, pre-sieve metric skip guard, post-sieve `evaluate_post_sieve()`
-  deny/warn evaluation, `PolicyRule.fields` tuple immutability, receipt metadata
-  `payload_hash` provenance binding, prose tax threshold warning lifecycle, deep payload
-  immutability (`tuple` + `MappingProxyType`), receipt metadata invariants, cryptographic
-  verifiability, non-fatal ledger write failure, transport-neutral normalisation
-  (OpenAI, Anthropic, raw), deny/warn/allow lifecycle correctness, and full async
-  `AirlockBoundary.process()` transaction lifecycle end-to-end.
-  **80 passed, 0 failed (airlock); 490 passed, 1 skipped (workspace).**
+  (`pattern`/`fields`/`metric`/`threshold` missing raises `AirlockConfigurationError`),
+  regex boot-time compilation, telemetry metric name validation, `prose_tax_warning_threshold`
+  range `[0.0, 1.0]`, `_extract_field` sub-field specificity (`messages.role` → `""`),
+  pre-sieve metric skip guard, post-sieve `evaluate_post_sieve()` deny/warn evaluation,
+  `PolicyRule.fields` tuple immutability, receipt metadata `payload_hash` provenance
+  binding, prose tax threshold warning lifecycle, deep payload immutability
+  (`tuple` + `MappingProxyType`), receipt metadata invariants, cryptographic verifiability,
+  non-fatal ledger write failure, transport-neutral normalisation (OpenAI, Anthropic, raw),
+  deny/warn/allow lifecycle correctness, and full async `AirlockBoundary.process()`
+  transaction lifecycle end-to-end.
+  **83 passed, 0 failed (airlock); 493 passed, 1 skipped (workspace).**
 
 ---
 

@@ -186,6 +186,7 @@ class PolicyEngine:
             )
 
         raw_metric: str | None = rule_def.get("metric")
+        raw_threshold = rule_def.get("threshold")
         if scope == "telemetry":
             if raw_metric is None:
                 raise AirlockConfigurationError(
@@ -196,11 +197,19 @@ class PolicyEngine:
                     f"Unknown telemetry metric '{raw_metric}' in rule '{name}'; "
                     f"expected one of {sorted(_VALID_METRICS)}."
                 )
+            if raw_threshold is None:
+                raise AirlockConfigurationError(
+                    f"Rule '{name}' has scope 'telemetry' but is missing required 'threshold' key."
+                )
 
         raw_fields: list[str] = list(rule_def.get("fields") or [])
         if scope == "fields" and not raw_fields:
             raise AirlockConfigurationError(
                 f"Rule '{name}' has scope 'fields' but is missing or has empty 'fields' key."
+            )
+        if scope == "fields" and raw_pattern is None:
+            raise AirlockConfigurationError(
+                f"Rule '{name}' has scope 'fields' but is missing required 'pattern' key."
             )
 
         return PolicyRule(
@@ -210,7 +219,7 @@ class PolicyEngine:
             pattern=compiled,
             fields=tuple(raw_fields),
             metric=raw_metric,
-            threshold=rule_def.get("threshold"),
+            threshold=raw_threshold,
         )
 
     # ------------------------------------------------------------------
@@ -395,7 +404,11 @@ class PolicyEngine:
         """Extract a dot-notation field value from a :class:`NormalizedPayload`.
 
         Supported paths and their mapped sources:
-        - ``messages.*``, ``input``, ``prompt`` → ``" ".join(payload.content)``
+
+        - ``messages.content``, ``input``, ``prompt`` → ``" ".join(payload.content)``
+        - ``messages.<other>`` (e.g. ``messages.role``, ``messages.tool_calls``) → ``""``
+          These sub-fields have no proxy in the provider-neutral surface; returning
+          ``""`` prevents unintended content leakage from a broad ``messages.*`` pattern.
         - ``tools.<sub_field>`` → concatenated tool ``sub_field`` values
         - Anything else → string representation of ``payload.metadata[path]``
 
@@ -409,8 +422,14 @@ class PolicyEngine:
         parts = field_path.split(".", 1)
         top = parts[0]
 
-        if top in ("messages", "input", "prompt"):
+        if top in ("input", "prompt"):
             return " ".join(payload.content)
+
+        if top == "messages":
+            sub = parts[1] if len(parts) > 1 else "content"
+            if sub == "content":
+                return " ".join(payload.content)
+            return ""
 
         if top == "tools" and len(parts) > 1:
             sub_field = parts[1]

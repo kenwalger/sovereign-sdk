@@ -148,6 +148,40 @@ class TestPolicyLoading:
         with pytest.raises(AirlockConfigurationError, match="incomplete_telemetry"):
             PolicyEngine(_write_policy(tmp_path, config))
 
+    def test_raises_on_telemetry_rule_without_threshold(self, tmp_path: Path) -> None:
+        """A telemetry-scope rule missing 'threshold' raises AirlockConfigurationError at init."""
+        config = {
+            "version": "1.0",
+            "global": {},
+            "rules": [
+                {
+                    "name": "no_threshold_rule",
+                    "scope": "telemetry",
+                    "metric": "raw_tokens",
+                    "action": "warn",
+                }
+            ],
+        }
+        with pytest.raises(AirlockConfigurationError, match="no_threshold_rule"):
+            PolicyEngine(_write_policy(tmp_path, config))
+
+    def test_raises_on_fields_rule_without_pattern(self, tmp_path: Path) -> None:
+        """A fields-scope rule missing 'pattern' raises AirlockConfigurationError at init."""
+        config = {
+            "version": "1.0",
+            "global": {},
+            "rules": [
+                {
+                    "name": "no_pattern_fields_rule",
+                    "scope": "fields",
+                    "fields": ["messages.content"],
+                    "action": "deny",
+                }
+            ],
+        }
+        with pytest.raises(AirlockConfigurationError, match="no_pattern_fields_rule"):
+            PolicyEngine(_write_policy(tmp_path, config))
+
 
 # ---------------------------------------------------------------------------
 # TestRawScopeEvaluation
@@ -250,6 +284,33 @@ class TestFieldsScopeEvaluation:
         )
         verdict = engine.evaluate(payload)
         assert not any("guard_internal_namespaces" in w for w in verdict.warnings)
+
+    def test_messages_role_does_not_leak_content(self, tmp_path: Path) -> None:
+        """A fields rule targeting messages.role returns empty string, not payload content."""
+        config = {
+            "version": "1.0",
+            "global": {},
+            "rules": [
+                {
+                    "name": "role_guard",
+                    "scope": "fields",
+                    "fields": ["messages.role"],
+                    "pattern": "private_signal",
+                    "action": "deny",
+                }
+            ],
+        }
+        engine = PolicyEngine(_write_policy(tmp_path, config))
+        payload = NormalizedPayload(
+            source="raw",
+            content=["private_signal is present in content"],
+            metadata={},
+            tools=[],
+            token_estimate=10,
+        )
+        verdict = engine.evaluate(payload)
+        assert verdict.allowed is True
+        assert not any("role_guard" in v for v in verdict.violations)
 
     def test_match_in_tools_description(self, tmp_path: Path) -> None:
         """Fields rule matches a pattern inside a tool description."""
