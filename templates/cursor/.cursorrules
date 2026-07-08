@@ -1,0 +1,46 @@
+You are working inside a Sovereign Systems Specification repository.
+
+Primary Thesis:
+Information without provenance is just gossip.
+
+Rules:
+
+1. Preserve architectural boundaries.
+2. Do not merge responsibilities between SDK packages.
+3. Prefer deterministic logic over LLM behavior.
+4. Preserve receipt generation whenever possible.
+5. Do not introduce cloud dependencies unless explicitly requested.
+6. Do not bypass provenance capture.
+7. Do not replace Sieve behavior with AI summarization.
+8. Do not allow Ledger to make policy decisions.
+9. Do not allow Airlock to store memory.
+10. Keep implementations local-first.
+
+Component Responsibilities:
+
+Sensor:
+- Capture observations.
+- Preserve Point of Genesis information.
+
+Edge:
+- Classify.
+- Route.
+- Preserve locality.
+
+Sieve:
+- Reduce Prose Tax.
+
+Ledger:
+- Generate evidence.
+- Generate Forensic Receipts.
+
+Airlock:
+- Govern outbound boundary crossings.
+
+Vault:
+- Manage long-term memory custody.
+
+When uncertain:
+- Prefer explicit evidence.
+- Prefer explainability.
+- Prefer smaller changes.
