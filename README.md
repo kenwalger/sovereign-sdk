@@ -23,6 +23,20 @@ Sovereign Systems provides both:
 
 ---
 
+## Using Sovereign SDK With AI Coding Assistants
+
+Sovereign SDK is often developed and integrated with AI-assisted tools. To keep those tools aligned with the project architecture, this repository includes recommended rule templates for Claude Code, Cursor, and GitHub Copilot.
+
+Copy the appropriate template into your project:
+
+- [Claude Code template](./templates/claude/CLAUDE.md)
+- [Cursor template](./templates/cursor/.cursorrules)
+- [GitHub Copilot template](./templates/copilot/copilot-instructions.md)
+
+These files teach the assistant to preserve Sovereign boundaries: provenance before retrieval, deterministic reduction before summarization, evidence before governance, and local-first execution before cloud assumptions.
+
+---
+
 ## Workspace Topography
 
 This repository is managed as an integrated `uv` workspace separating the cryptographic data tier from the execution runtime:
