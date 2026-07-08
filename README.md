@@ -29,7 +29,7 @@ Sovereign SDK is often developed and integrated with AI-assisted tools. To keep 
 
 Copy the appropriate template into your project:
 
-- [Claude Code template](./templates/claude/CLAUDE.md)
+- [Claude Code template](./templates/Claude/CLAUDE.md)
 - [Cursor template](./templates/cursor/.cursorrules)
 - [GitHub Copilot template](./templates/copilot/copilot-instructions.md)
 
