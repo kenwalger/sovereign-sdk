@@ -1,14 +1,10 @@
 # Sovereign Systems SDK
 
-# Sovereign Memory Demo
-
-[![Python Version](https://img.shields.io/badge/python-3.12%2B-378ADD.svg)](https://docs.python.org/3.14/)
-[![Package Manager: uv](https://img.shields.io/badge/managed%20by-uv-261230.svg)](https://github.com/astral-sh/uv)
-[![Paradigm: Local-First](https://img.shields.io/badge/architecture-local--first-378ADD.svg)](https://github.com/kenwalger/sovereign-memory-demo)
-[![Design: Spec Compliant](https://img.shields.io/badge/design-spec%20compliant-1D9E75.svg)](./project_specs/) 
-[![License](https://img.shields.io/github/license/kenwalger/sovereign-memory-demo.svg?color=BA7517)](LICENSE)
-
-Canonical reference implementation of the Sovereign Systems Specification...
+[![PyPI Version](https://img.shields.io/badge/pypi-v1.4.0-378ADD.svg)](https://pypi.org/project/sovereign-sdk-core/)
+[![Format: Wheel](https://img.shields.io/badge/format-wheel-1D9E75.svg)](https://pypi.org/project/sovereign-sdk-core/) 
+[![Type Checking: Mypy](https://img.shields.io/badge/types-mypy%20strict-24292e.svg)](https://mypy-lang.org/) 
+[![SemVer Compliance](https://img.shields.io/badge/versioning-SemVer%202.0.0-BA7517.svg)](https://semver.org/) 
+[![License: MIT](https://img.shields.io/badge/license-MIT-BA7517.svg)](LICENSE)
 
 **High-Integrity Cryptographic Provenance and Inbound Protection Boundaries for Agentic Workflows.**
 
