@@ -1,5 +1,15 @@
 # Sovereign Systems SDK
 
+# Sovereign Memory Demo
+
+[![Python Version](https://img.shields.io/badge/python-3.12%2B-378ADD.svg)](https://docs.python.org/3.14/)
+[![Package Manager: uv](https://img.shields.io/badge/managed%20by-uv-261230.svg)](https://github.com/astral-sh/uv)
+[![Paradigm: Local-First](https://img.shields.io/badge/architecture-local--first-378ADD.svg)](https://github.com/kenwalger/sovereign-memory-demo)
+[![Design: Spec Compliant](https://img.shields.io/badge/design-spec%20compliant-1D9E75.svg)](./project_specs/) 
+[![License](https://img.shields.io/github/license/kenwalger/sovereign-memory-demo.svg?color=BA7517)](LICENSE)
+
+Canonical reference implementation of the Sovereign Systems Specification...
+
 **High-Integrity Cryptographic Provenance and Inbound Protection Boundaries for Agentic Workflows.**
 
 Sovereign Systems is a local-first AI Web Application Firewall (WAF) and compliance gate. It intercepts every inbound payload before it reaches a model or agentic loop, strips high-entropy boilerplate, and seals the result with an Ed25519-signed `ForensicReceipt` that gives enterprise auditors mathematical proof of un-tampered boundary transformation — all running on local silicon with no external service dependency.
@@ -698,4 +708,5 @@ uv run sovereign-node --tool analyze
 | `"execution_success": true` | The tool completed without raising an exception; the receipt is audit-clean. |
 
 ---
+
 (c) 2026 - Ken W. Alger
